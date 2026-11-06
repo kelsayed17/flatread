@@ -1,0 +1,48 @@
+[project]
+name = "flatread"
+version = "0.1.0"
+description = "Read the flat files publishers serve (delimited text, sheets, archives, PDF text) exactly, or fail loudly."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Khaled Elsayed" }]
+requires-python = ">=3.14"
+keywords = ["csv", "delimited", "parsing", "polars", "msgspec", "excel", "zip", "pdf", "data-quality"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Text Processing",
+    "Typing :: Typed",
+]
+# Each floor is the oldest version the suite is known to pass on.
+dependencies = [
+    "msgspec>=0.22",  # the row and file structs a declaration is made of
+    "polars>=2.0",  # the frames every read builds
+]
+
+[project.optional-dependencies]
+excel = ["fastexcel>=0.21.0"]  # flatread.workbooks: Excel sheets, through calamine
+pdf = ["pdfminer-six>=20260107"]  # flatread.pdf: a PDF's text in drawing order
+
+[project.urls]
+Repository = "https://github.com/kelsayed17/flatread"
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+flatread = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--import-mode=importlib --snapshot-default-extension=syrupy.extensions.json.JSONSnapshotExtension"
+asyncio_mode = "auto"
+
+[dependency-groups]
+dev = ["pytest>=9.0.3", "pytest-asyncio>=0.24.0", "syrupy>=6.1.1"]
