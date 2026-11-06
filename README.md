@@ -7,23 +7,23 @@ and PDFs. These files carry preambles and trailers, record counts and control to
 place of a file, tokens like `.` or `ND` for a missing value, and headers that change without notice. A generic CSV
 reader reads most of that as data, or quietly turns what it doesn't understand into `null`.
 
-flatread takes the opposite stance. You declare a file once, as the [msgspec](https://jcristharif.com/msgspec/)
-structs its rows (and, where it states values of itself, the file) decode into. flatread reads it into those typed
-rows, or into a [polars](https://pola.rs) DataFrame of the same columns. Every cell ends one of three ways: it is its
-value, it is a token the column declares stands for none, or the read fails with an error naming the line, the column
-and the text. Nothing is silently `None`.
+flatread takes the opposite stance, with as little code of its own as it can. You declare a file's rows once, as a
+[msgspec](https://jcristharif.com/msgspec/) struct whose fields declare the columns. [polars](https://pola.rs) reads
+the file (`pl.read_csv`, `pl.read_excel`), and flatread reads every cell strictly into a DataFrame whose columns are
+the file's own, under its labels, in its order, each typed as its field declares. Every cell ends one of three ways:
+it is its value, it is a token the column declares stands for none, or the read fails with an error naming the row,
+the column and the text. Nothing is silently `None`.
 
 ## Example
 
 ```python
-import datetime as dt
-from typing import Annotated, NamedTuple
+from typing import Annotated
 
 import msgspec
-import polars as pl
 
 from flatread.cells import Column
-from flatread.delimited import DelimitedFile, FromTrailer, GenerationStamp
+from flatread.delimited import read_csv
+from flatread.frames import typed_rows
 
 
 class Quote(msgspec.Struct, frozen=True):
@@ -33,49 +33,39 @@ class Quote(msgspec.Struct, frozen=True):
     halted: Annotated[bool, Column("Halted", true="Y", false="N")]
 
 
-class QuoteFile(msgspec.Struct, frozen=True):
-    generated_at: Annotated[dt.datetime, FromTrailer(GenerationStamp())]
-    quotes: list[Quote]
+body = b"Symbol|Price|Volume|Halted\nAAPL|227.50|1200|N\nXYZ||300|Y\n"
 
-
-class QuoteFrame(NamedTuple):
-    generated_at: dt.datetime
-    quotes: pl.DataFrame
-
-
-QUOTES = DelimitedFile.of_file(QuoteFile, frame_type=QuoteFrame, separator="|")
-
-body = b"Symbol|Price|Volume|Halted\nAAPL|227.50|1200|N\nXYZ||300|Y\n20261105183000\n"
-
-QUOTES.read(body)
-# QuoteFile(generated_at=datetime(2026, 11, 5, 18, 30),
-#           quotes=[Quote('AAPL', 227.5, 1200, False), Quote('XYZ', None, 300, True)])
-
-QUOTES.read_frame(body).quotes  # the same rows as a DataFrame: symbol str, price f64, volume i64, halted bool
+frame = read_csv(body, Quote, separator="|")
+frame.rows()  # [('AAPL', 227.5, 1200, False), ('XYZ', None, 300, True)]
+frame.schema  # Symbol str, Price f64, Volume i64, Halted bool: the file's labels, the fields' types
+typed_rows(frame, Quote)  # [Quote(symbol='AAPL', ...), Quote(symbol='XYZ', price=None, ...)]
 ```
+
+A line a file writes about itself (a generation stamp, a record count) is the caller's to read:
+`flatread.text.split_lines(text, head=1, tail=1)` takes those lines off and leaves the rows for `read_csv`.
 
 And what it refuses:
 
 | The body | The error |
 |---|---|
-| `1,200` in the Volume column | `CellError: line 2: the 'Volume' cell '1,200' is not a whole number` |
-| the trailer line missing | `TruncatedFileError: no trailer: line 3 is 'XYZ\|\|300\|Y', not the 14-digit time the file was generated, so the file may have been cut off` |
-| a fifth field on a row | `RaggedRowError: line 3 should have 4 fields, not 5: 'XYZ\|\|300\|Y\|9'` |
+| `1,200` in the Volume column | `CellError: row 2: the 'Volume' cell '1,200' is not a whole number` |
+| a fifth field on a row | `RaggedRowError: line 3 has 5 fields, not the header's 4: 'XYZ\|\|300\|Y\|9'` |
+| a header naming another column | `UnknownLayoutError: the header [...] is not the columns ['Symbol', 'Price', 'Volume', 'Halted']` |
+| `12/31/25` in a `%m/%d/%Y` date column | `CellError: ... is not a date in %m/%d/%Y` (polars alone reads it as the year 25) |
 
-A declaration that cannot hold fails at import, not when a file is read. Examples: a field with no `Column`, a field
-that may be `None` though nothing in its column ever is, a check over a column the rows lack, or a frame type whose
-fields differ from the file struct's.
+A declaration that cannot hold fails when the row struct is first read. Examples: a field with no `Column`, or a field
+that may be `None` though nothing in its column ever is.
 
 ## What it reads
 
 | Module | What |
 |---|---|
-| `flatread.delimited` | A delimited text file declared by its structs, read whole (`DelimitedFile`) or as its chunks arrive (`StreamedFile`). The header parts are `Labels`, `Layouts`, `ByName` and `NoHeader`; the checks are `RowCount` and `ColumnTotal`. Values a file writes about itself are `FromPreamble`, `FromHeader` and `FromTrailer` fields. |
-| `flatread.cells` | `Column`, the declaration on a row-struct field, and the strict cell reader. Shapes are derived from `strftime` formats, in range: no 13th month, no 25th hour. |
-| `flatread.frames` | The frame half: a file's lines counted, checked for width and quoting, and split into a DataFrame. |
-| `flatread.text` | A body's text and its numbered lines, whole or streamed. |
+| `flatread.delimited` | `read_csv`: one `pl.read_csv`, the header and every row's width checked, the cells read by `read_table`. `stream_csv` reads a file too large to hold, a batch of lines at a time. |
+| `flatread.cells` | `Column`, the declaration on a row-struct field, and `read_table`: a frame under the source's labels read strictly by polars' own conversions (`str.to_integer`, a `Float64` cast, `str.to_datetime` written back in the column's format). |
+| `flatread.frames` | A row struct's frame schema, and a frame read back into typed rows (`typed_rows`, `typed_file`). |
+| `flatread.text` | A body's text, and the lines a file writes about itself around its rows (`split_lines`). |
 | `flatread.archives` | A ZIP's files, whole or inflated as its chunks arrive, with CRCs and sizes checked. |
-| `flatread.workbooks` | An Excel sheet through calamine, with every number cell's exact text (calamine's own text rounds to nine decimals). Needs the `excel` extra. |
+| `flatread.workbooks` | An Excel sheet through polars' calamine engine, with every number cell's exact text (calamine's own text rounds to nine decimals). Needs the `excel` extra. |
 | `flatread.pdf` | A PDF's text, line by line in the order its pages draw it. Needs the `pdf` extra. |
 | `flatread.errors` | `ReadError`, a `ValueError`, and one subclass for each thing a body can get wrong. |
 

@@ -41,14 +41,14 @@ def test_the_header_can_sit_below_a_title_and_a_description_row_can_be_skipped()
 
 
 def test_a_declared_type_is_the_columns_type_whatever_its_early_rows_hold() -> None:
-    # The real stocks sheet's fuel-ethanol column is blank for its first 1,000-odd weeks, so calamine infers text and
-    # fastexcel logs a warning on every read (measured on the 2026-10-19 download; a four-row fixture cannot reproduce
-    # an inference over 1,000 rows). Declared, the column is a number.
+    # The real stocks sheet's fuel-ethanol column is blank for its first 1,000-odd weeks, so inference gives text
+    # (measured on the 2026-10-19 download; a four-row fixture cannot reproduce an inference over 1,000 rows).
+    # Declared, the column is a number: polars narrows a float column of whole numbers to Int64.
     frame = read_sheet(
         _PSW01.read_bytes(), "Data 1", header_row=1, skip_rows=1, dtypes={"W_EPOOXE_SAE_NUS_MBBL": "float"}
     )
-    assert frame.schema["W_EPOOXE_SAE_NUS_MBBL"] == pl.Float64
-    assert frame["W_EPOOXE_SAE_NUS_MBBL"].to_list() == [None, None, 23743.0, 23942.0]
+    assert frame.schema["W_EPOOXE_SAE_NUS_MBBL"] == pl.Int64
+    assert frame["W_EPOOXE_SAE_NUS_MBBL"].to_list() == [None, None, 23743, 23942]
 
 
 def test_one_declared_type_is_every_columns_type() -> None:
@@ -58,7 +58,7 @@ def test_one_declared_type_is_every_columns_type() -> None:
 
 def test_a_sheet_without_a_header_row_is_all_data() -> None:
     frame = read_sheet(_ADS.read_bytes(), "Sheet1", header_row=None, dtypes="string")
-    assert frame.columns == ["__UNNAMED__0", "__UNNAMED__1", "__UNNAMED__2"]
+    assert frame.columns == ["column_0", "column_1", "column_2"]
     assert frame.row(0) == ("Date", "ADS_Index", "RECBARS")
 
 
@@ -106,8 +106,8 @@ def test_a_damaged_worksheet_inside_a_whole_zip_is_a_corrupt_archive() -> None:
         read_sheet(out.getvalue(), "Sheet1")
 
 
-def test_a_missing_sheet_names_the_sheets_the_workbook_has() -> None:
-    with pytest.raises(UnknownLayoutError, match=r"no sheet 'Nope'; it has \['Sheet1'\]"):
+def test_a_missing_sheet_names_the_sheet_asked_for() -> None:
+    with pytest.raises(UnknownLayoutError, match=r"^the workbook has no sheet 'Nope'$"):
         read_sheet(_ADS.read_bytes(), "Nope")
 
 
@@ -117,7 +117,7 @@ def test_an_empty_body_is_an_empty_body_error() -> None:
 
 
 def test_every_failure_is_a_decode_error() -> None:
-    # A calamine error escaping would be no ReadError, so no caller treating a ReadError as a bad body would see one.
+    # An engine error escaping would be no ReadError, so no caller treating a ReadError as a bad body would see one.
     for body in (b"", b"junk", b"PK" + bytes([3, 4]) + b"junk"):
         with pytest.raises(ReadError):
             read_sheet(body, "Sheet1")

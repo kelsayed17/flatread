@@ -20,10 +20,11 @@ classifiers = [
 dependencies = [
     "msgspec>=0.22",  # the row and file structs a declaration is made of
     "polars>=2.0",  # the frames every read builds
+    "stream-unzip>=0.0.101",  # flatread.archives: an archive inflated as its chunks arrive
 ]
 
 [project.optional-dependencies]
-excel = ["fastexcel>=0.21.0"]  # flatread.workbooks: Excel sheets, through calamine
+excel = ["polars[calamine]>=2.0"]  # flatread.workbooks: Excel sheets, through polars' calamine engine
 pdf = ["pdfminer-six>=20260107"]  # flatread.pdf: a PDF's text in drawing order
 
 [project.urls]

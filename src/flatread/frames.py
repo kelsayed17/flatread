@@ -1,71 +1,27 @@
-"""The frame half of the text readers: a row struct's DataFrame schema, a file's lines, a frame's typed rows.
+"""A row struct's DataFrame schema, and a frame's typed rows.
 
-:mod:`flatread.text` gives a file's numbered lines without polars; this module counts, checks and splits them into a
-DataFrame. :mod:`flatread.delimited` runs its steps for every declared file, and a reader of a file that is not
-delimited (a matrix, a prose table, a data set read by name) uses them itself. :func:`frame_rows`
-turns a frame into typed rows, and :func:`stream_rows` a streamed file's frames.
-
-**A delimited file's steps.** Most text wires are a header line and rows of fields split on one separator. What makes
-the wire its own (the header it expects, a trailer, each column's type) is its declaration; the steps are here:
-
-* :func:`counted_lines` reads the file's lines with each one's field count, and with ``quoted=True`` its quote count;
-* :func:`frame_line` names one of them as a :class:`~flatread.text.Line`, for a header or trailer check;
-* :func:`check_widths` refuses the first row whose fields are not the header's, or whose quotes do not close;
-* :func:`split_fields` splits checked rows on a separator that no field quotes, and :func:`read_quoted_rows` reads
-  checked rows whose fields may be quoted;
+* :func:`frame_schema` is a row struct's DataFrame schema, and :func:`frame_rows` turns a frame of its columns into
+  typed rows, for a table that is no file (an HTML page's links, a JSON record list);
+* :func:`typed_rows` and :func:`typed_file` read a file's frame, under its own labels, back into typed rows.
 """
 
-import datetime as dt
-import re
-import types
-from typing import TYPE_CHECKING, Annotated, Final, Union, get_args, get_origin
+from typing import Final, get_args, get_origin
 
 import msgspec
 import polars as pl
 
-from flatread.cells import is_utc_datetime
-from flatread.errors import EmptyBodyError, RaggedRowError, UnknownLayoutError
-from flatread.text import Line
+from flatread.cells import column_specs, resolve_type
 
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+__all__ = ["frame_rows", "frame_schema", "typed_file", "typed_rows"]
 
-__all__ = [
-    "check_widths",
-    "counted_batch",
-    "counted_lines",
-    "first_ragged",
-    "frame_line",
-    "frame_lines",
-    "frame_rows",
-    "frame_schema",
-    "read_quoted_rows",
-    "split_fields",
-    "stream_rows",
-]
-
-#: A quoted CSV field, a doubled quote inside it included: what a field count removes before counting separators.
-_QUOTED: Final = r'"(?:[^"]|"")*"'
-
-#: How much of a line an error quotes: enough to recognize it, never a whole runaway line.
-_SHOWN: Final = 200
-
-#: The row-index column a check adds, named so no field can be: a field name is an identifier.
-_AT: Final = "row index"
-
-#: The column type of each field type a row struct may declare. Exact types: a ``datetime`` field is not a date column.
+#: The column type of each msgspec type a row struct may declare.
 _SCALARS: Final[dict[type, type[pl.DataType]]] = {
-    str: pl.String,
-    int: pl.Int64,
-    float: pl.Float64,
-    bool: pl.Boolean,
-    dt.date: pl.Date,
-    dt.datetime: pl.Datetime,
+    msgspec.inspect.StrType: pl.String,
+    msgspec.inspect.IntType: pl.Int64,
+    msgspec.inspect.FloatType: pl.Float64,
+    msgspec.inspect.BoolType: pl.Boolean,
+    msgspec.inspect.DateType: pl.Date,
 }
-
-
-#: The separator tried first: absent from every text file read, so found absent by one scan.
-_NUL: Final = chr(0)
 
 
 def frame_schema(row_type: type[msgspec.Struct]) -> pl.Schema:
@@ -78,48 +34,6 @@ def frame_schema(row_type: type[msgspec.Struct]) -> pl.Schema:
     return pl.Schema({field.name: _dtype(field.type) for field in msgspec.structs.fields(row_type)})
 
 
-def frame_lines(text: str) -> pl.DataFrame:
-    """Return the file's non-empty lines as a DataFrame: each one's ``number`` in the file, and its text, ``line``.
-
-    polars reads the file once, each line whole, with :func:`~flatread.text.lines`' rules: a line ends at an
-    LF, a CR just before it or ending the file is dropped, and an empty line is framing. *text* is
-    :func:`~flatread.text.decode_text`'s, so the encoding and the byte-order mark are already settled. The same
-    errors as :func:`~flatread.text.lines`, with one more: a file holding every ASCII control character raises
-    :class:`~flatread.errors.UnknownLayoutError`, since polars needs one it lacks to read lines whole.
-    """
-    if not text:
-        msg = "the file is empty"
-        raise EmptyBodyError(msg)
-    read = pl.read_csv(
-        text.encode(),
-        separator=_separator_absent_from(text),
-        quote_char=None,
-        has_header=False,
-        schema={"line": pl.String},
-        empty_string_is_null=False,
-        row_index_name="number",
-        row_index_offset=1,
-    )
-    found = read.filter(pl.col("line").str.len_bytes() > 0)
-    if found.is_empty():
-        msg = "the file holds only blank lines"
-        raise EmptyBodyError(msg)
-    return found
-
-
-async def stream_rows[RowT: msgspec.Struct](
-    frames: AsyncIterator[pl.DataFrame], row_type: type[RowT]
-) -> AsyncIterator[RowT]:
-    """Yield the rows of a streamed file's *frames*, one *row_type* per row, in order, one frame held at a time.
-
-    Each frame's columns are *row_type*'s fields in order (:func:`frame_schema`), so a row's values build the struct
-    positionally. An error *frames* raises is raised after the rows of the frames before it.
-    """
-    async for frame in frames:
-        for row in frame_rows(frame, row_type):
-            yield row
-
-
 def frame_rows[RowT: msgspec.Struct](frame: pl.DataFrame, row_type: type[RowT]) -> list[RowT]:
     """Return *frame*'s rows, one *row_type* per row, in order.
 
@@ -130,156 +44,76 @@ def frame_rows[RowT: msgspec.Struct](frame: pl.DataFrame, row_type: type[RowT]) 
     return list(map(row_type, *(column.to_list() for column in frame.iter_columns()), strict=True))
 
 
-def counted_lines(text: str, separator: str, *, quoted: bool = False) -> pl.DataFrame:
-    """Return :func:`frame_lines` with each line's ``fields``: its *separator*-split field count.
+def typed_rows[RowT: msgspec.Struct](frame: pl.DataFrame, row_type: type[RowT]) -> list[RowT]:
+    """Return a file's frame as *row_type* rows: each column under its label read back into its field, in file order.
 
-    With *quoted*, a field that is quoted whole (:data:`_QUOTED`, between separators or the line's ends) is removed
-    before the separators are counted, so a separator inside one does not count, as polars reads it. The quotes left
-    after that are counted as ``quotes``: any is a quote that does not close or that sits inside a field, which polars
-    would read otherwise than the count, and :func:`check_widths` refuses it. The columns are ``number``, ``line``,
-    ``fields`` and, with *quoted*, ``quotes``.
+    The typed form of a frame read under the file's own labels: *row_type* declares each column (its
+    :class:`~flatread.cells.Column`), so each field takes the frame column its label names, or one of its alternative
+    labels. A label the row declares more than once takes polars' name for its repeat, in order (``Filler``, then
+    ``Filler_duplicated_0`` from a delimited file or ``Filler_1`` from a sheet). A field whose column the file left out
+    (an ``optional`` one) is ``None`` on every row. A field whose column the frame has not raises :class:`ValueError`.
     """
-    return _counted(frame_lines(text), separator, quoted=quoted)
+    seen: dict[str, int] = {}
+    columns: list[pl.Expr] = []
+    for spec in column_specs(row_type):
+        found = None
+        for label in spec.labels:
+            repeat = seen.get(label, 0)
+            names = (label,) if repeat == 0 else (f"{label}_duplicated_{repeat - 1}", f"{label}_{repeat}")
+            found = next((name for name in names if name in frame.columns), None)
+            if found is not None:
+                seen[label] = repeat + 1
+                break
+        if found is not None:
+            columns.append(pl.col(found).alias(spec.name))
+        elif spec.nullable:
+            columns.append(pl.lit(None).alias(spec.name))
+        else:
+            msg = f"the frame has no column for {row_type.__name__}.{spec.name} ({spec.labels[0]!r}): {frame.columns}"
+            raise ValueError(msg)
+    return frame_rows(frame.select(columns), row_type)
 
 
-def counted_batch(batch: Sequence[Line], separator: str, *, quoted: bool = False) -> pl.DataFrame:
-    """Return a streamed file's *batch* of lines as :func:`counted_lines` returns a whole file's: the same columns."""
-    found = pl.DataFrame(
-        {"number": [line.number for line in batch], "line": [line.text for line in batch]},
-        schema={"number": pl.Int64, "line": pl.String},
-    )
-    return _counted(found, separator, quoted=quoted)
+def typed_file[FileT: msgspec.Struct](file: msgspec.Struct, file_type: type[FileT]) -> FileT:
+    """Return a file struct holding its rows as a DataFrame as *file_type*, which holds them as typed rows.
 
-
-def _counted(found: pl.DataFrame, separator: str, *, quoted: bool) -> pl.DataFrame:
-    """Add each line's field count, and with *quoted* its quotes left once its fields quoted whole are removed."""
-    line = pl.col("line")
-    if not quoted:
-        return found.with_columns((line.str.count_matches(separator, literal=True) + 1).alias("fields"))
-    sep = re.escape(separator)
-    whole = f"(^|{sep}){_QUOTED}({sep}|$)"
-    # Two passes: a match takes the separator after its field, so the next field quoted whole waits for the second.
-    bare = line.str.replace_all(whole, "${1}${2}").str.replace_all(whole, "${1}${2}")
-    return found.with_columns(
-        (bare.str.count_matches(separator, literal=True) + 1).alias("fields"),
-        bare.str.count_matches('"', literal=True).alias("quotes"),
-    )
-
-
-def frame_line(found: pl.DataFrame, index: int) -> Line:
-    """Return the line at *index* (``-1`` the last) of :func:`frame_lines`' or :func:`counted_lines`' frame."""
-    number, text = found.select("number", "line").row(index)
-    return Line(number, text)
-
-
-def check_widths(rows: pl.DataFrame, width: int) -> None:
-    """Check that every row of :func:`counted_lines`' frame has *width* fields; the first that does not raises.
-
-    A frame counted with ``quoted=True`` is checked for its quotes first: a row with a quote that does not close, or
-    that sits inside a field, raises before any row of the wrong width, since its fields cannot be counted. Both raise
-    :class:`~flatread.errors.RaggedRowError`.
+    *file_type*'s fields are *file*'s values by name, and its one ``list[Row]`` field is *file*'s one DataFrame,
+    read back by :func:`typed_rows`: the typed twin of a file read frames-only.
     """
-    if (found := first_ragged(rows, width)) is not None:
-        raise found[1]
-
-
-def first_ragged(rows: pl.DataFrame, width: int) -> tuple[int, RaggedRowError] | None:
-    """Return the position of the first row of :func:`counted_lines`' frame that is not *width* fields, and its error.
-
-    A row whose quotes cannot be counted is ragged too. ``None`` when every row is *width* fields: what
-    :func:`check_widths` raises, for a reader that keeps the rows before it.
-    """
-    quoted = "quotes" in rows.columns
-    bad = pl.col("fields") != width
-    if quoted:
-        bad |= pl.col("quotes") > 0
-    suspect = rows.with_row_index(_AT).filter(bad)
-    if suspect.is_empty():
-        return None
-    at = int(suspect[_AT][0])
-    line = frame_line(suspect, 0)
-    if quoted and suspect["quotes"][0] > 0:
-        msg = (
-            f"line {line.number} has a quote that does not close or sits inside a field, so its fields cannot be "
-            f"counted: {line.text[:_SHOWN]!r}"
-        )
-    else:
-        msg = f"line {line.number} should have {width} fields, not {suspect['fields'][0]}: {line.text[:_SHOWN]!r}"
-    return at, RaggedRowError(msg)
-
-
-def split_fields(lines: pl.Series, separator: str, names: list[str]) -> pl.DataFrame:
-    """Split each line on *separator* into the string columns *names*, every cell as written.
-
-    For lines :func:`check_widths` has passed, of a wire that never quotes a field: each has ``len(names)`` fields.
-    """
-    return lines.str.splitn(separator, len(names)).struct.rename_fields(names).struct.unnest()
-
-
-def read_quoted_rows(
-    lines: pl.Series,
-    schema: Mapping[str, pl.DataType | type[pl.DataType]],
-    *,
-    separator: str = ",",
-    empty_string_is_null: bool = True,
-) -> pl.DataFrame:
-    """Read the checked rows *lines*, their fields quoted CSV's way or not, into *schema*'s text columns, in order.
-
-    For the rows of :func:`counted_lines` counted with ``quoted=True`` that :func:`check_widths` passed: only those
-    lines are read, so framing lines around them (a header, a count line, a trailer) of any width never reach polars,
-    and a quoted field never spans a line, since a quote that does not close has been refused. A row polars still reads
-    otherwise than counted raises :class:`~flatread.errors.RaggedRowError`.
-    """
-    if lines.is_empty():
-        return pl.DataFrame(schema=schema)
-    try:
-        return pl.read_csv(
-            "\n".join(lines).encode(),
-            separator=separator,
-            quote_char='"',
-            has_header=False,
-            new_columns=list(schema),
-            schema_overrides=schema,
-            empty_string_is_null=empty_string_is_null,
-        )
-    except pl.exceptions.PolarsError as exc:
-        # The checks agree with polars on every row they pass; this is the guard should a row they cannot see differ.
-        msg = f"the rows cannot be read as CSV: {exc}"
-        raise RaggedRowError(msg) from exc
-
-
-def _separator_absent_from(text: str) -> str:
-    """Return an ASCII control character the file does not contain, so that polars reads each line whole.
-
-    polars has no line reader of its own; a separator that never occurs is how ``read_csv`` becomes one. NUL, absent
-    from every text file read, is found absent by one scan; only a file holding it has its characters gathered, once.
-    """
-    if _NUL not in text:
-        return _NUL
-    present = set(text)
-    for code in range(1, 32):
-        if (character := chr(code)) not in "\n\r" and character not in present:
-            return character
-    msg = "the file holds every ASCII control character, so it is not a text file"
-    raise UnknownLayoutError(msg)
+    fields = msgspec.structs.fields(file)
+    frames = [field.name for field in fields if isinstance(getattr(file, field.name), pl.DataFrame)]
+    lists = [
+        (field.name, args[0])
+        for field in msgspec.structs.fields(file_type)
+        if get_origin(field.type) is list
+        and (args := get_args(field.type))
+        and isinstance(args[0], type)
+        and issubclass(args[0], msgspec.Struct)
+    ]
+    if len(frames) != 1 or len(lists) != 1:
+        held = f"{len(frames)} DataFrames, {file_type.__name__} {len(lists)} row lists"
+        msg = f"{type(file).__name__} holds {held}: not one each"
+        raise TypeError(msg)
+    ((frame_name,), ((rows_name, row_type),)) = (frames, lists)
+    values = {field.name: getattr(file, field.name) for field in fields if field.name != frame_name}
+    return file_type(**values, **{rows_name: typed_rows(getattr(file, frame_name), row_type)})
 
 
 def _dtype(annotation: object) -> pl.DataType:
-    """Return the polars type of a field annotated *annotation*: a scalar :data:`_SCALARS` names, or one ``| None``.
+    """Return the polars type of a field annotated *annotation*, as :func:`msgspec.inspect.type_info` reads it.
 
-    A :data:`~flatread.cells.UtcDatetime` is a ``Datetime`` column in UTC.
+    A NewType is its supertype's column and ``X | None`` is ``X``'s; a :data:`~flatread.cells.UtcDatetime` (any
+    ``Meta(tz=True)`` datetime) is a ``Datetime`` column in UTC, and a ``Literal`` of texts an ``Enum`` of them.
     """
-    if get_origin(annotation) is Annotated:  # a declared Column, or other metadata: the type it annotates
-        annotation = get_args(annotation)[0]
-    if is_utc_datetime(annotation):
-        return pl.Datetime("us", "UTC")
-    while (supertype := getattr(annotation, "__supertype__", None)) is not None:
-        annotation = supertype
-    if get_origin(annotation) in {Union, types.UnionType}:
-        arms = [arm for arm in get_args(annotation) if arm is not type(None)]
-        if len(arms) == 1:
-            return _dtype(arms[0])
-    if isinstance(annotation, type) and (dtype := _SCALARS.get(annotation)) is not None:
+    try:
+        resolved, _ = resolve_type(msgspec.inspect.type_info(annotation))
+    except TypeError:
+        resolved = None
+    if isinstance(resolved, msgspec.inspect.LiteralType) and all(isinstance(value, str) for value in resolved.values):
+        return pl.Enum(sorted(str(value) for value in resolved.values))
+    if isinstance(resolved, msgspec.inspect.DateTimeType):
+        return pl.Datetime("us", "UTC") if resolved.tz is True else pl.Datetime("us")
+    if resolved is not None and (dtype := _SCALARS.get(type(resolved))) is not None:
         return dtype()
     msg = f"no frame column type for a field annotated {annotation!r}"
     raise TypeError(msg)
