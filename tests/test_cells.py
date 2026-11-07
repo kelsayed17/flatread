@@ -5,7 +5,9 @@ three ends a cell may come to, the cell an error names, and the declarations tha
 """
 
 import datetime as dt
+import gc
 import re
+import weakref
 from typing import Annotated, Any, Literal
 
 import msgspec
@@ -163,8 +165,43 @@ def test_a_fields_meta_limits_hold() -> None:
     + [("1", "1", s, "S") for s in ("A", "ABCD", "ab")],
 )
 def test_a_cell_outside_its_meta_limits_is_refused(n: str, x: str, s: str, named: str) -> None:
-    with pytest.raises(CellError, match=f"the {named!r} cell"):
+    with pytest.raises(CellError, match=f"the {named!r} cell .* is not within its constraints"):
         read_table(pl.DataFrame({"N": [n], "X": [x], "S": [s]}), _Limited)
+
+
+@pytest.mark.parametrize(
+    ("n", "s", "named"),
+    [
+        ("-1", "AB", r"the 'N' cell '-1' is not within its constraints \(ge=0, lt=10\)$"),
+        (
+            "1",
+            "A",
+            r"the 'S' cell 'A' is not within its constraints \(min_length=2, max_length=3, pattern='\^\[A-Z\]\+\$'\)$",
+        ),
+        ("x", "AB", r"the 'N' cell 'x' is not a whole number$"),
+    ],
+    ids=["ge", "min_length", "not its type at all"],
+)
+def test_a_cell_of_its_type_outside_its_meta_limits_is_named_so(n: str, s: str, named: str) -> None:
+    with pytest.raises(CellError, match=f"^row 1: {named}"):
+        read_table(pl.DataFrame({"N": [n], "X": ["1"], "S": [s]}), _Limited)
+
+
+class _LookAhead(msgspec.Struct, frozen=True, gc=False):
+    code: Annotated[str, Column("Code", pattern=r"(?=A)[A-Z]+")]
+
+
+class _LookBehind(msgspec.Struct, frozen=True, gc=False):
+    code: Annotated[str, msgspec.Meta(pattern=r"(?<=a)b"), Column("Code")]
+
+
+@pytest.mark.parametrize("row_type", [_LookAhead, _LookBehind], ids=["a column's", "a Meta's"])
+def test_a_pattern_polars_cannot_compile_is_refused_with_its_declaration(row_type: type[msgspec.Struct]) -> None:
+    with pytest.raises(
+        TypeError,
+        match=rf"^{row_type.__name__}\.code's pattern .* is not one polars' regex reads: look-around, .* supported$",
+    ):
+        column_specs(row_type)
 
 
 class _Day(msgspec.Struct, frozen=True, gc=False):
@@ -250,7 +287,28 @@ def test_a_time_out_of_range_is_refused_not_rolled_over(cell: str) -> None:
 
 
 def test_a_leap_second_is_the_next_minutes_first() -> None:
-    assert _one(_At, "2016-12-31 23:59:60") == [dt.datetime(2017, 1, 1)]
+    assert _one(_At, "2016-12-31 23:59:60", "2015-06-30 23:59:60.5") == [
+        dt.datetime(2017, 1, 1),
+        dt.datetime(2015, 7, 1, 0, 0, 0, 500000),
+    ]
+
+
+@pytest.mark.parametrize(
+    "cell", ["2025-01-05 01:02:60", "2025-01-05 01:02:60.5", "2025-01-05 23:59:60", "2016-12-31 22:59:60"]
+)
+def test_a_leap_second_anywhere_but_the_end_of_june_or_december_is_refused(cell: str) -> None:
+    _refused(_At, cell)
+
+
+def test_a_leap_second_with_an_offset_is_one_in_utc() -> None:
+    cells = ("2016-12-31 23:59:60+0000", "2016-12-31 18:59:60-0500", "2017-01-01 00:59:60+0100")
+    frame = read_table(pl.DataFrame({"At": list(cells)}), _Stamped)
+    assert frame["At"].to_list() == [dt.datetime(2017, 1, 1, tzinfo=dt.UTC)] * 3
+
+
+@pytest.mark.parametrize("cell", ["2016-12-31 23:59:60-0500", "2017-01-01 00:59:60+0000"])
+def test_a_leap_second_at_local_midnight_but_not_at_utc_midnight_is_refused(cell: str) -> None:
+    _refused(_Stamped, cell)
 
 
 def test_a_utc_datetime_reads_its_offset_into_utc() -> None:
@@ -389,6 +447,14 @@ class _OffsetFirst(msgspec.Struct, frozen=True, gc=False):
     a: Annotated[UtcDatetime, Column("A", format="%z %Y-%m-%d %H:%M:%S")]
 
 
+class _NaiveOffset(msgspec.Struct, frozen=True, gc=False):
+    a: Annotated[dt.datetime, Column("A", format="%Y-%m-%d %H:%M:%S%z")]
+
+
+class _Either(msgspec.Struct, frozen=True, gc=False):
+    a: Annotated[int | str, Column("A")]
+
+
 @pytest.mark.parametrize(
     ("row_type", "error", "named"),
     [
@@ -401,6 +467,8 @@ class _OffsetFirst(msgspec.Struct, frozen=True, gc=False):
         (_BoolWithoutTokens, ValueError, "without both its true and false tokens"),
         (_NumberLiteral, TypeError, "only text values read from a cell"),
         (_OffsetFirst, ValueError, r"an offset \(%z or %#z\) ends its format"),
+        (_NaiveOffset, ValueError, r"^_NaiveOffset\.a reads an offset, so it is a UtcDatetime$"),
+        (_Either, TypeError, r"^_Either\.a is a union of "),
     ],
 )
 def test_a_declaration_that_cannot_be_read_fails_before_any_cell(
@@ -408,3 +476,15 @@ def test_a_declaration_that_cannot_be_read_fails_before_any_cell(
 ) -> None:
     with pytest.raises(error, match=named):
         column_specs(row_type)
+
+
+def test_a_row_structs_columns_are_checked_once_and_held_only_while_it_lives() -> None:
+    """A struct built per header is freed when its builder drops it: the columns' cache holds it weakly."""
+    row_type = msgspec.defstruct("Built", [("a", Annotated[str, Column("A")])])
+    assert column_specs(row_type) is column_specs(row_type)
+    alive = weakref.ref(row_type)
+
+    del row_type
+    gc.collect()
+
+    assert alive() is None

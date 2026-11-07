@@ -39,8 +39,19 @@ def test_decode_utf8_takes_off_a_byte_order_mark_and_refuses_any_other_encoding(
         ("a\nb\nT", 0, 1, ([], "a\nb", ["T"], 1)),
         ("H\nT\n", 1, 1, (["H"], "", ["T"], 2)),
         ("a\nb\n", 0, 0, ([], "a\nb\n", [], 1)),
+        ('H\r\n"a\r\nb"\r\nT\r\n', 1, 1, (["H"], '"a\r\nb"', ["T"], 2)),
+        ("H\r\na\r\nb\r\n", 1, 0, (["H"], "a\r\nb\r\n", [], 2)),
     ],
-    ids=["a head and a tail", "CRLF", "blank lines are not counted", "no final line ending", "no rows", "neither"],
+    ids=[
+        "a head and a tail",
+        "CRLF",
+        "blank lines are not counted",
+        "no final line ending",
+        "no rows",
+        "neither",
+        "a CRLF inside the rows kept",
+        "no tail, the text as written",
+    ],
 )
 def test_split_lines_takes_the_files_own_lines_off_its_rows(
     text: str, head: int, tail: int, expected: tuple[list[str], str, list[str], int]

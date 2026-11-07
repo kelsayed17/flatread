@@ -59,7 +59,7 @@ def typed_rows[RowT: msgspec.Struct](frame: pl.DataFrame, row_type: type[RowT]) 
         if found is not None:
             columns.append(pl.col(found).alias(spec.name))
         elif spec.column.optional:
-            columns.append(pl.lit(None).alias(spec.name))
+            columns.append(pl.repeat(None, pl.len()).alias(spec.name))  # a literal alone would be one row
         else:
             msg = f"the frame has no column for {row_type.__name__}.{spec.name} ({spec.labels[0]!r}): {frame.columns}"
             raise ValueError(msg)

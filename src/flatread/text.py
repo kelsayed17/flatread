@@ -51,17 +51,19 @@ class Split(NamedTuple):
 def split_lines(text: str, *, head: int = 0, tail: int = 0) -> Split:
     """Return *text*'s first *head* and last *tail* non-empty lines, the text between them, and the line it starts on.
 
-    A line's ending (LF, or CRLF) is not part of it. The line number counts blank lines, so it is the one to give
-    :func:`~flatread.delimited.read_csv` as *first_line*. A file of fewer non-empty lines raises
-    :class:`~flatread.errors.TruncatedFileError`.
+    A line's ending (LF, or CRLF) is not part of a head or tail line. The text between is *text*'s own, sliced from
+    it, so a CRLF inside it (a quoted field's) is kept; only its last line's ending, before a tail, is not. The line
+    number counts blank lines, so it is the one to give :func:`~flatread.delimited.read_csv` as *first_line*. A file
+    of fewer non-empty lines raises :class:`~flatread.errors.TruncatedFileError`.
     """
-    lines = [line.removesuffix("\r") for line in text.split("\n")]
-    filled = [at for at, line in enumerate(lines) if line]
+    lines = text.split("\n")  # each line keeps its CR: the text between is joined from them as written
+    filled = [at for at, line in enumerate(lines) if line not in {"", "\r"}]
     if len(filled) < head + tail:
         msg = f"the file has {len(filled)} lines, fewer than the {head + tail} it writes about itself"
         raise TruncatedFileError(msg)
     start = filled[head - 1] + 1 if head else 0
     end = filled[len(filled) - tail] if tail else len(lines)
-    before = [lines[at] for at in filled[:head]]
-    after = [lines[at] for at in filled[len(filled) - tail :]] if tail else []
-    return Split(before, "\n".join(lines[start:end]), after, start + 1)
+    before = [lines[at].removesuffix("\r") for at in filled[:head]]
+    after = [lines[at].removesuffix("\r") for at in filled[len(filled) - tail :]] if tail else []
+    between = "\n".join(lines[start:end])
+    return Split(before, between.removesuffix("\r") if end < len(lines) else between, after, start + 1)

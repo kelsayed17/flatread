@@ -78,3 +78,46 @@ def test_a_pdf_that_draws_no_text_raises() -> None:
     """A page with no characters on it: the shape of a scanned page, an image with no text layer."""
     with pytest.raises(UnknownLayoutError, match=r"^the PDF has no text layer: a scanned document$"):
         read_text(_pdf([]))
+
+
+def _nested_forms(depth: int) -> bytes:
+    """Return a one-page PDF whose page draws form ``/X``, each form drawing the next, *depth* deep, the last ``Hi``."""
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /XObject << /X 6 0 R >> >> "
+            b"/Contents 4 0 R >>"
+        ),
+        b"<< /Length 5 >>\nstream\n/X Do\nendstream",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    for level in range(depth):
+        number = len(objects) + 1
+        last = level == depth - 1
+        content = b"BT /F1 11 Tf 72 720 Td (Hi) Tj ET" if last else b"/X Do"
+        resources = b"/Font << /F1 5 0 R >>" if last else b"/XObject << /X %d 0 R >>" % (number + 1)
+        objects.append(
+            b"<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /Resources << %b >> /Length %d >>\n"
+            b"stream\n%b\nendstream" % (resources, len(content), content)
+        )
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(pdf))
+        pdf += b"%d 0 obj\n%b\nendobj\n" % (number, body)
+    xref = len(pdf)
+    pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    pdf += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return bytes(pdf)
+
+
+def test_text_inside_nested_forms_is_read() -> None:
+    assert read_text(_nested_forms(3)) == "Hi\n"
+
+
+def test_forms_nested_too_deep_to_recurse_raise() -> None:
+    """A form that draws itself pdfminer refuses, but it recurses down a chain of distinct ones until Python's limit."""
+    with pytest.raises(UnknownLayoutError, match=r"^the body is not a readable PDF: maximum recursion depth exceeded"):
+        read_text(_nested_forms(400))

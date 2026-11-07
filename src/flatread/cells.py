@@ -10,14 +10,17 @@ conversions. Each cell is its field's value, ``None`` for one of the column's ``
 read as an infinity), ``bool`` by ``replace_strict`` on the column's two tokens, a ``Literal`` as a ``pl.Enum``, and a
 date or datetime by ``str.to_datetime`` in one of the column's formats, checked by writing the value back in that
 format (polars' ``%Y`` alone reads ``12/31/25`` as the year 25). A format with an offset (``%z`` or ``%#z``) ends with
-it, and the cell's text before its offset is the text checked so.
-A field's ``Meta`` constraints are checked too.
+it, and the cell's text before its offset is the text checked so; a leap second (``:60``) is read only where it rolls
+over to midnight after 30 June or 31 December, in UTC for a cell with an offset. A field's ``Meta`` constraints are
+checked too, and a cell that reads as its type but fails them is named so. A column's ``pattern`` and a ``Meta``
+pattern are run by polars' regex, so one it cannot compile (a look-around, a backreference) is refused when the row
+struct is.
 """
 
 import datetime as dt
 import re
+import weakref
 from dataclasses import dataclass
-from functools import cache
 from typing import TYPE_CHECKING, Annotated, Final, NamedTuple, get_args, get_origin
 
 import msgspec
@@ -161,11 +164,22 @@ def dtype_of(info: msgspec.inspect.Type) -> pl.DataType | None:
     return found[1] if found is not None else None
 
 
-@cache
+#: Each row struct's checked columns, held only while the struct lives: a row struct built per header (a file whose
+#: columns are its dates) is freed with its builder's cache entry, not kept for the life of the process.
+_SPECS: Final[weakref.WeakKeyDictionary[type[msgspec.Struct], tuple[ColumnSpec, ...]]] = weakref.WeakKeyDictionary()
+
+
 def column_specs(row_type: type[msgspec.Struct]) -> tuple[ColumnSpec, ...]:
-    """Return *row_type*'s columns in field order; a declaration that cannot be read raises."""
-    infos = {field.name: field.type for field in msgspec.inspect.type_info(row_type).fields}  # ty: ignore[unresolved-attribute]  # a Struct's info is a StructType
-    return tuple(_spec(row_type, field, infos[field.name]) for field in msgspec.structs.fields(row_type))
+    """Return *row_type*'s columns in field order; a declaration that cannot be read raises.
+
+    Checked once per row struct and kept while the struct lives; the cache holds the struct weakly.
+    """
+    if (specs := _SPECS.get(row_type)) is None:
+        infos = {field.name: field.type for field in msgspec.inspect.type_info(row_type).fields}  # ty: ignore[unresolved-attribute]  # a Struct's info is a StructType
+        specs = _SPECS[row_type] = tuple(
+            _spec(row_type, field, infos[field.name]) for field in msgspec.structs.fields(row_type)
+        )
+    return specs
 
 
 def _spec(row_type: type, field: msgspec.structs.FieldInfo, info: msgspec.inspect.Type) -> ColumnSpec:
@@ -210,7 +224,32 @@ def _spec(row_type: type, field: msgspec.structs.FieldInfo, info: msgspec.inspec
         msg = f"{where} is a bool without both its true and false tokens"
         raise ValueError(msg)
     labels = (column.label,) if isinstance(column.label, str) else column.label
+    _check_patterns(where, column, resolved)
     return ColumnSpec(field.name, column, labels, kind, nullable, dtype, formats, resolved)
+
+
+def _check_patterns(where: str, column: Column, info: msgspec.inspect.Type) -> None:
+    """Check that polars' regex, which runs them, compiles the column's pattern and the field's ``Meta`` pattern.
+
+    msgspec checks a ``Meta`` pattern with :mod:`re`, which reads what polars' Rust regex does not (a look-around, a
+    backreference), so one would otherwise pass here and fail at the first read, as polars' own error.
+    """
+    patterns = [] if column.pattern is None else [_whole(column.pattern)]
+    if isinstance(info, msgspec.inspect.StrType) and info.pattern is not None:
+        patterns.append(info.pattern)
+    for pattern in patterns:
+        try:
+            pl.select(pl.lit("").str.contains(pattern))
+        except pl.exceptions.ComputeError as exc:  # the regex engine's reason is the line that opens "error: "
+            lines = str(exc).splitlines()
+            reason = next((line.removeprefix("error: ") for line in lines if line.startswith("error: ")), lines[0])
+            msg = f"{where}'s pattern {pattern!r} is not one polars' regex reads: {reason}"
+            raise TypeError(msg) from None
+
+
+def _whole(pattern: str) -> str:
+    """Return *pattern* matched against a whole cell."""
+    return f"^(?:{pattern})$"
 
 
 def wire_names(labels: Sequence[str]) -> list[str]:
@@ -291,14 +330,19 @@ def _missing(spec: ColumnSpec) -> pl.Expr:
     return _stripped(spec).is_in(list(spec.column.missing))
 
 
-def _value(spec: ColumnSpec) -> pl.Expr:
-    """Return the cell read as its field's type: null for a missing token, and for a cell that is not a value."""
+def _parsed(spec: ColumnSpec) -> pl.Expr:
+    """Return the cell read as its field's type, its ``Meta`` constraints aside: null for a cell that is not one."""
     column, text = spec.column, _stripped(spec)
     if column.prefix is not None:
         text = pl.when(text.str.starts_with(column.prefix)).then(text.str.strip_prefix(column.prefix))
     if column.pattern is not None:
-        text = pl.when(text.str.contains(f"^(?:{column.pattern})$")).then(text)
-    value = _read(text, spec)
+        text = pl.when(text.str.contains(_whole(column.pattern))).then(text)
+    return _read(text, spec)
+
+
+def _value(spec: ColumnSpec) -> pl.Expr:
+    """Return the cell read as its field's type: null for a missing token, and for a cell that is not a value."""
+    column, value = spec.column, _parsed(spec)
     if (within := _within(value, spec.info)) is not None:
         value = pl.when(within).then(value)
     if column.missing:
@@ -348,22 +392,31 @@ def _moment(text: pl.Expr, fmt: str, spec: ColumnSpec) -> pl.Expr:
         if isinstance(spec.dtype, pl.Datetime) and spec.dtype.time_zone == "UTC":
             parsed = parsed.dt.replace_time_zone("UTC")
     else:
-        local = _written_back(text.str.replace(_OFFSET, ""), head)
         whole = text.str.to_datetime(fmt, time_unit="us", time_zone="UTC", strict=False, exact=True)
+        local = _written_back(text.str.replace(_OFFSET, ""), head, leap_on=whole)  # a leap second is one in UTC
         parsed = pl.when(local.is_not_null() & text.str.contains(_OFFSET)).then(whole)
     return parsed.dt.date() if spec.kind is dt.date else parsed
 
 
-def _written_back(text: pl.Expr, fmt: str) -> pl.Expr:
-    """Return *text* read naive in *fmt*, kept only where writing it back in *fmt* gives the text again."""
+def _written_back(text: pl.Expr, fmt: str, *, leap_on: pl.Expr | None = None) -> pl.Expr:
+    """Return *text* read naive in *fmt*, kept only where writing it back in *fmt* gives the text again.
+
+    A leap second is checked on *leap_on*, the moment the cell names in UTC, when its text is local time before an
+    offset; on the value read otherwise.
+    """
     parsed = text.str.to_datetime(fmt, time_unit="us", strict=False, exact=True)
+    moment = parsed if leap_on is None else leap_on
     # Case aside (a month's name); a fraction (%.f) compared without it; a leap second written back as :60.
     base, cell = fmt.replace("%.f", ""), text.str.to_lowercase()
     if "%.f" in fmt:
         cell = cell.str.replace(r"(:[0-9]{2})\.[0-9]{1,6}", "${1}")
     written = parsed.dt.strftime(base).str.to_lowercase()
-    leap = (parsed - pl.duration(seconds=1)).dt.strftime(base).str.to_lowercase()
-    same = (written == cell) | (leap == cell.str.replace(r":60(\D|$)", ":59${1}"))
+    before = parsed - pl.duration(seconds=1)
+    leap = before.dt.strftime(base).str.to_lowercase() == cell.str.replace(r":60(\D|$)", ":59${1}")
+    # Only the last second of 30 June or 31 December, which rolls over to midnight, has ever been a leap second.
+    midnight = (moment.dt.hour() == 0) & (moment.dt.minute() == 0) & (moment.dt.second() == 0)
+    halves = (moment - pl.duration(seconds=1)).dt.strftime("%m-%d").is_in(["06-30", "12-31"])
+    same = (written == cell) | (leap & midnight & halves)
     return pl.when(same & parsed.dt.year().is_between(dt.MINYEAR, dt.MAXYEAR)).then(parsed)
 
 
@@ -395,6 +448,14 @@ def _check(texts: pl.DataFrame, values: pl.DataFrame, specs: Sequence[ColumnSpec
         return
     first = found.row(0, named=True)
     spec = next(spec for spec in specs if first[spec.name])
+    text = texts[spec.name][first[_AT]]
+    if texts.slice(first[_AT], 1).select(_parsed(spec)).item() is not None:  # its type, outside its Meta's limits
+        limits = ("gt", "ge", "lt", "le", "multiple_of", "min_length", "max_length", "pattern")
+        held = ", ".join(
+            f"{name}={limit!r}" for name in limits if (limit := getattr(spec.info, name, None)) is not None
+        )
+        msg = f"row {numbers[first[_AT]]}: the {spec.labels[0]!r} cell {text!r} is not within its constraints ({held})"
+        raise CellError(msg, first[_AT])
     if isinstance(spec.dtype, pl.Enum):
         what = f"one of {spec.dtype.categories.to_list()!r}"
     elif spec.formats:
@@ -402,6 +463,5 @@ def _check(texts: pl.DataFrame, values: pl.DataFrame, specs: Sequence[ColumnSpec
     else:
         what = _WHAT[spec.kind] + (f" matching {spec.column.pattern!r}" if spec.column.pattern is not None else "")
     allowed = f", nor one of {list(spec.column.missing)!r}" if spec.column.missing else ""
-    text = texts[spec.name][first[_AT]]
     msg = f"row {numbers[first[_AT]]}: the {spec.labels[0]!r} cell {text!r} is not {what}{allowed}"
     raise CellError(msg, first[_AT])

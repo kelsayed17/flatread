@@ -43,8 +43,10 @@ class EmptyBodyError(ReadError):
 class CorruptArchiveError(ReadError):
     """The body is an archive that cannot be read.
 
-    It is damaged or was cut off, or its file is encrypted, or compressed with a method no real archive uses: any but
-    stored and deflated.
+    It is damaged or was cut off, or its file is encrypted, or compressed with a method its read does not take:
+    :func:`~flatread.archives.unzip` and :func:`~flatread.archives.unzip_member` take stored and deflated files, and
+    :func:`~flatread.archives.stream_zip` and :func:`~flatread.archives.stream_unzip` deflate64 and bzip2 too, as
+    ``stream_unzip`` does.
     """
 
 

@@ -2,9 +2,10 @@
 
 import io
 import re
+import tracemalloc
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
 import polars as pl
@@ -13,6 +14,7 @@ import pytest
 from flatread.cells import CellError, Column
 from flatread.errors import CorruptArchiveError, EmptyBodyError, ReadError, UnknownLayoutError
 from flatread.workbooks import (
+    _refuse_error_cell,  # the scan's memory, which no read can measure alone
     _refuse_error_cells,  # its damaged-part branch, which no read reaches
     read_every_sheet,
     read_every_sheet_text,
@@ -237,10 +239,67 @@ def test_an_excel_error_cell_is_refused_not_read_as_empty() -> None:
             every(body)
 
 
-def test_a_self_closing_error_cell_reports_its_own_error_not_the_next_cells_value() -> None:
-    body = _with_cells('<c r="@" t="e"/>', '<c r="@"><v>1.5</v></c>')
+def test_a_self_closing_excel_error_cell_is_refused_with_no_value_not_the_next_cells() -> None:
+    body = _with_cells('<c r="@" t="e"/>', '<c r="@"><v>1</v></c>')
     with pytest.raises(UnknownLayoutError, match=r"^the 'Sheet1' sheet's cell B2 is the Excel error '', not a value$"):
         read_sheet(body, "Sheet1")
+
+
+def test_an_error_cell_whose_attribute_holds_a_closing_bracket_is_refused_with_its_value_unescaped() -> None:
+    body = _with_cells('<c s="a&gt;b>" r="@" t="e"><v>#N/A&amp;</v></c>')
+    with pytest.raises(UnknownLayoutError, match=r"^the 'Sheet1' sheet's cell B2 is the Excel error '#N/A&', not a"):
+        read_sheet(body, "Sheet1")
+
+
+#: Column B of the ADS sheet written all whole numbers, the first ``1E20``: past Int64, which holds below ``2**63``.
+_PAST_INT64 = tuple(f'<c r="@"><v>{value}</v></c>' for value in ("1E20", 2, 3, 4, 5, 6))
+
+
+def test_the_text_of_a_whole_number_past_int64_is_read() -> None:
+    """The float read beside the text read is fastexcel's own: polars would narrow the column to Int64, and fail."""
+    body = _with_cells(*_PAST_INT64)
+    assert read_sheet_text(body, "Sheet1")["ADS_Index"].to_list() == ["100000000000000000000", "2", "3", "4", "5", "6"]
+    assert read_every_sheet_text(body)["Sheet1"]["ADS_Index"][0] == "100000000000000000000"
+
+
+@pytest.mark.parametrize("dtypes", [None, "float"], ids=["inferred", "declared"])
+def test_a_float_column_polars_cannot_narrow_to_int64_is_the_columns_failure_not_a_damaged_archive(
+    dtypes: Literal["float"] | None,
+) -> None:
+    with pytest.raises(
+        UnknownLayoutError, match=r"^a column of whole numbers does not fit polars' Int64: .*'ADS_Index'"
+    ):
+        read_sheet(_with_cells(*_PAST_INT64), "Sheet1", dtypes=dtypes)
+
+
+def test_a_zip_workbook_that_is_no_xlsx_is_an_unknown_layout_not_a_damaged_one() -> None:
+    """Calamine reads an OpenDocument ``.ods``, whose error cells the scan cannot check: refused for its layout."""
+    office = "urn:oasis:names:tc:opendocument:xmlns"
+    content = (
+        f'<?xml version="1.0" encoding="UTF-8"?><office:document-content xmlns:office="{office}:office:1.0" '
+        f'xmlns:table="{office}:table:1.0" xmlns:text="{office}:text:1.0" office:version="1.2"><office:body>'
+        '<office:spreadsheet><table:table table:name="S">'
+        '<table:table-row><table:table-cell office:value-type="string"><text:p>h</text:p></table:table-cell>'
+        '</table:table-row><table:table-row><table:table-cell office:value-type="float" office:value="1.5">'
+        "<text:p>1.5</text:p></table:table-cell></table:table-row>"
+        "</table:table></office:spreadsheet></office:body></office:document-content>"
+    )
+    manifest = (
+        f'<?xml version="1.0" encoding="UTF-8"?><manifest:manifest xmlns:manifest="{office}:manifest:1.0" '
+        'manifest:version="1.2"><manifest:file-entry manifest:full-path="/" '
+        'manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/><manifest:file-entry '
+        'manifest:full-path="content.xml" manifest:media-type="text/xml"/></manifest:manifest>'
+    )
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as target:
+        target.writestr("mimetype", "application/vnd.oasis.opendocument.spreadsheet")
+        target.writestr("content.xml", content)
+        target.writestr("META-INF/manifest.xml", manifest)
+    body = out.getvalue()
+    assert pl.read_excel(io.BytesIO(body), engine="calamine", sheet_name="S")["h"].to_list() == [1.5]
+    for read in (read_sheet, read_sheet_text):
+        with pytest.raises(UnknownLayoutError, match=r"^the workbook is not an \.xlsx: its archive has no xl/workbook"):
+            read(body, "S")
 
 
 def _with_parts(parts: dict[str, bytes | None]) -> bytes:
@@ -279,6 +338,23 @@ def test_a_sheet_the_workbook_part_maps_to_no_relationship_is_a_corrupt_archive(
 def test_a_workbook_without_its_relationships_part_is_a_corrupt_archive() -> None:
     with pytest.raises(CorruptArchiveError, match=r"^the workbook cannot be read: "):
         _refuse_error_cells(_with_parts({"xl/_rels/workbook.xml.rels": None}), ["Sheet1"])
+
+
+def test_the_error_cell_scan_holds_one_row_at_a_time() -> None:
+    """A finished row is dropped from ``<sheetData>``: clearing it alone left 41 MB behind for 500,000 rows."""
+    rows = "".join(f'<row r="{i}"><c r="A{i}"><v>{i}</v></c></row>' for i in range(1, 100_001))
+    xml = f'<worksheet xmlns="{_MAIN}"><sheetData>{rows}</sheetData></worksheet>'.encode()
+    tracemalloc.start()
+    try:
+        _refuse_error_cell("S", io.BytesIO(xml))
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 2_000_000, f"the scan peaked at {peak:,} bytes"
+
+
+#: The SpreadsheetML main namespace, a worksheet part's.
+_MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 
 class _AdsDay(msgspec.Struct, frozen=True, gc=False):
@@ -343,3 +419,39 @@ def test_sheet_rows_refuse_a_cell_past_the_tables_columns_and_no_rows() -> None:
         read_sheet_rows(grid, [0, 1], ["Name", "Count"], _Pair)
     with pytest.raises(EmptyBodyError, match=r"^the sheet has a header and no rows$"):
         read_sheet_rows(grid, [], ["Name", "Count"], _Pair)
+
+
+@pytest.mark.parametrize(
+    ("rows", "labels", "message"),
+    [
+        ([0], ["a", "b", "c"], r"^the header has 3 labels but the sheet 2 columns$"),
+        ([5], ["a", "b"], r"^row 6 is not in the sheet, which has 2 rows$"),
+        ([-1], ["a", "b"], r"^row 0 is not in the sheet, which has 2 rows$"),
+    ],
+    ids=["more labels than columns", "a row past the sheet", "a negative row"],
+)
+def test_sheet_rows_refuse_a_table_the_grid_does_not_hold(rows: list[int], labels: list[str], message: str) -> None:
+    grid = pl.DataFrame({"column_0": ["1", "2"], "column_1": ["x", "y"]})
+    with pytest.raises(UnknownLayoutError, match=message):
+        read_sheet_rows(grid, rows, labels, _Pairs)
+
+
+class _Pairs(msgspec.Struct, frozen=True, gc=False):
+    a: Annotated[str, Column("a")]
+    b: Annotated[str, Column("b")]
+
+
+def test_sheet_rows_refuse_labels_whose_repeat_takes_a_name_already_written() -> None:
+    """``a``'s repeat is ``a_duplicated_0``, which the header also writes: ``pl.read_csv`` refuses the header too."""
+    grid = pl.DataFrame({"column_0": ["1"], "column_1": ["2"], "column_2": ["3"]})
+
+    class _Three(msgspec.Struct, frozen=True, gc=False):
+        a: Annotated[str, Column("a")]
+        b: Annotated[str, Column("a")]
+        c: Annotated[str, Column("a_duplicated_0")]
+
+    with pytest.raises(
+        UnknownLayoutError,
+        match=r"^the header writes 'a' twice and also 'a_duplicated_0': its columns cannot be named apart$",
+    ):
+        read_sheet_rows(grid, [0], ["a", "a", "a_duplicated_0"], _Three)

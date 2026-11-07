@@ -111,6 +111,15 @@ def test_an_optional_column_the_file_left_out_reads_back_as_none() -> None:
     assert typed_rows(frame, _Threshold) == [_Threshold("A", "Y", "x", "y", None)]
 
 
+class _Absent(msgspec.Struct, frozen=True, gc=False):
+    note: Annotated[str | None, Column("Note", missing=("",), optional=True)]
+
+
+@pytest.mark.parametrize("height", [0, 3])
+def test_a_row_of_only_columns_the_file_left_out_reads_one_row_per_frame_row(height: int) -> None:
+    assert typed_rows(pl.DataFrame({"Other": [1] * height}), _Absent) == [_Absent(None)] * height
+
+
 def test_a_frame_without_a_required_column_cannot_read_back() -> None:
     with pytest.raises(ValueError, match=r"no column for _Threshold\.symbol \('Symbol'\)"):
         typed_rows(pl.DataFrame({"Flag": ["Y"]}), _Threshold)

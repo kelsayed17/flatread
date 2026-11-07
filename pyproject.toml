@@ -1,6 +1,6 @@
 [project]
 name = "flatread"
-version = "0.2.0"
+version = "0.3.0"
 description = "Read the flat files publishers serve (delimited text, sheets, archives, PDF text) exactly, or fail loudly."
 readme = "README.md"
 license = "MIT"
@@ -27,7 +27,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-excel = ["polars[calamine]>=2.0"]  # flatread.workbooks: Excel sheets, through polars' calamine engine
+# flatread.workbooks: Excel sheets, through polars' calamine engine (fastexcel), whose float reads it also makes itself
+excel = ["fastexcel>=0.21", "polars[calamine]>=2.0"]
 pdf = ["pdfminer-six>=20260107"]  # flatread.pdf: a PDF's text in drawing order
 
 [project.urls]

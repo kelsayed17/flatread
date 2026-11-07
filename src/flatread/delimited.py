@@ -3,9 +3,11 @@
 :func:`read_csv` checks the header (:func:`~flatread.cells.match_header`) and each record's field count, since polars
 pads a short row with empty cells; one ``pl.read_csv`` then reads every cell as text and
 :func:`~flatread.cells.read_table` reads each strictly. A quoted field may hold a line ending, so a record may span
-lines; it is named by its first. Blank lines outside a quoted field are framing. :func:`stream_csv` reads a file too
-large to hold the same way, a batch of lines at a time. :func:`read_header` reads a header alone, for a file whose row
-struct is built from it.
+lines; it is named by its first, and only its last line's ending is framing: a CRLF inside a quoted field is the
+field's. Blank lines outside a quoted field are framing, but in a one-column file a blank line between the header (or
+the first row) and the last row may be an empty value, so it raises; leading and trailing blank lines stay framing.
+:func:`stream_csv` reads a file too large to hold the same way, a batch of lines at a time. :func:`read_header` reads
+a header alone, for a file whose row struct is built from it.
 """
 
 import codecs
@@ -45,20 +47,32 @@ class Header(NamedTuple):
 
 
 def read_header(body: bytes | str, *, separator: str = ",", quoted: bool = False) -> Header:
-    """Read the header :func:`read_csv` would: the first line of *body* that is not blank, its fields its labels.
+    """Read the header :func:`read_csv` would: the first record of *body* that is not blank, its fields its labels.
 
-    The line is read by the same ``pl.read_csv`` call as the file, as a row rather than a header, so a label written
-    twice stays as written (:func:`read_csv` names the second as polars does, ``KEY_duplicated_0``). Raises
+    The record, which a quoted label holding a line ending spans several lines of, is read by the same
+    ``pl.read_csv`` call as the file, as a row rather than a header, so a label written twice stays as written
+    (:func:`read_csv` names the second as polars does, ``KEY_duplicated_0``). Raises
     :class:`~flatread.errors.EmptyBodyError` for a body with no line that is not blank,
     :class:`~flatread.errors.EncodingError` for bytes that are not UTF-8, and
-    :class:`~flatread.errors.UnknownLayoutError` for a line polars cannot read (a quote that does not close).
+    :class:`~flatread.errors.UnknownLayoutError` for a quote that does not close or sits inside a label.
     """
-    lines = _lines(body if isinstance(body, str) else decode_utf8(body))
-    if (at := _first_filled(lines)) is None:
+    rows, numbers, unclosed, _ = _records(_lines(body if isinstance(body, str) else decode_utf8(body)), 1, quoted)
+    if not rows.len():
         msg = "the file is empty"
         raise EmptyBodyError(msg)
-    row = _read((lines[at] + "\n").encode(), separator, quoted, None, first=at + 1, has_header=False).row(0)
-    return Header(at + 1, tuple("" if label is None else str(label) for label in row))
+    return Header(numbers[0], _labels(rows[0], numbers[0], separator, quoted, unclosed=unclosed == 0))
+
+
+def _labels(record: str, line: int, separator: str, quoted: bool, *, unclosed: bool) -> tuple[str, ...]:  # noqa: FBT001
+    """Return the header *record*'s labels as written, on *line*; one whose quote does not close or is inside raises."""
+    if unclosed:
+        msg = f"line {line} opens a quoted field that does not close: {record.split(chr(10), 1)[0][:200]!r}"
+        raise UnknownLayoutError(msg)
+    if quoted and not pl.Series([record]).str.contains(_fields(separator)).item():
+        msg = f"line {line} has a quote inside a field, not around it: {record[:200]!r}"
+        raise UnknownLayoutError(msg)
+    row = _read((record + "\n").encode(), separator, quoted, None, first=line, has_header=False).row(0)
+    return tuple("" if label is None else str(label) for label in row)
 
 
 def read_csv(  # noqa: PLR0913  # the body and row, then the file's options
@@ -88,36 +102,38 @@ def read_csv(  # noqa: PLR0913  # the body and row, then the file's options
     if line_ending and not text.endswith("\n"):
         msg = f"the file ends mid-line, with {text.rsplit(chr(10), 1)[-1][:200]!r}, so it may have been cut off"
         raise TruncatedFileError(msg)
-    lines = _lines(text).slice(skip_lines)
-    first_line += skip_lines
+    rows, numbers, unclosed, blank = _records(_lines(text).slice(skip_lines), first_line + skip_lines, quoted)
     trailer = [""] if trailing_separator else []
     if header:
-        if (at := _first_filled(lines)) is None:
+        if not rows.len():
             msg = f"the file has no header after its {skip_lines} skipped lines"
             raise EmptyBodyError(msg)
-        first_line += at
-        columns = _read((lines[at] + "\n").encode(), separator, quoted, None, first=first_line, has_header=True).columns
-        lines, first_line = lines.slice(at + 1), first_line + 1
-        if trailer and columns[-1:] != trailer:
-            msg = f"the header {columns!r} does not end with the separator {separator!r}"
+        labels = list(_labels(rows[0], numbers[0], separator, quoted, unclosed=unclosed == 0))
+        rows, numbers, unclosed = rows.slice(1), numbers.slice(1), None if unclosed is None else unclosed - 1
+        if trailer and labels[-1:] != trailer:
+            msg = f"the header {labels!r} does not end with the separator {separator!r}"
             raise UnknownLayoutError(msg)
-        columns = columns[: len(columns) - len(trailer)]
+        labels = labels[: len(labels) - len(trailer)]
     else:
-        columns = wire_names([spec.labels[0] for spec in column_specs(row_type)])
+        labels = [spec.labels[0] for spec in column_specs(row_type)]
+    names = wire_names([*labels, *trailer])  # the trailer's name is one no label's can be
+    columns, trailer = names[: len(labels)], names[len(labels) :]
     match_header(columns, row_type, ordered=ordered)
-    rows, numbers, unclosed = _records(lines, first_line, quoted)
     whole = rows if unclosed is None else rows.head(unclosed)
-    ragged = _ragged(whole, numbers, len(columns) + len(trailer), separator, quoted)
+    ragged = _ragged(whole, numbers, len(names), separator, quoted)
     if ragged is None and unclosed is not None:  # a ragged row before the open quote is named first
-        ragged = unclosed, _unclosed(rows[unclosed].split("\n", 1)[0], numbers[unclosed], separator)
+        ragged = unclosed, _unclosed(rows[unclosed].split("\n", 1)[0].removesuffix("\r"), numbers[unclosed], separator)
+    if len(names) == 1 and blank is not None and (ragged is None or blank < numbers[ragged[0]]):
+        msg = f"line {blank} is blank in a one-column file: an empty value or framing"
+        ragged = numbers.search_sorted(blank), UnknownLayoutError(msg)
     if ragged is not None:  # a bad cell before a ragged row is named first
         rows, numbers = rows.head(ragged[0]), numbers.head(ragged[0])
-    schema: dict[str, type[pl.DataType]] = dict.fromkeys([*columns, *trailer], pl.String)
+    schema: dict[str, type[pl.DataType]] = dict.fromkeys(names, pl.String)
     frame = pl.DataFrame(schema=schema)
     if rows.len():
         data = (rows.str.join("\n").item() + "\n").encode()
         frame = _read(data, separator, quoted, schema, first=numbers[0], last=numbers[-1], has_header=False)
-    if trailer and (filled := frame[""].is_not_null()).any():
+    if trailer and (filled := frame[trailer[0]].is_not_null()).any():
         at = int(filled.arg_true()[0])
         ragged = at, RaggedRowError(f"line {numbers[at]} does not end with the separator {separator!r}")
         frame, numbers = frame.head(at), numbers.head(at)
@@ -128,21 +144,26 @@ def read_csv(  # noqa: PLR0913  # the body and row, then the file's options
 
 
 def _lines(text: str) -> pl.Series:
-    """Return *text*'s lines, each without its line ending (LF, or CRLF)."""
-    return pl.Series([text]).str.split("\n").explode().str.strip_suffix("\r")
+    """Return *text*'s lines, split at each LF: a CRLF's CR is still the line's, for :func:`_records` to take off."""
+    return pl.Series([text]).str.split("\n").explode()
 
 
 def _first_filled(lines: pl.Series) -> int | None:
     """Return the index of the first of *lines* that is not blank, or ``None`` when every one is."""
-    filled = (lines != "").arg_true()
+    filled = (lines.str.strip_suffix("\r") != "").arg_true()
     return int(filled[0]) if filled.len() else None
 
 
-def _records(lines: pl.Series, first_line: int, quoted: bool) -> tuple[pl.Series, pl.Series, int | None]:  # noqa: FBT001
-    """Return the file's records, each one's first line, and the one whose quoted field does not close, if any.
+def _records(
+    lines: pl.Series,
+    first_line: int,
+    quoted: bool,  # noqa: FBT001
+) -> tuple[pl.Series, pl.Series, int | None, int | None]:
+    """Return the file's records, each one's first line, the one whose quoted field does not close, and a blank line.
 
-    A record is a line, or in a quoted file the lines a quoted field holding a line ending spans, joined by LF. Only a
-    blank line outside a quoted field is framing.
+    A record is a line, or in a quoted file the lines a quoted field holding a line ending spans, joined by LF; the
+    record's own line ending (LF, or CRLF) is not part of it, while one inside its quoted field is. Only a blank line
+    outside a quoted field is framing. The blank line is the first between the first record and the last, if any.
     """
     frame = pl.DataFrame({"row": lines}).with_row_index("line", offset=first_line)
     quotes = frame["row"].str.count_matches('"', literal=True) if quoted else None
@@ -158,8 +179,12 @@ def _records(lines: pl.Series, first_line: int, quoted: bool) -> tuple[pl.Series
         )
         frame = pl.concat([frame.filter(~spanned), joined.select(frame.columns)]).sort("record")
         unclosed = quotes.sum() % 2 == 1
-    frame = frame.filter(pl.col("row") != "")
-    return frame["row"], frame["line"].cast(pl.Int64), frame.height - 1 if unclosed else None
+    frame = frame.with_columns(pl.col("row").str.strip_suffix("\r"))
+    filled = frame["row"] != ""
+    inside = ~filled & (filled.cum_sum() > 0) & (filled.cum_sum(reverse=True) > 0)
+    blank = int(frame["line"].filter(inside)[0]) if inside.any() else None
+    frame = frame.filter(filled)
+    return frame["row"], frame["line"].cast(pl.Int64), frame.height - 1 if unclosed else None, blank
 
 
 def _unclosed(opened: str, line: int, separator: str) -> UnknownLayoutError:
@@ -264,19 +289,30 @@ async def stream_csv(  # noqa: PLR0913  # the stream and row, its batch, then re
 
     The file is UTF-8 and ends with a line ending; a quoted field holding one must not straddle a batch, and one that
     does reads as a quote that does not close. A batch with a fault raises; the batches before it have been yielded.
+    A batch's trailing blank lines open the next, so a one-column file's blank line raises wherever the batches fall.
     """
     if batch_rows < 1:
         msg = f"a batch holds at least one line, not {batch_rows}"
         raise ValueError(msg)
-    head, line, first, filled = "", 1, True, False
+    head, carried, line, first, filled = "", "", 1, True, False  # line: the first of carried + the batch
+    one_column = not header and len(column_specs(row_type)) == 1
     async for batch in _batches(chunks, batch_rows, first=batch_rows + header):
-        text, first = _decode(batch, first=first), False
+        text, first = carried + _decode(batch, first=first), False
         if (at := _first_filled(_lines(text))) is None:  # blank lines are framing, before the header as after it
-            line += text.count("\n")
+            carried = text
             continue
-        if header and not head:
+        if one_column and filled and at:  # read_csv sees a header's file whole; a headerless one's rows it cannot
+            msg = f"line {line} is blank in a one-column file: an empty value or framing"
+            raise UnknownLayoutError(msg)
+        if header and not head:  # the header is the first record, which a quoted label may make several lines
+            records, numbers, *_ = _records(_lines(text), 0, quoted)
+            at, spans = numbers[0], records[0].count("\n") + 1
             lines = text.split("\n")
-            head, text, line = lines[at] + "\n", "\n".join(lines[at + 1 :]), line + at + 1
+            head, text, line = (
+                "\n".join(lines[at : at + spans]) + "\n",
+                "\n".join(lines[at + spans :]),
+                line + at + spans,
+            )
         filled = True
         frame = read_csv(
             head + text,
@@ -285,14 +321,21 @@ async def stream_csv(  # noqa: PLR0913  # the stream and row, its batch, then re
             quoted=quoted,
             header=header,
             ordered=ordered,
-            first_line=line - header,
+            first_line=line - head.count("\n"),
         )
-        line += text.count("\n")
+        carried = _trailing_blanks(text)
+        line += text.count("\n") - carried.count("\n")
         if frame.height:
             yield frame
     if not filled:
         msg = "the file is empty"
         raise EmptyBodyError(msg)
+
+
+def _trailing_blanks(text: str) -> str:
+    """Return the blank lines that end *text*, which ends with a line ending, after its last line that is not blank."""
+    tail = text[len(text.rstrip("\r\n")) :].split("\n")[1:-1]  # the last line's own CRs are in its piece, left out
+    return "".join(f"{piece}\n" for piece in tail)  # every piece is a run of CRs: each one is a blank line
 
 
 def _decode(batch: bytes, *, first: bool) -> str:
@@ -307,14 +350,24 @@ def _decode(batch: bytes, *, first: bool) -> str:
 
 
 async def _batches(chunks: AsyncIterator[bytes], lines: int, *, first: int) -> AsyncIterator[bytes]:
-    """Yield the stream's bytes *first*, then *lines*, lines at a time; a last line without its ending raises."""
-    pending, need = b"", first
+    """Yield the stream's bytes *first*, then *lines*, lines at a time; a last line without its ending raises.
+
+    Each chunk's line endings are counted once, as it arrives, and the chunks are joined only when a batch is whole.
+    """
+    parts: list[bytes] = []
+    seen, need = 0, first
     async for chunk in chunks:
-        pending += chunk
-        while pending.count(b"\n") >= need:
+        parts.append(chunk)
+        seen += chunk.count(b"\n")
+        if seen < need:
+            continue
+        pending = b"".join(parts)
+        while seen >= need:
             *batch, pending = pending.split(b"\n", need)
             yield b"\n".join(batch) + b"\n"
-            need = lines
+            seen, need = seen - need, lines
+        parts = [pending]
+    pending = b"".join(parts)
     if b"\n" in pending:
         batch, pending = pending.rsplit(b"\n", 1)
         yield batch + b"\n"

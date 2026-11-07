@@ -6,7 +6,7 @@ its width, and a streamed file must read as the whole one does, however its chun
 
 import asyncio
 import codecs
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, override
 
 import msgspec
 import polars as pl
@@ -26,7 +26,7 @@ from flatread.errors import (
 from flatread.text import split_lines
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Buffer
 
 
 class _Row(msgspec.Struct, frozen=True, gc=False):
@@ -112,9 +112,10 @@ def test_a_header_read_alone_keeps_its_labels_as_written_and_names_its_line() ->
     [
         (b"\n\r\n", EmptyBodyError, "^the file is empty$"),
         (b"\xff\n", EncodingError, "UTF-8"),
-        (b'\n"Symbol,Count\n', UnknownLayoutError, "^polars cannot read line 2: "),
+        (b'\n"Symbol,Count\n', UnknownLayoutError, "^line 2 opens a quoted field that does not close: "),
+        (b'\nSymbol,"Co"unt\n', UnknownLayoutError, "^line 2 has a quote inside a field, not around it: "),
     ],
-    ids=["no line", "not UTF-8", "a quote that does not close"],
+    ids=["no line", "not UTF-8", "a quote that does not close", "a quote inside a label"],
 )
 def test_a_header_that_cannot_be_read_alone_raises(body: bytes, error: type[ReadError], match: str) -> None:
     with pytest.raises(error, match=match):
@@ -181,6 +182,61 @@ def test_a_trailing_separator_is_framing() -> None:
 def test_a_trailing_separator_must_end_every_line(body: bytes, error: type[ReadError], named: str) -> None:
     with pytest.raises(error, match=named):
         read_csv(body, _Row, separator="|", trailing_separator=True)
+
+
+class _Unlabeled(msgspec.Struct, frozen=True, gc=False):
+    symbol: Annotated[str, Column("Symbol")]
+    unlabeled: Annotated[int, Column("")]
+    count: Annotated[int, Column("Count")]
+
+
+@pytest.mark.parametrize("header", [True, False])
+def test_a_trailing_separator_is_told_apart_from_an_empty_label(*, header: bool) -> None:
+    body = (b"Symbol||Count|\n" if header else b"") + b"A|1|2|\n"
+    frame = read_csv(body, _Unlabeled, separator="|", header=header, trailing_separator=True)
+    assert _rows(frame) == (["Symbol", "", "Count"], [("A", 1, 2)])
+
+
+def test_a_header_record_may_hold_a_line_ending_in_a_quoted_label() -> None:
+    class Spanned(msgspec.Struct, frozen=True, gc=False):
+        symbol: Annotated[str, Column("Symbol")]
+        count: Annotated[int, Column("Count\r\nof shares")]
+
+    body = b'\nSymbol,"Count\r\nof shares"\r\nA,1\r\nB,x\r\n'
+    assert read_header(body, quoted=True) == Header(2, ("Symbol", "Count\r\nof shares"))
+    with pytest.raises(CellError, match=r"^row 5: the 'Count\\r\\nof shares' cell 'x'"):
+        read_csv(body, Spanned, quoted=True)
+    assert read_csv(body.replace(b"B,x", b"B,2"), Spanned, quoted=True).columns == ["Symbol", "Count\r\nof shares"]
+
+
+class _One(msgspec.Struct, frozen=True, gc=False):
+    symbol: Annotated[str | None, Column("Symbol", missing=("",))]
+
+
+@pytest.mark.parametrize(
+    ("body", "header", "named"),
+    [
+        (b"Symbol\nA\n\nB\n", True, "line 3"),
+        (b"Symbol\n\r\nA\n", True, "line 2"),
+        (b"A\n\nB\n", False, "line 2"),
+    ],
+    ids=["between rows", "after the header", "headerless"],
+)
+def test_a_blank_line_inside_a_one_column_file_is_refused(body: bytes, *, header: bool, named: str) -> None:
+    with pytest.raises(UnknownLayoutError, match=rf"^{named} is blank in a one-column file"):
+        read_csv(body, _One, header=header)
+
+
+def test_a_bad_cell_before_a_blank_line_in_a_one_column_file_is_named_first() -> None:
+    class Code(msgspec.Struct, frozen=True, gc=False):
+        code: Annotated[int, Column("Code")]
+
+    with pytest.raises(CellError, match=r"^row 2: the 'Code' cell 'x'"):
+        read_csv(b"Code\nx\n\n1\n", Code)
+
+
+def test_blank_lines_around_a_one_column_files_rows_are_framing() -> None:
+    assert read_csv(b'\nSymbol\nA\n""\nB\n\n\r\n', _One, quoted=True).rows() == [("A",), (None,), ("B",)]
 
 
 def test_a_file_that_always_ends_with_a_line_ending_is_cut_off_without_one() -> None:
@@ -263,9 +319,18 @@ def test_a_headerless_file_of_the_wrong_width_is_a_read_error(body: bytes) -> No
         (b'Symbol,Count\n"A\nB\nC\nD",1\n', ["A\nB\nC\nD"]),
         (b'Symbol,Count\n"A\n\nB",1\n\nC,2\n', ["A\n\nB", "C"]),
         (b'Symbol,Count\n"A\n""B""\nC",1\n', ['A\n"B"\nC']),
-        (b'Symbol,Count\r\n"A, x\r\nB",1\r\n', ["A, x\nB"]),
+        (b'Symbol,Count\r\n"A, x\r\nB",1\r\n', ["A, x\r\nB"]),
+        (b'Symbol,Count\n"A\r\n\r\nB",1\r\n\r\nC,2\n', ["A\r\n\r\nB", "C"]),
     ],
-    ids=["two lines", "three lines", "four lines", "a blank line kept", "a line of doubled quotes", "CRLF"],
+    ids=[
+        "two lines",
+        "three lines",
+        "four lines",
+        "a blank line kept",
+        "a line of doubled quotes",
+        "CRLF",
+        "a blank CRLF line kept",
+    ],
 )
 def test_a_quoted_field_may_hold_a_line_ending(body: bytes, symbols: list[str]) -> None:
     assert read_csv(body, _Row, quoted=True)["Symbol"].to_list() == symbols
@@ -333,7 +398,7 @@ async def _stream(  # the body, how it arrives, then stream_csv's options
 
 
 _SIZES = pytest.mark.parametrize("size", [1, 3, 1 << 16], ids=["byte", "three", "whole"])
-_BATCHES = pytest.mark.parametrize("batch_rows", [1, 2, 10])
+_BATCHES = pytest.mark.parametrize("batch_rows", [1, 2, 3, 10])  # 3 ends a batch on the blank line below
 
 
 @_SIZES
@@ -449,6 +514,80 @@ async def test_a_later_batch_that_is_not_utf8_raises_after_the_batches_before_it
     assert pl.concat(frames).rows() == [("A", 1), ("B", 2)]
 
 
+@_SIZES
+@_BATCHES
+@pytest.mark.parametrize("header", [True, False])
+async def test_a_blank_line_inside_a_streamed_one_column_file_is_refused_wherever_the_batches_fall(
+    size: int, batch_rows: int, *, header: bool
+) -> None:
+    body = (b"Symbol\n" if header else b"") + b"A\nB\n\r\n\nC\n"
+    with pytest.raises(UnknownLayoutError, match=rf"^line {3 + header} is blank in a one-column file"):
+        async for _ in stream_csv(_chunks(body, size), _One, batch_rows=batch_rows, header=header):
+            pass
+
+
+@_SIZES
+@_BATCHES
+async def test_a_streamed_one_column_files_trailing_blank_lines_are_framing(size: int, batch_rows: int) -> None:
+    body = b"\nSymbol\nA\nB\n\n\r\n"
+    frames = [frame async for frame in stream_csv(_chunks(body, size), _One, batch_rows=batch_rows)]
+    assert_frame_equal(pl.concat(frames), read_csv(body, _One))
+
+
+@_BATCHES
+async def test_a_streamed_header_may_span_lines(batch_rows: int) -> None:
+    body = b'Symbol,"Co\nunt"\nA,1\nB,x\n'
+
+    class Spanned(msgspec.Struct, frozen=True, gc=False):
+        symbol: Annotated[str, Column("Symbol")]
+        count: Annotated[int, Column("Co\nunt")]
+
+    with pytest.raises(CellError, match=r"^row 4: the 'Co\\nunt' cell 'x'"):
+        async for _ in stream_csv(_chunks(body, 3), Spanned, batch_rows=batch_rows, quoted=True):
+            pass
+
+
+class _Counted(bytes):
+    """A chunk that keeps how many bytes are scanned for line endings, by it or by what it is added to."""
+
+    scanned: ClassVar[list[int]] = []
+
+    @override
+    def count(self, *args: Any) -> int:
+        _Counted.scanned.append(len(self))
+        return super().count(*args)
+
+    @override
+    def __add__(self, other: Buffer) -> _Counted:
+        return _Counted(bytes(self) + other)
+
+    def __radd__(self, other: Buffer) -> _Counted:
+        return _Counted(bytes(other) + bytes(self))
+
+
+@pytest.mark.parametrize("size", [1, 4096], ids=["byte", "4 KB"])
+async def test_a_large_batch_is_scanned_once_however_small_its_chunks(size: int) -> None:
+    body = b"Symbol,Count\n" + b"".join(b"S%d,%d\n" % (at, at) for at in range(20_000))
+
+    async def chunks() -> AsyncIterator[bytes]:
+        for at in range(0, len(body), size):
+            yield _Counted(body[at : at + size])
+
+    _Counted.scanned.clear()
+    frames = [frame async for frame in stream_csv(chunks(), _Row, batch_rows=10_000)]
+    assert sum(_Counted.scanned) == len(body)
+    assert [frame.height for frame in frames] == [10_000, 10_000]
+    assert_frame_equal(pl.concat(frames), read_csv(body, _Row))
+
+
 async def test_a_quoted_field_that_straddles_a_batch_is_an_open_quote() -> None:
     with pytest.raises(UnknownLayoutError, match=r"^line 2 opens a quoted field that does not close"):
         await _stream(b'Symbol,Count\n"A\nB",1\n', 1 << 16, 1, [], quoted=True)
+
+
+@_SIZES
+async def test_a_stream_whose_later_batch_is_not_utf8_raises_after_the_batches_before(size: int) -> None:
+    into: list[pl.DataFrame] = []
+    with pytest.raises(EncodingError, match=r"^the file is not UTF-8: "):
+        await _stream(b"Symbol,Count\nA,1\nB,2\nC,\xff\n", size, 1, into)
+    assert [frame.rows() for frame in into] == [[("A", 1)], [("B", 2)]]

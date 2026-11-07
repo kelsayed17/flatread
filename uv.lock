@@ -365,7 +365,7 @@ wheels = [
 
 [[package]]
 name = "flatread"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "msgspec" },
@@ -376,6 +376,7 @@ dependencies = [
 
 [package.optional-dependencies]
 excel = [
+    { name = "fastexcel" },
     { name = "polars", extra = ["calamine"] },
 ]
 pdf = [
@@ -398,6 +399,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastexcel", marker = "extra == 'excel'", specifier = ">=0.21" },
     { name = "msgspec", specifier = ">=0.22" },
     { name = "pdfminer-six", marker = "extra == 'pdf'", specifier = ">=20260107" },
     { name = "polars", specifier = ">=2.0" },
