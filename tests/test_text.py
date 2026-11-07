@@ -33,17 +33,17 @@ def test_decode_utf8_takes_off_a_byte_order_mark_and_refuses_any_other_encoding(
 @pytest.mark.parametrize(
     ("text", "head", "tail", "expected"),
     [
-        ("H\na\nb\nT\n", 1, 1, (["H"], "a\nb", ["T"])),
-        ("H\r\na\r\nT\r\n", 1, 1, (["H"], "a", ["T"])),
-        ("\nH\n\na\n\nT\n\n", 1, 1, (["H"], "\na\n", ["T"])),
-        ("a\nb\nT", 0, 1, ([], "a\nb", ["T"])),
-        ("H\nT\n", 1, 1, (["H"], "", ["T"])),
-        ("a\nb\n", 0, 0, ([], "a\nb\n", [])),
+        ("H\na\nb\nT\n", 1, 1, (["H"], "a\nb", ["T"], 2)),
+        ("H\r\na\r\nT\r\n", 1, 1, (["H"], "a", ["T"], 2)),
+        ("\nH\n\na\n\nT\n\n", 1, 1, (["H"], "\na\n", ["T"], 3)),
+        ("a\nb\nT", 0, 1, ([], "a\nb", ["T"], 1)),
+        ("H\nT\n", 1, 1, (["H"], "", ["T"], 2)),
+        ("a\nb\n", 0, 0, ([], "a\nb\n", [], 1)),
     ],
     ids=["a head and a tail", "CRLF", "blank lines are not counted", "no final line ending", "no rows", "neither"],
 )
 def test_split_lines_takes_the_files_own_lines_off_its_rows(
-    text: str, head: int, tail: int, expected: tuple[list[str], str, list[str]]
+    text: str, head: int, tail: int, expected: tuple[list[str], str, list[str], int]
 ) -> None:
     assert split_lines(text, head=head, tail=tail) == expected
 

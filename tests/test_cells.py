@@ -49,7 +49,7 @@ def test_a_float_is_what_polars_casts() -> None:
     assert _one(_Float, "1", "1.5", ".5", "1.", "+4", "1e3", "1e-400") == [1.0, 1.5, 0.5, 1.0, 4.0, 1000.0, 0.0]
 
 
-@pytest.mark.parametrize("cell", ["", " 1", "1,5", "0x1", "1.2.3"])
+@pytest.mark.parametrize("cell", ["", " 1", "1,5", "0x1", "1.2.3", "1e400", "-1e400"])
 def test_a_float_refuses_any_other_text(cell: str) -> None:
     _refused(_Float, cell)
 
@@ -227,6 +227,14 @@ class _Utc(msgspec.Struct, frozen=True, gc=False):
     at: Annotated[UtcDatetime, Column("At", format="%Y-%m-%d %H:%M:%S")]
 
 
+class _Tape(msgspec.Struct, frozen=True, gc=False):
+    at: Annotated[UtcDatetime, Column("At", format="%Y-%m-%d %H:%M:%S%.f%#z")]
+
+
+class _Zulu(msgspec.Struct, frozen=True, gc=False):
+    at: Annotated[dt.datetime, Column("At", format="%Y-%m-%dT%H:%M:%S%.fZ")]
+
+
 def test_a_datetime_reads_with_or_without_its_fraction() -> None:
     assert _one(_At, "2026-01-02 03:04:05.25", "2026-01-02 03:04:05") == [
         dt.datetime(2026, 1, 2, 3, 4, 5, 250000),
@@ -254,6 +262,43 @@ def test_a_utc_datetime_reads_its_offset_into_utc() -> None:
     ]
     for cell in ("2026-01-02 03:04:05", "2026-02-30 03:04:05+0000"):
         _refused(_Stamped, cell)
+
+
+def test_a_utc_datetime_reads_any_offset_its_format_does() -> None:
+    """Unusual Whales writes ``+00``, an offset of hours alone, which ``%#z`` reads, as it reads ``Z``."""
+    assert _one(
+        _Tape,
+        "2024-08-21 13:50:52.278302+00",
+        "2024-08-21 13:50:52Z",
+        "2024-08-21 13:50:52+0000",
+        "2024-08-21 08:50:52-05:00",
+    ) == [
+        dt.datetime(2024, 8, 21, 13, 50, 52, 278302, tzinfo=dt.UTC),
+        dt.datetime(2024, 8, 21, 13, 50, 52, tzinfo=dt.UTC),
+        dt.datetime(2024, 8, 21, 13, 50, 52, tzinfo=dt.UTC),
+        dt.datetime(2024, 8, 21, 13, 50, 52, tzinfo=dt.UTC),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("row_type", "cell"),
+    [
+        (_Stamped, "26-01-02 03:04:05+0000"),
+        (_Stamped, "2026-01-02 3:4:5+0000"),
+        (_Tape, "24-08-21 13:50:52.278302+00"),
+        (_Tape, "2024-08-21 13:50:52.278302+0"),
+    ],
+    ids=["a two-digit year", "unpadded", "a two-digit year before an hours offset", "a one-digit offset"],
+)
+def test_a_moment_with_an_offset_that_does_not_write_back_is_refused(row_type: type[msgspec.Struct], cell: str) -> None:
+    _refused(row_type, cell)
+
+
+def test_a_fraction_reads_with_text_after_it() -> None:
+    assert _one(_Zulu, "2025-01-01T00:00:00Z", "2025-01-01T00:00:00.123Z") == [
+        dt.datetime(2025, 1, 1),
+        dt.datetime(2025, 1, 1, 0, 0, 0, 123000),
+    ]
 
 
 def test_a_utc_datetime_whose_format_has_no_offset_is_read_as_utc() -> None:
@@ -340,6 +385,10 @@ class _NumberLiteral(msgspec.Struct, frozen=True, gc=False):
     a: Annotated[Literal[1, 2], Column("A")]
 
 
+class _OffsetFirst(msgspec.Struct, frozen=True, gc=False):
+    a: Annotated[UtcDatetime, Column("A", format="%z %Y-%m-%d %H:%M:%S")]
+
+
 @pytest.mark.parametrize(
     ("row_type", "error", "named"),
     [
@@ -351,6 +400,7 @@ class _NumberLiteral(msgspec.Struct, frozen=True, gc=False):
         (_Unreadable, TypeError, "which no cell reads as"),
         (_BoolWithoutTokens, ValueError, "without both its true and false tokens"),
         (_NumberLiteral, TypeError, "only text values read from a cell"),
+        (_OffsetFirst, ValueError, r"an offset \(%z or %#z\) ends its format"),
     ],
 )
 def test_a_declaration_that_cannot_be_read_fails_before_any_cell(

@@ -6,9 +6,11 @@ are the source's own labels (as ``pl.read_csv`` or ``pl.read_excel`` names them)
 conversions. Each cell is its field's value, ``None`` for one of the column's ``missing`` tokens, or an
 :class:`~flatread.errors.UnknownLayoutError` naming the row, the column and the text: never silently ``None``.
 
-``int`` reads by ``str.to_integer``, ``float`` by a cast to ``Float64``, ``bool`` by ``replace_strict`` on the column's
-two tokens, a ``Literal`` as a ``pl.Enum``, and a date or datetime by ``str.to_datetime`` in one of the column's
-formats, checked by writing the value back in that format (polars' ``%Y`` alone reads ``12/31/25`` as the year 25).
+``int`` reads by ``str.to_integer``, ``float`` by a cast to ``Float64`` (a number too large for one is refused, not
+read as an infinity), ``bool`` by ``replace_strict`` on the column's two tokens, a ``Literal`` as a ``pl.Enum``, and a
+date or datetime by ``str.to_datetime`` in one of the column's formats, checked by writing the value back in that
+format (polars' ``%Y`` alone reads ``12/31/25`` as the year 25). A format with an offset (``%z`` or ``%#z``) ends with
+it, and the cell's text before its offset is the text checked so.
 A field's ``Meta`` constraints are checked too.
 """
 
@@ -34,6 +36,7 @@ __all__ = [
     "ColumnSpec",
     "UtcDatetime",
     "column_specs",
+    "dtype_of",
     "match_header",
     "read_table",
     "resolve_type",
@@ -50,6 +53,12 @@ NONFINITE: Final = r"[+-]?(?i:inf|infinity|nan)"
 DECIMAL: Final = r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
 
 _AT: Final = "row index"
+
+#: A format's offset directive, ``%z`` or ``%#z``.
+_OFFSET_DIRECTIVE: Final = re.compile(r"%#?z")
+
+#: A cell's offset at its end, as polars' ``%#z`` reads one: ``Z``, ``+HH``, ``+HHMM`` or ``+HH:MM``, either sign.
+_OFFSET: Final = r"(?:Z|[+-][0-9]{2}(?::?[0-9]{2})?)$"
 
 #: What a cell of each type is, in an error.
 _WHAT: Final[dict[type, str]] = {
@@ -126,6 +135,7 @@ def resolve_type(info: msgspec.inspect.Type) -> tuple[msgspec.inspect.Type, bool
             return info, nullable
 
 
+#: The cell type and the column type of each msgspec type a cell reads as.
 _KINDS: Final[dict[type, tuple[type, pl.DataType]]] = {
     msgspec.inspect.StrType: (str, pl.String()),
     msgspec.inspect.IntType: (int, pl.Int64()),
@@ -134,6 +144,21 @@ _KINDS: Final[dict[type, tuple[type, pl.DataType]]] = {
     msgspec.inspect.DateType: (dt.date, pl.Date()),
     msgspec.inspect.DateTimeType: (dt.datetime, pl.Datetime("us")),
 }
+
+
+def dtype_of(info: msgspec.inspect.Type) -> pl.DataType | None:
+    """Return the column type of a field of msgspec type *info*, resolved (:func:`resolve_type`); ``None`` for none.
+
+    A ``Literal`` of texts is an ``Enum`` of them, sorted, and a ``Meta(tz=True)`` datetime (a :data:`UtcDatetime`) is
+    a ``Datetime`` in UTC.
+    """
+    if isinstance(info, msgspec.inspect.LiteralType):
+        texts = all(isinstance(value, str) for value in info.values)
+        return pl.Enum(sorted(str(value) for value in info.values)) if texts else None
+    if isinstance(info, msgspec.inspect.DateTimeType) and info.tz is True:
+        return pl.Datetime("us", "UTC")
+    found = _KINDS.get(type(info))
+    return found[1] if found is not None else None
 
 
 @cache
@@ -156,18 +181,13 @@ def _spec(row_type: type, field: msgspec.structs.FieldInfo, info: msgspec.inspec
     except TypeError as exc:
         msg = f"{where} is {exc}"
         raise TypeError(msg) from None
-    if isinstance(resolved, msgspec.inspect.LiteralType):
-        if not all(isinstance(value, str) for value in resolved.values):
+    if (dtype := dtype_of(resolved)) is None:
+        if isinstance(resolved, msgspec.inspect.LiteralType):
             msg = f"{where} is a Literal of {resolved.values!r}: only text values read from a cell"
-            raise TypeError(msg)
-        kind, dtype = str, pl.Enum(sorted(str(value) for value in resolved.values))
-    elif (found := _KINDS.get(type(resolved))) is not None:
-        kind, dtype = found
-        if isinstance(resolved, msgspec.inspect.DateTimeType) and resolved.tz is True:
-            dtype = pl.Datetime("us", "UTC")
-    else:
-        msg = f"{where} is a {resolved!r}, which no cell reads as"
+        else:
+            msg = f"{where} is a {resolved!r}, which no cell reads as"
         raise TypeError(msg)
+    kind = str if isinstance(dtype, pl.Enum) else _KINDS[type(resolved)][0]
     if (column.missing or column.optional) and not nullable:
         msg = f"{where} declares missing tokens or an optional column but cannot be None"
         raise ValueError(msg)
@@ -178,10 +198,13 @@ def _spec(row_type: type, field: msgspec.structs.FieldInfo, info: msgspec.inspec
     if (kind in {dt.date, dt.datetime}) != bool(formats):
         msg = f"{where}: a date or datetime gives its format, and only it does"
         raise ValueError(msg)
-    if any("%z" in fmt or "%#z" in fmt for fmt in formats) and not (
+    if any(_OFFSET_DIRECTIVE.search(fmt) for fmt in formats) and not (
         isinstance(dtype, pl.Datetime) and dtype.time_zone is not None
     ):
         msg = f"{where} reads an offset, so it is a UtcDatetime"
+        raise ValueError(msg)
+    if any(_OFFSET_DIRECTIVE.search(_before_offset(fmt)) for fmt in formats):
+        msg = f"{where}: an offset (%z or %#z) ends its format"
         raise ValueError(msg)
     if kind is bool and (column.true is None or column.false is None):
         msg = f"{where} is a bool without both its true and false tokens"
@@ -301,25 +324,47 @@ def _read(text: pl.Expr, spec: ColumnSpec) -> pl.Expr:
     if column.parens_negative:
         bracketed = text.str.starts_with("(") & text.str.ends_with(")")
         text = pl.when(bracketed).then("-" + text.str.strip_prefix("(").str.strip_suffix(")")).otherwise(text)
-    return text.str.to_integer(strict=False) if spec.kind is int else text.cast(pl.Float64, strict=False)
+    if spec.kind is int:
+        return text.str.to_integer(strict=False)
+    value = text.cast(pl.Float64, strict=False)
+    # polars casts a number too large for a float to an infinity; only an infinity written by name is one.
+    return pl.when(value.is_infinite() & ~text.str.contains(f"^(?:{NONFINITE})$")).then(None).otherwise(value)
+
+
+def _before_offset(fmt: str) -> str:
+    """Return *fmt* without the offset directive (``%z`` or ``%#z``) that ends it; *fmt* itself without one."""
+    return re.sub(r"%#?z$", "", fmt)
 
 
 def _moment(text: pl.Expr, fmt: str, spec: ColumnSpec) -> pl.Expr:
-    """Return *text* read in *fmt*, kept only where writing it back in *fmt* gives the cell again."""
-    offset = "%z" in fmt or "%#z" in fmt
-    parsed = text.str.to_datetime(fmt, time_unit="us", time_zone="UTC" if offset else None, strict=False, exact=True)
-    if not offset:
-        # Case aside (a month's name); a fraction (%.f) compared without it; a leap second written back as :60.
-        base, cell = fmt.replace("%.f", ""), text.str.to_lowercase()
-        if "%.f" in fmt:
-            cell = cell.str.replace(r"\.[0-9]{1,6}$", "")
-        written = parsed.dt.strftime(base).str.to_lowercase()
-        leap = (parsed - pl.duration(seconds=1)).dt.strftime(base).str.to_lowercase()
-        same = (written == cell) | (leap == cell.str.replace(r":60(\D|$)", ":59${1}"))
-        parsed = pl.when(same & parsed.dt.year().is_between(dt.MINYEAR, dt.MAXYEAR)).then(parsed)
+    """Return *text* read in *fmt*, kept only where writing it back in *fmt* gives the cell again.
+
+    A format with an offset ends with it (:func:`_spec` checks so). The cell is read whole, into UTC, and the text
+    before its offset is the one written back, in the format before the offset: polars does not write an offset as
+    the cell may (``Z``, or ``+00`` for ``%#z``).
+    """
+    if (head := _before_offset(fmt)) == fmt:
+        parsed = _written_back(text, fmt)
         if isinstance(spec.dtype, pl.Datetime) and spec.dtype.time_zone == "UTC":
             parsed = parsed.dt.replace_time_zone("UTC")
+    else:
+        local = _written_back(text.str.replace(_OFFSET, ""), head)
+        whole = text.str.to_datetime(fmt, time_unit="us", time_zone="UTC", strict=False, exact=True)
+        parsed = pl.when(local.is_not_null() & text.str.contains(_OFFSET)).then(whole)
     return parsed.dt.date() if spec.kind is dt.date else parsed
+
+
+def _written_back(text: pl.Expr, fmt: str) -> pl.Expr:
+    """Return *text* read naive in *fmt*, kept only where writing it back in *fmt* gives the text again."""
+    parsed = text.str.to_datetime(fmt, time_unit="us", strict=False, exact=True)
+    # Case aside (a month's name); a fraction (%.f) compared without it; a leap second written back as :60.
+    base, cell = fmt.replace("%.f", ""), text.str.to_lowercase()
+    if "%.f" in fmt:
+        cell = cell.str.replace(r"(:[0-9]{2})\.[0-9]{1,6}", "${1}")
+    written = parsed.dt.strftime(base).str.to_lowercase()
+    leap = (parsed - pl.duration(seconds=1)).dt.strftime(base).str.to_lowercase()
+    same = (written == cell) | (leap == cell.str.replace(r":60(\D|$)", ":59${1}"))
+    return pl.when(same & parsed.dt.year().is_between(dt.MINYEAR, dt.MAXYEAR)).then(parsed)
 
 
 def _within(value: pl.Expr, info: msgspec.inspect.Type) -> pl.Expr | None:

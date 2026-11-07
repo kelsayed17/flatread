@@ -14,7 +14,7 @@ import pytest
 from polars.testing import assert_frame_equal
 
 from flatread.cells import CellError, Column
-from flatread.delimited import read_csv, stream_csv
+from flatread.delimited import Header, read_csv, read_header, stream_csv
 from flatread.errors import (
     EmptyBodyError,
     EncodingError,
@@ -56,6 +56,11 @@ def test_a_file_reads_under_its_own_labels(body: bytes) -> None:
     assert _rows(read_csv(body, _Row)) == _READ
 
 
+def test_a_byte_order_mark_that_does_not_open_the_file_is_its_text() -> None:
+    body = b"Symbol,Count\n" + codecs.BOM_UTF8 + b"A,1\n"
+    assert read_csv(body, _Row)["Symbol"].to_list() == ["\ufeffA"]
+
+
 def test_a_header_alone_is_a_file_of_no_rows() -> None:
     assert _rows(read_csv(b"Symbol,Count\n", _Row)) == (["Symbol", "Count"], [])
 
@@ -94,6 +99,26 @@ def test_a_repeated_label_is_named_as_polars_names_it(*, header: bool) -> None:
     body = b"Symbol|Filler|Filler\n" * header + b"A||x\n"
     frame = read_csv(body, _Fillers, separator="|", header=header)
     assert _rows(frame) == (["Symbol", "Filler", "Filler_duplicated_0"], [("A", None, "x")])
+
+
+def test_a_header_read_alone_keeps_its_labels_as_written_and_names_its_line() -> None:
+    body = b'\r\n\nSymbol,"A, B",Symbol,\r\nA,1,2,3\r\n'
+    assert read_header(body, quoted=True) == Header(3, ("Symbol", "A, B", "Symbol", ""))
+    assert read_header("Symbol|Count", separator="|") == Header(1, ("Symbol", "Count"))
+
+
+@pytest.mark.parametrize(
+    ("body", "error", "match"),
+    [
+        (b"\n\r\n", EmptyBodyError, "^the file is empty$"),
+        (b"\xff\n", EncodingError, "UTF-8"),
+        (b'\n"Symbol,Count\n', UnknownLayoutError, "^polars cannot read line 2: "),
+    ],
+    ids=["no line", "not UTF-8", "a quote that does not close"],
+)
+def test_a_header_that_cannot_be_read_alone_raises(body: bytes, error: type[ReadError], match: str) -> None:
+    with pytest.raises(error, match=match):
+        read_header(body, quoted=True)
 
 
 class _Versions(msgspec.Struct, frozen=True, gc=False):
@@ -191,8 +216,20 @@ def test_the_body_must_be_utf8_unless_it_is_text_already() -> None:
 
 
 def test_a_files_own_lines_come_off_before_its_rows_are_read() -> None:
-    head, rows, tail = split_lines("As of 2026-01-02\nSymbol,Count\nA,1\nB,2\n2 rows\n", head=1, tail=1)
+    head, rows, tail, _ = split_lines("As of 2026-01-02\nSymbol,Count\nA,1\nB,2\n2 rows\n", head=1, tail=1)
     assert (head, _rows(read_csv(rows, _Row)), tail) == (["As of 2026-01-02"], _READ, ["2 rows"])
+
+
+def test_the_rows_after_a_files_own_lines_are_named_by_their_line_in_the_file() -> None:
+    split = split_lines("As of 2026-01-02\n\nSymbol,Count\nA,1\nB,x\n2 rows\n", head=1, tail=1)
+    with pytest.raises(CellError, match=r"^row 5: the 'Count' cell 'x'"):
+        read_csv(split.text, _Row, first_line=split.first_line)
+
+
+@pytest.mark.parametrize(("body", "skip_lines"), [(b"Symbol,Count\n", 3), (b"Report\n\n\n", 1)])
+def test_lines_skipped_past_the_last_leave_no_header(body: bytes, skip_lines: int) -> None:
+    with pytest.raises(EmptyBodyError, match=f"^the file has no header after its {skip_lines} skipped lines$"):
+        read_csv(body, _Row, skip_lines=skip_lines)
 
 
 # Core gaps found while rewriting this suite: each is the behavior the read should have.
@@ -218,8 +255,64 @@ def test_a_headerless_file_of_the_wrong_width_is_a_read_error(body: bytes) -> No
         pytest.fail(f"{type(exc).__name__}: {exc}")
 
 
-def test_a_quoted_field_may_hold_a_line_ending() -> None:
-    assert read_csv(b'Symbol,Count\n"A\nB",1\n', _Row, quoted=True)["Symbol"].to_list() == ["A\nB"]
+@pytest.mark.parametrize(
+    ("body", "symbols"),
+    [
+        (b'Symbol,Count\n"A\nB",1\n', ["A\nB"]),
+        (b'Symbol,Count\n"A\nB\nC",1\nD,2\n', ["A\nB\nC", "D"]),
+        (b'Symbol,Count\n"A\nB\nC\nD",1\n', ["A\nB\nC\nD"]),
+        (b'Symbol,Count\n"A\n\nB",1\n\nC,2\n', ["A\n\nB", "C"]),
+        (b'Symbol,Count\n"A\n""B""\nC",1\n', ['A\n"B"\nC']),
+        (b'Symbol,Count\r\n"A, x\r\nB",1\r\n', ["A, x\nB"]),
+    ],
+    ids=["two lines", "three lines", "four lines", "a blank line kept", "a line of doubled quotes", "CRLF"],
+)
+def test_a_quoted_field_may_hold_a_line_ending(body: bytes, symbols: list[str]) -> None:
+    assert read_csv(body, _Row, quoted=True)["Symbol"].to_list() == symbols
+
+
+@pytest.mark.parametrize(
+    ("body", "named"),
+    [
+        (b'Symbol,Count\nA,1\n"B\nC"\nD,4\n', r"^line 3 has 1 fields, not the header's 2: '\"B\\nC\"'"),
+        (b'Symbol,Count\n"B\nC"\nD,4\n', r"^line 2 has 1 fields, not the header's 2"),
+    ],
+    ids=["after a row", "the first row"],
+)
+def test_a_short_record_of_several_lines_is_ragged_at_its_first(body: bytes, named: str) -> None:
+    with pytest.raises(RaggedRowError, match=named):
+        read_csv(body, _Row, quoted=True)
+
+
+def test_a_cell_after_a_record_of_several_lines_is_named_by_its_own_line() -> None:
+    with pytest.raises(CellError, match=r"^row 4: the 'Count' cell 'x'"):
+        read_csv(b'Symbol,Count\n"A\nB",1\nC,x\n', _Row, quoted=True)
+
+
+@pytest.mark.parametrize(
+    ("body", "error", "named"),
+    [
+        (b'Symbol,Count\nA,1\nB,"2\nC,3\n', UnknownLayoutError, r"^line 3 opens a quoted field that does not close"),
+        (b'Symbol,Count\nA,1\nB,x"y\n', UnknownLayoutError, r"^line 3 has a quote inside a field, not around it"),
+        (b'Symbol,Count\n5" pipe,2\n3,4\n', UnknownLayoutError, r"^line 2 has a quote inside a field, not around it"),
+        (b'Symbol,Count\nA\nB,"2\n', RaggedRowError, r"^line 2 has 1 fields"),
+        (b'Symbol,Count\nA,"x"y\n', UnknownLayoutError, r"^line 2 has a quote inside a field, not around it: "),
+        (b'Symbol,Count\nA,1\nB,"x"y\n', UnknownLayoutError, r"^line 3 has a quote inside a field, not around it: "),
+        (b'Symbol,Count\nA,1\n"B"C,2\n', UnknownLayoutError, r"^line 3 has a quote inside a field, not around it: "),
+    ],
+    ids=[
+        "an open quote",
+        "a stray quote",
+        "a stray quote with balanced lines after it",
+        "a ragged row before an open quote",
+        "text after a quote",
+        "of several",
+        "text after a quoted first field",
+    ],
+)
+def test_a_malformed_quote_is_named_by_its_line(body: bytes, error: type[ReadError], named: str) -> None:
+    with pytest.raises(error, match=named):
+        read_csv(body, _Row, quoted=True)
 
 
 # --- The stream -------------------------------------------------------------------------------------------------------
@@ -252,8 +345,17 @@ _BATCHES = pytest.mark.parametrize("batch_rows", [1, 2, 10])
         b"Symbol,Count\r\nA,1\r\nB,2\r\nC,3\r\n",
         codecs.BOM_UTF8 + "Symbol,Count\nAé,1\n\nB,2\n\n".encode(),
         b"Symbol,Count\n",
+        b"\n\r\nSymbol,Count\nA,1\nB,2\nC,3\n",
+        b"Symbol,Count\nA,1\n" + codecs.BOM_UTF8 + b"B,2\n",
     ],
-    ids=["LF", "CRLF", "a byte-order mark, a multi-byte character and blank lines", "no rows"],
+    ids=[
+        "LF",
+        "CRLF",
+        "a byte-order mark, a multi-byte character and blank lines",
+        "no rows",
+        "blank lines before the header",
+        "a byte-order mark that does not open the file",
+    ],
 )
 async def test_a_streamed_file_is_the_whole_files_frame_however_the_chunks_fall(
     body: bytes, size: int, batch_rows: int
@@ -319,3 +421,34 @@ async def test_a_ragged_row_in_a_later_batch_is_named_by_its_line() -> None:
 async def test_a_stream_of_a_wrong_header_alone_is_refused() -> None:
     with pytest.raises(UnknownLayoutError, match="is not the columns"):
         await _stream(b"Symbol,Total\n", 4, 1, [])
+
+
+@pytest.mark.parametrize("header", [True, False])
+async def test_a_stream_of_blank_lines_is_empty(*, header: bool) -> None:
+    with pytest.raises(EmptyBodyError, match="the file is empty"):
+        await _stream(b"\n\r\n\n", 1, 1, [], header=header)
+
+
+async def test_a_headerless_stream_reads_past_a_batch_of_blank_lines() -> None:
+    frames: list[pl.DataFrame] = []
+    with pytest.raises(CellError, match=r"^row 4: the 'Count' cell 'x'"):
+        await _stream(b"A,1\n\n\nB,x\n", 1 << 16, 1, frames, header=False)
+    assert [frame.rows() for frame in frames] == [[("A", 1)]]
+
+
+async def test_a_streamed_cell_after_a_record_of_several_lines_is_named_by_its_own_line() -> None:
+    with pytest.raises(CellError, match=r"^row 4: the 'Count' cell 'x'"):
+        await _stream(b'Symbol,Count\n"A\nB",1\nC,x\n', 1 << 16, 3, [], quoted=True)
+
+
+@pytest.mark.parametrize("batch_rows", [1, 2])
+async def test_a_later_batch_that_is_not_utf8_raises_after_the_batches_before_it(batch_rows: int) -> None:
+    frames: list[pl.DataFrame] = []
+    with pytest.raises(EncodingError, match=r"^the file is not UTF-8: "):
+        await _stream(b"Symbol,Count\nA,1\nB,2\n\xff,3\n", 1 << 16, batch_rows, frames)
+    assert pl.concat(frames).rows() == [("A", 1), ("B", 2)]
+
+
+async def test_a_quoted_field_that_straddles_a_batch_is_an_open_quote() -> None:
+    with pytest.raises(UnknownLayoutError, match=r"^line 2 opens a quoted field that does not close"):
+        await _stream(b'Symbol,Count\n"A\nB",1\n', 1 << 16, 1, [], quoted=True)

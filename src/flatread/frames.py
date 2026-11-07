@@ -5,23 +5,14 @@
 * :func:`typed_rows` and :func:`typed_file` read a file's frame, under its own labels, back into typed rows.
 """
 
-from typing import Final, get_args, get_origin
+from typing import get_args, get_origin
 
 import msgspec
 import polars as pl
 
-from flatread.cells import column_specs, resolve_type
+from flatread.cells import column_specs, dtype_of, resolve_type
 
 __all__ = ["frame_rows", "frame_schema", "typed_file", "typed_rows"]
-
-#: The column type of each msgspec type a row struct may declare.
-_SCALARS: Final[dict[type, type[pl.DataType]]] = {
-    msgspec.inspect.StrType: pl.String,
-    msgspec.inspect.IntType: pl.Int64,
-    msgspec.inspect.FloatType: pl.Float64,
-    msgspec.inspect.BoolType: pl.Boolean,
-    msgspec.inspect.DateType: pl.Date,
-}
 
 
 def frame_schema(row_type: type[msgspec.Struct]) -> pl.Schema:
@@ -51,7 +42,8 @@ def typed_rows[RowT: msgspec.Struct](frame: pl.DataFrame, row_type: type[RowT]) 
     :class:`~flatread.cells.Column`), so each field takes the frame column its label names, or one of its alternative
     labels. A label the row declares more than once takes polars' name for its repeat, in order (``Filler``, then
     ``Filler_duplicated_0`` from a delimited file or ``Filler_1`` from a sheet). A field whose column the file left out
-    (an ``optional`` one) is ``None`` on every row. A field whose column the frame has not raises :class:`ValueError`.
+    (an ``optional`` one) is ``None`` on every row. Any other field whose column the frame has not raises
+    :class:`ValueError`, though it may be ``None``.
     """
     seen: dict[str, int] = {}
     columns: list[pl.Expr] = []
@@ -66,7 +58,7 @@ def typed_rows[RowT: msgspec.Struct](frame: pl.DataFrame, row_type: type[RowT]) 
                 break
         if found is not None:
             columns.append(pl.col(found).alias(spec.name))
-        elif spec.nullable:
+        elif spec.column.optional:
             columns.append(pl.lit(None).alias(spec.name))
         else:
             msg = f"the frame has no column for {row_type.__name__}.{spec.name} ({spec.labels[0]!r}): {frame.columns}"
@@ -102,18 +94,14 @@ def typed_file[FileT: msgspec.Struct](file: msgspec.Struct, file_type: type[File
 def _dtype(annotation: object) -> pl.DataType:
     """Return the polars type of a field annotated *annotation*, as :func:`msgspec.inspect.type_info` reads it.
 
-    A NewType is its supertype's column and ``X | None`` is ``X``'s; a :data:`~flatread.cells.UtcDatetime` (any
-    ``Meta(tz=True)`` datetime) is a ``Datetime`` column in UTC, and a ``Literal`` of texts an ``Enum`` of them.
+    A NewType is its supertype's column and ``X | None`` is ``X``'s; the column is the one a cell of the type reads
+    into (:func:`~flatread.cells.dtype_of`).
     """
     try:
         resolved, _ = resolve_type(msgspec.inspect.type_info(annotation))
     except TypeError:
         resolved = None
-    if isinstance(resolved, msgspec.inspect.LiteralType) and all(isinstance(value, str) for value in resolved.values):
-        return pl.Enum(sorted(str(value) for value in resolved.values))
-    if isinstance(resolved, msgspec.inspect.DateTimeType):
-        return pl.Datetime("us", "UTC") if resolved.tz is True else pl.Datetime("us")
-    if resolved is not None and (dtype := _SCALARS.get(type(resolved))) is not None:
-        return dtype()
+    if resolved is not None and (dtype := dtype_of(resolved)) is not None:
+        return dtype
     msg = f"no frame column type for a field annotated {annotation!r}"
     raise TypeError(msg)
