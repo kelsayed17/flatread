@@ -44,6 +44,146 @@ flatread = ["py.typed"]
 testpaths = ["tests"]
 addopts = "--import-mode=importlib --snapshot-default-extension=syrupy.extensions.json.JSONSnapshotExtension"
 asyncio_mode = "auto"
+asyncio_default_test_loop_scope = "session"
+asyncio_default_fixture_loop_scope = "session"
 
 [dependency-groups]
-dev = ["pytest>=9.0.3", "pytest-asyncio>=0.24.0", "syrupy>=6.1.1"]
+# The tests and the gates in .github/workflows/ci.yml.
+dev = [
+    "flatread[excel,pdf]",  # the suite reads sheets and PDFs too
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.24.0",  # asyncio_mode = "auto" above
+    "pytest-cov>=7.1.0",
+    "syrupy>=6.1.1",  # snapshot assertions
+    "ruff>=0.16.7",
+    "ty>=0.0.86",
+    "deptry>=0.25.1",  # [tool.deptry]: the dependencies against what src/ imports
+    "import-linter>=2.15",  # [tool.importlinter]: the module layers
+    "typos>=1.51.1",
+]
+
+[tool.uv]
+# uv ignores any distribution uploaded less than 3 days before a resolve; `uv sync --locked` installs the lock as written.
+exclude-newer = "3 days"
+
+[tool.coverage.run]
+source = ["flatread"]
+branch = true
+
+[tool.coverage.report]
+# Two decimals: a rounded "100%" would hide a miss.
+precision = 2
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    # A stub body: `...` alone on its line, or after a one-line signature's colon.
+    '^\s*\.\.\.\s*$',
+    ':\s*\.\.\.\s*$',
+]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+
+[tool.ruff.lint]
+# Every rule, minus the few below; each is ignored for the reason beside it.
+select = ["ALL"]
+ignore = [
+    # pydocstyle's mutually exclusive pairs: the summary sits on the first line (D212, not D213) and a class docstring
+    # follows its `class` line directly (D211, not D203).
+    "D203", "D213",
+    # The formatter owns trailing commas; ruff warns that this rule conflicts with it.
+    "COM812",
+    # No per-file license header: the repository carries one LICENSE file.
+    "CPY001",
+    # A TODO is tracked debt, not a defect: TD003 holds each one to a linked issue.
+    "FIX002",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.ruff.lint.isort]
+known-first-party = ["flatread"]
+
+[tool.ruff.lint.flake8-type-checking]
+# msgspec reads a Struct's field annotations at runtime to decode into it, so their imports stay at runtime.
+runtime-evaluated-base-classes = ["msgspec.Struct"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"syrupy.extensions.json.JSONSnapshotExtension".msg = "JSON is syrupy's default extension (addopts): assert `value == snapshot`."
+"__future__.annotations".msg = "Python 3.14 defers every annotation (PEP 649); the future import would stringify them again."
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    # Docstrings are required in src; a test's name says what it checks.
+    "D1", "D205",
+    # pytest's assertions are bare asserts that compare against literal expected values.
+    "S101", "PLR2004",
+    # A test reads the private state a reader builds.
+    "SLF001",
+    # Test names quote the identifiers they test.
+    "N802",
+    # tmp_path reads inside an async test touch a local temp dir; nothing else runs on that loop.
+    "ASYNC240",
+    # A test's parameters are its fixtures and parametrize columns, however many the case needs.
+    "PLR0913", "PLR0917",
+    # An expected value is the naive wall time a zoneless file writes, as the reader returns it.
+    "DTZ001", "DTZ007",
+    # A read float is compared exactly with the literal it was read from: equality is what is tested.
+    "RUF069",
+    # A test collects a stream an item at a time, so the items before an error are kept.
+    "PERF401",
+]
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.analysis]
+# `# type: ignore` belongs to mypy and pyright; a ty finding is suppressed with `# ty: ignore[<rule>]`.
+respect-type-ignore-comments = false
+
+[tool.ty.rules]
+# Strict: every rule is an error.
+all = "error"
+
+[tool.ty.terminal]
+# And a diagnostic that still lands as a warning fails the run.
+error-on-warning = true
+
+[tool.deptry]
+known_first_party = ["flatread"]
+
+[tool.deptry.package_module_name_map]
+pdfminer-six = "pdfminer"
+stream-unzip = "stream_unzip"
+
+[tool.importlinter]
+root_packages = ["flatread"]
+
+[[tool.importlinter.contracts]]
+# flatread's modules in layers: a declared file over the frame, sheet, PDF and archive readers, over the cells and the
+# text, over the errors. A module imports only from the layers below it, and siblings (|) not from each other.
+name = "flatread is layered"
+type = "layers"
+layers = [
+    "flatread.delimited",
+    "flatread.frames | flatread.workbooks | flatread.pdf | flatread.archives",
+    "flatread.cells | flatread.text",
+    "flatread.errors",
+]
+
+[tool.typos.default]
+locale = "en-us"
+
+[tool.typos.default.extend-words]
+# A publisher's token for a value not published ("ND", no data), not a misspelling.
+ND = "ND"
+
+[tool.typos.files]
+extend-exclude = ["uv.lock", "tests/fixtures/"]

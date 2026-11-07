@@ -6,6 +6,7 @@ import codecs
 from dataclasses import dataclass
 
 import pytest
+
 from flatread.errors import EncodingError, NotPublishedError, TruncatedFileError, UnknownLayoutError, or_not_published
 from flatread.text import decode_text, decode_utf8, split_lines
 

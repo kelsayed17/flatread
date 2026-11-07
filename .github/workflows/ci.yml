@@ -1,0 +1,107 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read # checkout only
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint, format, types, dependencies and imports
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.14"
+      - run: uv lock --check
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run ty check
+      # Every distribution src/ imports is declared, and every declared one is imported.
+      - run: uv run deptry src
+      # The module layers ([tool.importlinter] in pyproject.toml).
+      - run: uv run lint-imports
+      - run: uv run typos
+
+  test:
+    name: Tests and coverage (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.14"
+      - run: uv sync --locked
+      # Statements plus branches; the floor sits under the 96.69% measured on 2026-11-07. Raise it as coverage grows.
+      - run: uv run python -m pytest --cov --cov-report=term-missing --cov-fail-under=96
+
+  lowest-dependencies:
+    name: Tests at the lowest declared dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.14"
+      - run: uv sync --resolution lowest-direct
+      - run: uv run python -m pytest
+
+  core-only:
+    name: Install without extras
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.14"
+      - run: uv venv "$RUNNER_TEMP/core" && uv pip install --python "$RUNNER_TEMP/core/bin/python" .
+      # Every module but the extras' (workbooks, pdf) imports on the core dependencies alone.
+      - run: >-
+          "$RUNNER_TEMP/core/bin/python" -c
+          "import flatread.archives, flatread.cells, flatread.delimited, flatread.errors, flatread.frames, flatread.text"
+      - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[excel,pdf]"
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.workbooks, flatread.pdf"'
+
+  audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - run: uv audit --frozen --preview-features audit-command
+
+  zizmor:
+    name: Workflow security audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      security-events: write # upload zizmor's SARIF results to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0

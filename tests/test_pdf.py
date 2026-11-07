@@ -5,6 +5,7 @@ its content stream for each page, then the cross-reference table.
 """
 
 import pytest
+
 from flatread.errors import EmptyBodyError, UnknownLayoutError
 from flatread.pdf import read_text
 

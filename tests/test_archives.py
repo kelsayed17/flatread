@@ -11,6 +11,7 @@ import zipfile
 from typing import TYPE_CHECKING, override
 
 import pytest
+
 from flatread.archives import stream_unzip, stream_zip, unzip, unzip_member, zip_members
 from flatread.errors import CorruptArchiveError, EmptyBodyError, ReadError, UnknownLayoutError
 
@@ -35,7 +36,7 @@ def test_unzip_member_names_the_files_an_archive_holds_when_it_lacks_one() -> No
         unzip_member(_two_files(), "TAG.tsv")
 
 
-def test_zip_members_lists_the_files_in_the_directorys_order() -> None:
+def test_zip_members_lists_the_files_in_the_directory_order() -> None:
     assert zip_members(_two_files()) == ["SUB.tsv", "NUM.tsv"]
 
 

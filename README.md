@@ -74,13 +74,27 @@ Every error is a `ReadError`, and a `ReadError` is a `ValueError`. So an HTTP cl
 
 ## Install
 
+flatread is installed from this repository, pinned to a release tag:
+
 ```
-pip install flatread            # delimited text, archives
-pip install "flatread[excel]"   # + Excel workbooks
-pip install "flatread[pdf]"     # + PDF text
+pip install "flatread @ git+https://github.com/kelsayed17/flatread@v0.1.0"             # delimited text, archives
+pip install "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v0.1.0"      # + Excel workbooks
+pip install "flatread[pdf] @ git+https://github.com/kelsayed17/flatread@v0.1.0"        # + PDF text
 ```
 
+With uv: `uv add "flatread[excel,pdf] @ git+https://github.com/kelsayed17/flatread" --tag v0.1.0`.
+
 Python 3.14 or newer.
+
+## Development
+
+```
+uv sync
+uv run python -m pytest
+```
+
+`.github/workflows/ci.yml` lists every gate: ruff, ty, deptry, import-linter, typos, and the tests on Linux, macOS and
+Windows, at the locked and at the lowest declared dependencies.
 
 ## License
 

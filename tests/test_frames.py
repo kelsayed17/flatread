@@ -7,6 +7,7 @@ from typing import Annotated, Literal, NewType
 import msgspec
 import polars as pl
 import pytest
+
 from flatread.cells import Column, UtcDatetime
 from flatread.delimited import read_csv
 from flatread.frames import frame_rows, frame_schema, typed_file, typed_rows

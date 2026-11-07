@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Annotated, Any
 import msgspec
 import polars as pl
 import pytest
+from polars.testing import assert_frame_equal
+
 from flatread.cells import CellError, Column
 from flatread.delimited import read_csv, stream_csv
 from flatread.errors import (
@@ -22,7 +24,6 @@ from flatread.errors import (
     UnknownLayoutError,
 )
 from flatread.text import split_lines
-from polars.testing import assert_frame_equal
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -194,7 +195,7 @@ def test_a_files_own_lines_come_off_before_its_rows_are_read() -> None:
     assert (head, _rows(read_csv(rows, _Row)), tail) == (["As of 2026-01-02"], _READ, ["2 rows"])
 
 
-# Core gaps found while rewriting this suite: each is the behaviour the read should have.
+# Core gaps found while rewriting this suite: each is the behavior the read should have.
 
 
 def test_a_header_of_another_width_is_an_unknown_layout_before_its_rows_are_ragged() -> None:

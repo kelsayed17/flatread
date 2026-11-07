@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import msgspec
 import polars as pl
 import pytest
+
 from flatread.errors import CorruptArchiveError, EmptyBodyError, ReadError, UnknownLayoutError
 from flatread.workbooks import read_every_sheet, read_sheet, read_sheet_text
 

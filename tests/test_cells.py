@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal
 import msgspec
 import polars as pl
 import pytest
+
 from flatread.cells import NONFINITE, CellError, Column, UtcDatetime, column_specs, read_table, wire_names
 from flatread.errors import UnknownLayoutError
 
