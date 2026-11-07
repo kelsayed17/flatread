@@ -1,9 +1,11 @@
 """A ZIP archive's files: read from a body held whole by :mod:`zipfile`, or inflated as its chunks arrive.
 
 :func:`unzip` returns an archive's one file, :func:`unzip_member` one named file, and :func:`zip_members` the names;
-only stored and deflated files are read. :func:`stream_zip` and :func:`stream_unzip` read an archive too large to hold
-as it arrives, by ``stream_unzip``'s :func:`~stream_unzip.async_stream_unzip`. An archive that is damaged, cut off or
-encrypted raises :class:`~flatread.errors.CorruptArchiveError`.
+they read stored and deflated files. :func:`stream_zip` and :func:`stream_unzip` read an archive too large to hold as
+it arrives, by ``stream_unzip``'s :func:`~stream_unzip.async_stream_unzip`, which also reads deflate64 and bzip2 files.
+An archive that is damaged, cut off or encrypted, or whose file is compressed in a way its read does not take, raises
+:class:`~flatread.errors.CorruptArchiveError`. A name not flagged UTF-8 reads as UTF-8 when it is UTF-8, else as CP437,
+each name on its own, on either path.
 """
 
 import io
@@ -12,7 +14,7 @@ import zipfile
 import zlib
 from typing import TYPE_CHECKING, Final
 
-from stream_unzip import NO_ENCRYPTION, UnzipError, async_stream_unzip
+from stream_unzip import NO_ENCRYPTION, InvalidOperationError, UnzipError, async_stream_unzip
 
 from flatread.errors import CorruptArchiveError, EmptyBodyError, ReadError, UnknownLayoutError
 
@@ -29,8 +31,10 @@ _ZIP_SIGNATURES: Final = (b"PK" + bytes([3, 4]), b"PK" + bytes([5, 6]))
 # their own (OSError, LZMAError, ZstdError), and one compressed any other way not at all.
 _METHODS: Final = frozenset({zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED})
 
-# The general-purpose flag bit that marks a file encrypted. zipfile will not read one without a password.
+# The general-purpose flag bits that mark a file encrypted, which zipfile will not read without a password, and its
+# name UTF-8 (APPNOTE.TXT, 4.4.4, bit 11).
 _ENCRYPTED: Final = 0x1
+_UTF8_NAME: Final = 0x800
 
 # The end of central directory record (PKWARE's APPNOTE.TXT, 4.3.16), after its signature: disk numbers, the counts of
 # files, the directory's size and offset, and the comment's length; a count of 0xFFFF defers to Zip64's record. The
@@ -55,7 +59,8 @@ def unzip(body: bytes) -> bytes:
     An empty body raises :class:`EmptyBodyError`. A body that is not a ZIP, told by its opening bytes, raises
     :class:`UnknownLayoutError`, and so does an archive holding other than one file. An archive that cannot be read
     raises :class:`CorruptArchiveError`: one that is damaged or was cut off, and one whose file is encrypted or
-    compressed other than stored or deflated, which is refused before it is read.
+    compressed other than stored or deflated, which is refused before it is read (:func:`stream_unzip` also reads
+    deflate64 and bzip2).
     """
     return _with_archive(body, _read_only_file)
 
@@ -75,7 +80,7 @@ def zip_members(body: bytes) -> list[str]:
 
     :func:`unzip`'s errors for a body that is empty, is not a ZIP, or whose directory cannot be read.
     """
-    return _with_archive(body, zipfile.ZipFile.namelist)
+    return _with_archive(body, lambda archive: [_name_of(info) for info in archive.infolist()])
 
 
 def _with_archive[T](body: bytes, read: Callable[[zipfile.ZipFile], T]) -> T:
@@ -91,6 +96,16 @@ def _with_archive[T](body: bytes, read: Callable[[zipfile.ZipFile], T]) -> T:
         raise CorruptArchiveError(msg) from exc
 
 
+def _name_of(info: zipfile.ZipInfo) -> str:
+    """Return the name of an open archive's file as :func:`_name` reads a streamed one's.
+
+    zipfile reads a name not flagged UTF-8 as CP437, its default, or reads every such name in one encoding it is
+    given; the name's own bytes are those CP437 gives back, read again here one name at a time. A name is the one the
+    directory holds (``orig_filename``), as the streamed read gives it, not zipfile's tidied ``filename``.
+    """
+    return info.orig_filename if info.flag_bits & _UTF8_NAME else _name(info.orig_filename.encode("cp437"))
+
+
 def _read_only_file(archive: zipfile.ZipFile) -> bytes:
     """Read the open *archive*'s one file, after checking that it holds one and that the file can be read."""
     infos = archive.infolist()
@@ -103,11 +118,10 @@ def _read_only_file(archive: zipfile.ZipFile) -> bytes:
 
 def _read_member(archive: zipfile.ZipFile, name: str) -> bytes:
     """Read the file *name* from the open *archive*, after checking that it holds it and that it can be read."""
-    try:
-        info = archive.getinfo(name)
-    except KeyError:
-        msg = f"the archive holds no file {name!r}; it holds {archive.namelist()}"
-        raise UnknownLayoutError(msg) from None
+    infos = archive.infolist()
+    if (info := next((info for info in reversed(infos) if _name_of(info) == name), None)) is None:  # zipfile's: last
+        msg = f"the archive holds no file {name!r}; it holds {[_name_of(info) for info in infos]}"
+        raise UnknownLayoutError(msg)
     _check_readable(info)
     return archive.read(info)
 
@@ -138,7 +152,8 @@ def _check_readable(info: zipfile.ZipInfo) -> None:
 async def stream_zip(chunks: AsyncIterator[bytes]) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
     """Yield each of an archive's files as its chunks arrive: its name, and its bytes as they are inflated.
 
-    A file's bytes are read, or drained, before the next file comes. An empty body raises :class:`EmptyBodyError` and
+    A file's bytes are read, or drained, before the next file comes; moving on before is the caller's error, a
+    :class:`RuntimeError`, not the archive's. An empty body raises :class:`EmptyBodyError` and
     one that does not open as a ZIP :class:`UnknownLayoutError`, as :func:`unzip` does; an archive that is damaged,
     cut off or encrypted raises :class:`CorruptArchiveError`, from the file it is found in. ``stream_unzip`` stops at
     the directory, so the end record is checked here: it must close the body and count the files read.
@@ -149,13 +164,16 @@ async def stream_zip(chunks: AsyncIterator[bytes]) -> AsyncIterator[tuple[str, A
             break
     _check_zip(opening)
     tail = [b""]
-    files = 0
+    files, name = 0, ""
     try:
         async for raw, _, data in async_stream_unzip(
             _kept(opening, chunks, tail), allowed_encryption_mechanisms=(NO_ENCRYPTION,)
         ):
-            files += 1
-            yield _name(raw), _inflated(data)
+            files, name = files + 1, _name(raw)
+            yield name, _inflated(data)
+    except InvalidOperationError as exc:  # an UnzipError too, but the caller's, not the archive's
+        msg = f"the file {name!r} was not drained before the next"
+        raise RuntimeError(msg) from exc
     except UnzipError as exc:
         raise _corrupt(exc) from exc
     _check_end(tail[0], files)
@@ -207,12 +225,15 @@ async def _inflated(data: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
     try:
         async for piece in data:
             yield piece
-    except UnzipError as exc:
+    except UnzipError as exc:  # never an undrained file: stream_unzip raises that from the archive's iterator
         raise _corrupt(exc) from exc
 
 
 def _name(raw: bytes) -> str:
-    """Return a file's name: UTF-8 when it is UTF-8, else CP437, as :mod:`zipfile` reads a name not flagged UTF-8."""
+    """Return a file's name: UTF-8 when it is UTF-8, else CP437; :func:`_name_of` reads a whole archive's the same way.
+
+    ``stream_unzip`` gives no flag bits, so a name flagged UTF-8 and one not are read alike.
+    """
     try:
         return raw.decode()
     except UnicodeDecodeError:

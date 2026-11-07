@@ -15,15 +15,15 @@ holding one raises :class:`~flatread.errors.UnknownLayoutError` naming the sheet
 error cell still reads as an empty cell: the engine gives no sign of one.
 """
 
-import html
 import io
 import posixpath
-import re
+import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Mapping
 from functools import partial
 from typing import TYPE_CHECKING, Final, Literal
 
+import fastexcel
 import polars as pl
 
 from flatread.cells import read_table, wire_names
@@ -31,6 +31,7 @@ from flatread.errors import CorruptArchiveError, EmptyBodyError, UnknownLayoutEr
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from typing import IO
 
     import msgspec
 
@@ -59,14 +60,6 @@ _ZIP_SIGNATURE: Final = b"PK" + bytes([3, 4])
 #: Every compound file (OLE/CFB) opens with these eight bytes, and a legacy ``.xls`` is one.
 _CFB_SIGNATURE: Final = bytes.fromhex("d0cf11e0a1b11ae1")
 
-#: An ``.xlsx`` worksheet's error cell (``t="e"``), its attributes and its contents; any namespace prefix.
-_ERROR_CELL: Final = re.compile(
-    rb"""<(?:[\w.-]+:)?c\s(?=[^>]*\bt\s*=\s*["']e["'])([^>]*?)(?:/>|>(.*?)</(?:[\w.-]+:)?c>)""", re.DOTALL
-)
-
-#: An XML start tag's attribute, its name without a namespace prefix, and its value.
-_ATTRIBUTE: Final = re.compile(rb"""(?:[\w.-]+:)?([\w.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
-
 
 def read_sheet(
     body: bytes,
@@ -90,12 +83,16 @@ def read_sheet(
     :class:`~flatread.errors.CorruptArchiveError` for a body that opens as a ZIP (an ``.xlsx`` is one) or as a compound
     file (a legacy ``.xls`` is one) and that still cannot be read — cut short, or a part inside it damaged — and
     :class:`~flatread.errors.UnknownLayoutError` for any other body polars cannot open as a workbook (an HTML error page
-    served with a 200 lands here), a workbook with no such sheet, or an ``.xlsx`` sheet holding an Excel error cell.
+    served with a 200 lands here), a ZIP that is no ``.xlsx`` (an OpenDocument ``.ods``, a binary ``.xlsb``), a workbook
+    with no such sheet, an ``.xlsx`` sheet holding an Excel error cell, or a float column of whole numbers that polars'
+    narrowing to ``Int64`` (below) cannot hold.
 
     Cell types are inferred column by column, unless *dtypes* declares them: one type for every column, or a column's
     type by its header name. A cell that does not read as the declared type is then null, and a name the header does
     not carry is ignored, so the caller still checks the header. A type that is not a :data:`ColumnType` raises
     :class:`ValueError`: ``"string"`` among them, whose number cells the engine rounds (:func:`read_sheet_text`).
+    polars narrows every float column of whole numbers to ``Int64`` and every datetime column of midnights to ``Date``,
+    a declared one too: polars spares only its ``schema_overrides`` columns, which refuse a name the sheet lacks.
     """
     return _one(_read(body, sheet, header_row, skip_rows, _declared(dtypes)))
 
@@ -111,10 +108,12 @@ def read_sheet_text(
 
     The calamine engine writes a number cell's text rounded to nine decimals (``-0.5816963701473981`` reads
     ``-0.58169637``, ``1E-10`` reads ``0``), while its float read of the same cell is exact. So a cell whose text is a
-    number other than its float takes its float's text; every other cell keeps its own. The sheet is read twice.
+    number other than its float takes its float's text; every other cell keeps its own. The sheet is read twice, the
+    float read by fastexcel itself, which polars' ``read_excel`` wraps: polars would narrow a float column of whole
+    numbers to ``Int64``, and fail on one that ``Int64`` cannot hold (``1E20``).
     """
-    text = _one(_read(body, sheet, header_row, skip_rows, "string"))
-    return _exact(text, _one(_read(body, sheet, header_row, skip_rows, "float", scan=False)))
+    text = _read(body, sheet, header_row, skip_rows, "string")
+    return _exact(_one(text), _one(_floats(body, list(text), header_row, skip_rows)))
 
 
 def read_sheet_table(
@@ -150,20 +149,32 @@ def read_sheet_rows(
     the table's rows, 0-based, and *labels* its header's cells, the table its first ``len(labels)`` columns, a label
     written twice named as ``pl.read_csv`` names it. A cell that fails the read is named by its row in the sheet,
     1-based. A row with a cell past the table's columns raises :class:`~flatread.errors.UnknownLayoutError`, and no
-    rows :class:`~flatread.errors.EmptyBodyError`.
+    rows :class:`~flatread.errors.EmptyBodyError`. *labels* that write a label twice and also the name its repeat
+    takes (``a``, ``a``, ``a_duplicated_0``) raise :class:`~flatread.errors.UnknownLayoutError`, as ``pl.read_csv``
+    refuses such a header. So do more *labels* than the sheet has columns, and a row the sheet does not have.
     """
     if not rows:
         msg = "the sheet has a header and no rows"
         raise EmptyBodyError(msg)
     width = len(labels)
+    if width > grid.width:
+        msg = f"the header has {width} labels but the sheet {grid.width} columns"
+        raise UnknownLayoutError(msg)
+    if (outside := next((row for row in rows if not 0 <= row < grid.height), None)) is not None:
+        msg = f"row {outside + 1} is not in the sheet, which has {grid.height} rows"
+        raise UnknownLayoutError(msg)
     cells = grid[list(rows)]
     past = cells.select(grid.columns[width:])
     if past.width and (wide := past.select(pl.any_horizontal(pl.all().fill_null("") != "")).to_series()).any():
         row = rows[int(wide.arg_true()[0])]
         msg = f"row {row + 1} has a cell past the table's {width} columns: {grid.row(row)!r}"
         raise UnknownLayoutError(msg)
+    names = wire_names(list(labels))
+    if (taken := next((i for i, name in enumerate(names) if name != labels[i] and name in labels), None)) is not None:
+        msg = f"the header writes {labels[taken]!r} twice and also {names[taken]!r}: its columns cannot be named apart"
+        raise UnknownLayoutError(msg)
     frame = cells.select(grid.columns[:width])
-    frame.columns = wire_names(list(labels))
+    frame.columns = names
     return read_table(frame, row_type, numbers=pl.Series([row + 1 for row in rows], dtype=pl.Int64))
 
 
@@ -188,7 +199,7 @@ def read_every_sheet_text(body: bytes, *, header_row: int | None = 0, skip_rows:
     :func:`read_sheet` does.
     """
     text = _read(body, None, header_row, skip_rows, "string")
-    floats = _read(body, None, header_row, skip_rows, "float", scan=False)
+    floats = _floats(body, list(text), header_row, skip_rows)
     return {name: _exact(grid, floats[name]) for name, grid in text.items()}
 
 
@@ -212,29 +223,46 @@ def _one(sheets: dict[str, pl.DataFrame]) -> pl.DataFrame:
 
 
 def _exact(text: pl.DataFrame, floats: pl.DataFrame) -> pl.DataFrame:
-    """Return the sheet's *text*, each cell whose text is a number other than its *floats* cell taking that float's."""
+    """Return the sheet's *text*, each cell whose text is a number other than its *floats* cell taking that float's.
+
+    The two frames' columns are paired by position: fastexcel names a header-less or repeated column its own way.
+    """
     return text.with_columns(
-        pl.when((written := text[name].cast(pl.Float64, strict=False)).is_not_null() & (written != floats[name]))
-        .then(floats[name].cast(pl.String))
+        pl.when((written := text[name].cast(pl.Float64, strict=False)).is_not_null() & (written != exact))
+        .then(exact.cast(pl.String))
         .otherwise(text[name])
         .alias(name)
-        for name in text.columns
+        for name, exact in zip(text.columns, floats.iter_columns(), strict=True)
     )
 
 
-def _read(  # noqa: PLR0913  # the body and pl.read_excel's options, then the scan
+def _floats(body: bytes, sheets: list[str], header_row: int | None, skip_rows: int) -> dict[str, pl.DataFrame]:
+    """Read *sheets* of *body*, already read as text, as floats with fastexcel: no ``Int64`` narrowing, no scan."""
+    try:
+        reader = fastexcel.read_excel(body)
+        return {
+            name: reader.load_sheet(name, header_row=header_row, skip_rows=skip_rows, dtypes="float").to_polars()
+            for name in sheets
+        }
+    except fastexcel.FastExcelError as exc:
+        raise _unreadable(body, exc) from exc
+    except BaseException as exc:  # a panic in the engine, which is no Exception; any other passes on
+        if type(exc).__name__ != "PanicException":
+            raise
+        raise _unreadable(body, exc) from exc
+
+
+def _read(
     body: bytes,
     sheet: str | None,
     header_row: int | None,
     skip_rows: int,
     dtypes: _ReadType | Mapping[str, ColumnType] | None,
-    *,
-    scan: bool = True,
 ) -> dict[str, pl.DataFrame]:
     """Read the sheet *sheet* of *body* with ``polars.read_excel``, every row and column kept; ``None`` every sheet.
 
-    A named sheet is read alone, so a workbook without it fails before any other sheet is loaded. *scan* false skips
-    the error-cell scan, for a second read of a body already scanned.
+    A named sheet is read alone, so a workbook without it fails before any other sheet is loaded. Only the engine's own
+    errors are a body that cannot be read; polars' narrowing of a column it cannot hold is the column's.
     """
     if not body:
         msg = "the body is empty"
@@ -256,18 +284,21 @@ def _read(  # noqa: PLR0913  # the body and pl.read_excel's options, then the sc
     )
     try:
         sheets = read(sheet_id=0) if sheet is None else read(sheet_name=[sheet])
+    except fastexcel.FastExcelError as exc:  # the engine's own error, for a body it cannot open or a damaged part
+        raise _unreadable(body, exc) from exc
+    except pl.exceptions.InvalidOperationError as exc:  # polars' Int64 narrowing of a column it cannot hold
+        msg = f"a column of whole numbers does not fit polars' Int64: {str(exc).splitlines()[0]}"
+        raise UnknownLayoutError(msg) from exc
     except ValueError as exc:
         if sheet is not None and "no matching sheet" in str(exc):
             msg = f"the workbook has no sheet {sheet!r}"
             raise UnknownLayoutError(msg) from exc
-        raise _unreadable(body, exc) from exc
-    except Exception as exc:  # the engine's own error, for a body it cannot open or a damaged part it loads
-        raise _unreadable(body, exc) from exc
+        raise
     except BaseException as exc:  # a panic in the engine, which is no Exception; any other passes on
         if type(exc).__name__ != "PanicException":
             raise
         raise _unreadable(body, exc) from exc
-    if scan and body.startswith(_ZIP_SIGNATURE):
+    if body.startswith(_ZIP_SIGNATURE):
         _refuse_error_cells(body, list(sheets))
     return sheets
 
@@ -279,35 +310,58 @@ def _unreadable(body: bytes, exc: BaseException) -> CorruptArchiveError | Unknow
     return UnknownLayoutError(f"the body is not a workbook polars can open: {exc}")
 
 
+# _EXPAT: the parts are parsed by the standard library's expat, which resolves no external entity, and expat 2.4.1 and
+# later cap the amplification of an internal one (the billion laughs): the attacks defusedxml guards against. The
+# engine has already read these parts whole by then.
 def _refuse_error_cells(body: bytes, sheets: list[str]) -> None:
     """Raise for the first Excel error cell in the ``.xlsx`` *body*'s *sheets*, which the engine reads as empty.
 
-    Each sheet's worksheet part is the one ``xl/workbook.xml`` and its relationships name for it. Only the sheets read
-    are searched, so an error cell in a sheet nobody reads fails nothing.
+    Each sheet's worksheet part is the one ``xl/workbook.xml`` and its relationships name for it, and each part is
+    parsed as it inflates (``ET.iterparse``), its cells cleared once seen. Only the sheets read are searched,
+    so an error cell in a sheet nobody reads fails nothing. A ZIP with no ``xl/workbook.xml`` is another format the
+    engine reads (an OpenDocument ``.ods``, a binary ``.xlsb``), whose error cells cannot be checked.
     """
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
-            for name, part in _worksheet_parts(archive, sheets).items():
-                if (found := _ERROR_CELL.search(archive.read(part))) is None:
-                    continue
-                attributes, contents = found.groups()
-                value = re.search(rb"<(?:[\w.-]+:)?v>([^<]*)</", contents or b"")
-                cell = _attributes(attributes).get("r", "?")
-                error = html.unescape(value.group(1).decode()) if value is not None else ""
-                msg = f"the {name!r} sheet's cell {cell} is the Excel error {error!r}, not a value"
+            if "xl/workbook.xml" not in archive.namelist():
+                msg = "the workbook is not an .xlsx: its archive has no xl/workbook.xml"
                 raise UnknownLayoutError(msg)
-    except (zipfile.BadZipFile, KeyError) as exc:
+            for name, part in _worksheet_parts(archive, sheets).items():
+                with archive.open(part) as xml:
+                    _refuse_error_cell(name, xml)
+    except (zipfile.BadZipFile, KeyError, ET.ParseError) as exc:
         msg = f"the workbook cannot be read: {exc}"
         raise CorruptArchiveError(msg) from exc
 
 
+def _refuse_error_cell(sheet: str, xml: IO[bytes]) -> None:
+    """Raise for the first error cell (``<c t="e">``) of the worksheet part *xml*, naming its reference and value.
+
+    Each row is dropped from ``<sheetData>`` once its cells are checked, so the scan holds one row at a time however
+    long the sheet (clearing a row's contents alone leaves an empty element per row behind: 41 MB for 500,000 rows).
+    """
+    rows = None
+    for event, element in ET.iterparse(xml, events=("start", "end")):  # noqa: S314  # see _EXPAT
+        tag = _local(element.tag)
+        if event == "start":
+            if tag == "sheetData":
+                rows = element
+            continue
+        if tag == "c" and element.get("t") == "e":
+            value = next((child.text or "" for child in element if _local(child.tag) == "v"), "")
+            msg = f"the {sheet!r} sheet's cell {element.get('r', '?')} is the Excel error {value!r}, not a value"
+            raise UnknownLayoutError(msg)
+        if tag == "row" and rows is not None:  # its cells, each already checked
+            rows.remove(element)
+
+
 def _worksheet_parts(archive: zipfile.ZipFile, sheets: list[str]) -> dict[str, str]:
     """Return each of *sheets*' worksheet part in *archive*, by the sheet's name."""
-    relationships = map(_attributes, _tags(archive.read("xl/_rels/workbook.xml.rels"), b"Relationship"))
-    targets = {item.get("Id"): item.get("Target", "") for item in relationships}
-    ids = {
-        item.get("name"): item.get("id") for item in map(_attributes, _tags(archive.read("xl/workbook.xml"), b"sheet"))
+    targets = {
+        item.get("Id"): item.get("Target", "")
+        for item in _elements(archive.read("xl/_rels/workbook.xml.rels"), "Relationship")
     }
+    ids = {item.get("name"): _attribute(item, "id") for item in _elements(archive.read("xl/workbook.xml"), "sheet")}
     parts: dict[str, str] = {}
     for name in sheets:
         target = targets[ids[name]]
@@ -315,13 +369,17 @@ def _worksheet_parts(archive: zipfile.ZipFile, sheets: list[str]) -> dict[str, s
     return parts
 
 
-def _tags(xml: bytes, tag: bytes) -> list[bytes]:
-    """Return the attributes of each *tag* start tag in *xml*, with or without a namespace prefix."""
-    return [found.group(1) for found in re.finditer(rb"<(?:[\w.-]+:)?" + tag + rb"\s([^>]*?)/?>", xml)]
+def _elements(xml: bytes, tag: str) -> list[ET.Element]:
+    """Return the *xml* part's elements named *tag*, in any namespace."""
+    root = ET.fromstring(xml)  # noqa: S314  # see _EXPAT
+    return [element for element in root.iter() if _local(element.tag) == tag]
 
 
-def _attributes(tag: bytes) -> dict[str, str]:
-    """Return a start tag's attributes, each by its name without a namespace prefix, its value unescaped."""
-    return {
-        name.decode(): html.unescape((double or single).decode()) for name, double, single in _ATTRIBUTE.findall(tag)
-    }
+def _attribute(element: ET.Element, name: str) -> str | None:
+    """Return the *element*'s attribute *name*, in any namespace (``r:id`` is the relationships namespace's)."""
+    return next((value for key, value in element.attrib.items() if _local(key) == name), None)
+
+
+def _local(name: str) -> str:
+    """Return an element or attribute name without its namespace (``{uri}c`` is ``c``)."""
+    return name.rpartition("}")[2]

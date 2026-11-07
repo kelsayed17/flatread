@@ -38,8 +38,9 @@ _NUL: Final = chr(0)
 
 # What pdfminer raises on bytes it cannot open or read. PSException is the base of its own tree (PDFSyntaxError, PSEOF,
 # PDFEncryptionError, …): every failure on 221 damaged copies of a real filing was one. pdfminer is pure Python and
-# lets builtin errors escape from a malformed object graph, so those are caught too, around the extraction alone.
-_UNREADABLE: Final = (PSException, ValueError, TypeError, KeyError, IndexError, AttributeError)
+# lets builtin errors escape from a malformed object graph, so those are caught too, around the extraction alone. Its
+# interpreter guards a form XObject against drawing itself, not against a chain of them nested too deep to recurse.
+_UNREADABLE: Final = (PSException, ValueError, TypeError, KeyError, IndexError, AttributeError, RecursionError)
 
 
 def read_text(body: bytes) -> str:

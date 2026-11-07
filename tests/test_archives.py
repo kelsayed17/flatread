@@ -332,3 +332,30 @@ def test_unzip_refuses_what_is_not_a_readable_zip(body: bytes, error: type[Excep
 def test_unzip_refuses_a_file_compressed_another_way_before_reading_it() -> None:
     with pytest.raises(CorruptArchiveError, match="compressed with method 12, not stored or deflated"):
         unzip(_archive({"one.csv": _TEXT}, method=zipfile.ZIP_BZIP2))
+
+
+@pytest.mark.parametrize(
+    ("written", "name"), [("é".encode(), "café.csv"), (b"\x82", "café.csv")], ids=["UTF-8", "CP437"]
+)
+async def test_a_name_not_flagged_utf8_reads_alike_whole_and_streamed(written: bytes, name: str) -> None:
+    """The name is written in ASCII, so it is not flagged, and its placeholder is then swapped for the bytes."""
+    stem = "café".encode()[:3]  # the name up to its one non-ASCII letter
+    placeholder = stem + b"X" * len(written)
+    body = _archive({f"{placeholder.decode()}.csv": b"x,y\n"}).replace(placeholder, stem + written)
+    assert zip_members(body) == [name]
+    assert unzip_member(body, name) == b"x,y\n"
+    assert await _files(body) == {name: b"x,y\n"}
+
+
+async def test_each_name_not_flagged_utf8_reads_on_its_own_whole_and_streamed() -> None:
+    body = _archive({"XX.csv": b"1\n", "YY.csv": b"2\n"}).replace(b"XX", "é".encode()).replace(b"YY", b"\x82a")
+    assert zip_members(body) == ["é.csv", "éa.csv"]
+    assert [unzip_member(body, name) for name in zip_members(body)] == [b"1\n", b"2\n"]
+    assert await _files(body) == {"é.csv": b"1\n", "éa.csv": b"2\n"}
+
+
+async def test_moving_past_a_file_before_draining_it_is_the_callers_error_not_the_archives() -> None:
+    with pytest.raises(RuntimeError, match=r"^the file 'SUB\.tsv' was not drained before the next$") as raised:
+        async for _ in stream_zip(_chunks(_two_files(), 7)):
+            pass
+    assert not isinstance(raised.value, ReadError)
