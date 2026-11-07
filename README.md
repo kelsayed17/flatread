@@ -77,12 +77,12 @@ Every error is a `ReadError`, and a `ReadError` is a `ValueError`. So an HTTP cl
 flatread is installed from this repository, pinned to a release tag:
 
 ```
-pip install "flatread @ git+https://github.com/kelsayed17/flatread@v0.1.0"             # delimited text, archives
-pip install "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v0.1.0"      # + Excel workbooks
-pip install "flatread[pdf] @ git+https://github.com/kelsayed17/flatread@v0.1.0"        # + PDF text
+pip install "flatread @ git+https://github.com/kelsayed17/flatread@v0.2.0"             # delimited text, archives
+pip install "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v0.2.0"      # + Excel workbooks
+pip install "flatread[pdf] @ git+https://github.com/kelsayed17/flatread@v0.2.0"        # + PDF text
 ```
 
-With uv: `uv add "flatread[excel,pdf] @ git+https://github.com/kelsayed17/flatread" --tag v0.1.0`.
+With uv: `uv add "flatread[excel,pdf] @ git+https://github.com/kelsayed17/flatread" --tag v0.2.0`.
 
 Python 3.14 or newer.
 

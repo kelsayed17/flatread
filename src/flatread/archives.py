@@ -17,7 +17,7 @@ from stream_unzip import NO_ENCRYPTION, UnzipError, async_stream_unzip
 from flatread.errors import CorruptArchiveError, EmptyBodyError, ReadError, UnknownLayoutError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
 
 __all__ = ["stream_unzip", "stream_zip", "unzip", "unzip_member", "zip_members"]
 
@@ -57,15 +57,7 @@ def unzip(body: bytes) -> bytes:
     raises :class:`CorruptArchiveError`: one that is damaged or was cut off, and one whose file is encrypted or
     compressed other than stored or deflated, which is refused before it is read.
     """
-    _check_zip(body)
-    try:
-        with zipfile.ZipFile(io.BytesIO(body)) as archive:
-            return _read_only_file(archive)
-    except ReadError:  # the archive's own check, a ValueError too: never zipfile's
-        raise
-    except _UNREADABLE as exc:
-        msg = f"the archive cannot be read: {exc}"
-        raise CorruptArchiveError(msg) from exc
+    return _with_archive(body, _read_only_file)
 
 
 def unzip_member(body: bytes, name: str) -> bytes:
@@ -75,15 +67,7 @@ def unzip_member(body: bytes, name: str) -> bytes:
     :class:`UnknownLayoutError`, naming the files it does hold, and the other files are not checked, since none is
     read. *name* is matched exactly, directory and case included.
     """
-    _check_zip(body)
-    try:
-        with zipfile.ZipFile(io.BytesIO(body)) as archive:
-            return _read_member(archive, name)
-    except ReadError:  # the archive's own check, a ValueError too: never zipfile's
-        raise
-    except _UNREADABLE as exc:
-        msg = f"the archive cannot be read: {exc}"
-        raise CorruptArchiveError(msg) from exc
+    return _with_archive(body, lambda archive: _read_member(archive, name))
 
 
 def zip_members(body: bytes) -> list[str]:
@@ -91,10 +75,15 @@ def zip_members(body: bytes) -> list[str]:
 
     :func:`unzip`'s errors for a body that is empty, is not a ZIP, or whose directory cannot be read.
     """
+    return _with_archive(body, zipfile.ZipFile.namelist)
+
+
+def _with_archive[T](body: bytes, read: Callable[[zipfile.ZipFile], T]) -> T:
+    """Return what *read* takes from the archive, once the body is checked to be one; zipfile's errors are corrupt."""
     _check_zip(body)
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
-            return archive.namelist()
+            return read(archive)
     except ReadError:  # the archive's own check, a ValueError too: never zipfile's
         raise
     except _UNREADABLE as exc:

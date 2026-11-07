@@ -6,11 +6,11 @@ the rest.
 """
 
 import codecs
-from typing import Final
+from typing import Final, NamedTuple
 
 from flatread.errors import EncodingError, TruncatedFileError
 
-__all__ = ["decode_text", "decode_utf8", "split_lines"]
+__all__ = ["Split", "decode_text", "decode_utf8", "split_lines"]
 
 _BOM: Final = codecs.BOM_UTF8
 
@@ -39,10 +39,20 @@ def decode_utf8(file: bytes) -> str:
         raise EncodingError(msg) from exc
 
 
-def split_lines(text: str, *, head: int = 0, tail: int = 0) -> tuple[list[str], str, list[str]]:
-    """Return *text*'s first *head* and last *tail* non-empty lines, and the text between them.
+class Split(NamedTuple):
+    """A file's own lines before and after its rows, the text between them, and that text's first line in the file."""
 
-    A line's ending (LF, or CRLF) is not part of it. A file of fewer non-empty lines raises
+    before: list[str]
+    text: str
+    after: list[str]
+    first_line: int
+
+
+def split_lines(text: str, *, head: int = 0, tail: int = 0) -> Split:
+    """Return *text*'s first *head* and last *tail* non-empty lines, the text between them, and the line it starts on.
+
+    A line's ending (LF, or CRLF) is not part of it. The line number counts blank lines, so it is the one to give
+    :func:`~flatread.delimited.read_csv` as *first_line*. A file of fewer non-empty lines raises
     :class:`~flatread.errors.TruncatedFileError`.
     """
     lines = [line.removesuffix("\r") for line in text.split("\n")]
@@ -54,4 +64,4 @@ def split_lines(text: str, *, head: int = 0, tail: int = 0) -> tuple[list[str], 
     end = filled[len(filled) - tail] if tail else len(lines)
     before = [lines[at] for at in filled[:head]]
     after = [lines[at] for at in filled[len(filled) - tail :]] if tail else []
-    return before, "\n".join(lines[start:end]), after
+    return Split(before, "\n".join(lines[start:end]), after, start + 1)

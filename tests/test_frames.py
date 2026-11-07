@@ -116,6 +116,16 @@ def test_a_frame_without_a_required_column_cannot_read_back() -> None:
         typed_rows(pl.DataFrame({"Flag": ["Y"]}), _Threshold)
 
 
+class _Priced(msgspec.Struct, frozen=True, gc=False):
+    symbol: Annotated[str, Column("Symbol")]
+    price: Annotated[float | None, Column("Price", missing=("",))]
+
+
+def test_a_frame_without_a_column_that_may_be_none_but_is_not_optional_cannot_read_back() -> None:
+    with pytest.raises(ValueError, match=r"no column for _Priced\.price \('Price'\)"):
+        typed_rows(pl.DataFrame({"Symbol": ["A"]}), _Priced)
+
+
 class _File(msgspec.Struct, frozen=True, gc=False):
     generated_at: dt.datetime
     rows: pl.DataFrame

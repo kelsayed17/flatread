@@ -50,8 +50,8 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --locked
-      # Statements plus branches; the floor sits under the 96.69% measured on 2026-11-07. Raise it as coverage grows.
-      - run: uv run python -m pytest --cov --cov-report=term-missing --cov-fail-under=96
+      # Statements plus branches; the floor sits under the 97.58% measured on 2026-11-07. Raise it as coverage grows.
+      - run: uv run python -m pytest --cov --cov-report=term-missing --cov-fail-under=97
 
   lowest-dependencies:
     name: Tests at the lowest declared dependencies
