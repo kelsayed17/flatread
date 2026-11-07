@@ -21,6 +21,9 @@ dependencies = [
     "msgspec>=0.22",  # the row and file structs a declaration is made of
     "polars>=2.0",  # the frames every read builds
     "stream-unzip>=0.0.101",  # flatread.archives: an archive inflated as its chunks arrive
+    # Windows has no system time zone database: polars builds a UTC datetime cell's Python value through zoneinfo,
+    # which reads the IANA data from tzdata there.
+    "tzdata>=2025.2; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -158,6 +161,10 @@ error-on-warning = true
 
 [tool.deptry]
 known_first_party = ["flatread"]
+
+[tool.deptry.per_rule_ignores]
+# tzdata is data zoneinfo reads on Windows (see [project.dependencies]), never imported.
+DEP002 = ["tzdata"]
 
 [tool.deptry.package_module_name_map]
 pdfminer-six = "pdfminer"
