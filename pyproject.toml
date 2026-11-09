@@ -1,6 +1,6 @@
 [project]
 name = "flatread"
-version = "0.3.0"
+version = "0.4.0"
 description = "Read the flat files publishers serve (delimited text, sheets, archives, PDF text) exactly, or fail loudly."
 readme = "README.md"
 license = "MIT"
