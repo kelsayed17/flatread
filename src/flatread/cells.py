@@ -7,7 +7,8 @@ conversions. Each cell is its field's value, ``None`` for one of the column's ``
 :class:`~flatread.errors.UnknownLayoutError` naming the row, the column and the text: never silently ``None``.
 
 ``int`` reads by ``str.to_integer``, ``float`` by a cast to ``Float64`` (a number too large for one is refused, not
-read as an infinity), ``bool`` by ``replace_strict`` on the column's two tokens, a ``Literal`` as a ``pl.Enum``, and a
+read as an infinity; a NaN or an infinity is refused unless the column's ``pattern`` admits it, as :data:`NONFINITE`
+does), ``bool`` by ``replace_strict`` on the column's two tokens, a ``Literal`` as a ``pl.Enum``, and a
 date or datetime by ``str.to_datetime`` in one of the column's formats, checked by writing the value back in that
 format (polars' ``%Y`` alone reads ``12/31/25`` as the year 25). A format with an offset (``%z`` or ``%#z``) ends with
 it, and the cell's text before its offset is the text checked so; a leap second (``:60``) is read only where it rolls
@@ -49,7 +50,8 @@ __all__ = [
 #: A moment the source states in UTC: a field so typed decodes aware, and its frame column is ``Datetime`` in UTC.
 type UtcDatetime = Annotated[dt.datetime, msgspec.Meta(tz=True)]
 
-#: A float written by name: an infinity or a NaN, any case, signed or not. For a column's ``pattern``.
+#: A float written by name: an infinity or a NaN, any case, signed or not. A float column refuses one unless its
+#: ``pattern`` admits it: ``pattern=f"{DECIMAL}|{NONFINITE}"``.
 NONFINITE: Final = r"[+-]?(?i:inf|infinity|nan)"
 
 #: A decimal number: a sign, digits with an optional point, or a point and digits, and an optional exponent.
@@ -371,8 +373,12 @@ def _read(text: pl.Expr, spec: ColumnSpec) -> pl.Expr:
     if spec.kind is int:
         return text.str.to_integer(strict=False)
     value = text.cast(pl.Float64, strict=False)
-    # polars casts a number too large for a float to an infinity; only an infinity written by name is one.
-    return pl.when(value.is_infinite() & ~text.str.contains(f"^(?:{NONFINITE})$")).then(None).otherwise(value)
+    # polars casts a number too large for a float to an infinity; only a NaN or infinity written by name, in a
+    # column whose pattern admits it (the text reaching here matched it whole), is one.
+    finite = value.is_finite()
+    if column.pattern is not None:
+        finite |= text.str.contains(f"^(?:{NONFINITE})$")
+    return pl.when(finite).then(value)
 
 
 def _before_offset(fmt: str) -> str:

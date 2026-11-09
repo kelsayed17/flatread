@@ -6,6 +6,7 @@ three ends a cell may come to, the cell an error names, and the declarations tha
 
 import datetime as dt
 import gc
+import math
 import re
 import weakref
 from typing import Annotated, Any, Literal
@@ -14,7 +15,7 @@ import msgspec
 import polars as pl
 import pytest
 
-from flatread.cells import NONFINITE, CellError, Column, UtcDatetime, column_specs, read_table, wire_names
+from flatread.cells import DECIMAL, NONFINITE, CellError, Column, UtcDatetime, column_specs, read_table, wire_names
 from flatread.errors import UnknownLayoutError
 
 
@@ -54,6 +55,25 @@ def test_a_float_is_what_polars_casts() -> None:
 @pytest.mark.parametrize("cell", ["", " 1", "1,5", "0x1", "1.2.3", "1e400", "-1e400"])
 def test_a_float_refuses_any_other_text(cell: str) -> None:
     _refused(_Float, cell)
+
+
+@pytest.mark.parametrize("cell", ["NaN", "nan", "-nan", "inf", "-inf", "+Infinity", "INF"])
+def test_a_float_refuses_a_nan_or_an_infinity_by_default(cell: str) -> None:
+    _refused(_Float, cell)
+
+
+class _Nonfinite(msgspec.Struct, frozen=True, gc=False):
+    x: Annotated[float, Column("X", pattern=f"{DECIMAL}|{NONFINITE}")]
+
+
+def test_a_float_whose_pattern_admits_them_reads_a_nan_or_an_infinity() -> None:
+    nan, inf, minus_inf, one = _one(_Nonfinite, "NaN", "Infinity", "-inf", "1.5")
+    assert math.isnan(nan)
+    assert (inf, minus_inf, one) == (math.inf, -math.inf, 1.5)
+
+
+def test_a_float_too_large_is_refused_even_where_infinities_are_admitted() -> None:
+    _refused(_Nonfinite, "1e400")
 
 
 class _Flag(msgspec.Struct, frozen=True, gc=False):
