@@ -39,8 +39,9 @@ class Text:
     frame: pl.DataFrame
     #: The row at an index of *frame* as an error names it: ``"line 12"``, ``"sheet 'Data' row 5"``, ``"record 3"``.
     locate: Callable[[int], str]
-    #: Values read off the body outside the table (a stamp, a trailer, an envelope), by field, as text.
-    carried: dict[str, str] = field(default_factory=dict)
+    #: Values read off the body outside the table (a stamp, a trailer, an envelope), by field, as text; ``None`` for
+    #: one the body leaves out.
+    carried: dict[str, str | None] = field(default_factory=dict)
     #: The row above the header, one cell per column of *frame*, for a layout whose ``headings`` groups its columns.
     headings: tuple[str | None, ...] | None = None
 
@@ -219,7 +220,7 @@ def prepare(plan: Plan, text: Text, *, cells: Callable[[pl.DataFrame], pl.DataFr
             filled &= ~pl.col(plan.long.value).is_in(list(value.missing))
         frame = frame.filter(filled)
     if text.carried:
-        frame = frame.with_columns(pl.lit(value).alias(name) for name, value in text.carried.items())
+        frame = frame.with_columns(pl.lit(value, dtype=pl.String).alias(name) for name, value in text.carried.items())
     return frame
 
 

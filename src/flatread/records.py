@@ -137,10 +137,10 @@ class Json(Layout):
                 columns.append(pl.Series(name, [None if v is None else str(v) for v in column], dtype=pl.String))
             else:
                 columns.append(pl.Series(name, column, dtype=pl.String, strict=False))
-        carried = {}
+        carried: dict[str, str | None] = {}
         for path, f in cls.envelope.items():
-            if (value := cls._at(decoded, path)) is not None:
-                carried[f] = value if isinstance(value, str) else msgspec.json.encode(value).decode()
+            value = cls._at(decoded, path)
+            carried[f] = value if value is None or isinstance(value, str) else msgspec.json.encode(value).decode()
         return Text(pl.DataFrame(columns), lambda i: f"record {i + 1}", carried)
 
     @classmethod

@@ -131,10 +131,13 @@ class Sheet(Layout):
         """Return sheet *name*'s table as cells under its labels, typed where fastexcel types them."""
         wanted = _column_range(cls.columns) if cls.columns is not None else None
         top = cls.header_row - (cls.headings is not None)
-        head = reader.load_sheet(
-            name, header_row=None, skip_rows=top, n_rows=cls.header_row - top + 1, dtypes="string",
-            use_columns=wanted,
-        ).to_polars()  # fmt: skip
+        try:
+            head = reader.load_sheet(
+                name, header_row=None, skip_rows=top, n_rows=cls.header_row - top + 1, dtypes="string",
+                use_columns=wanted,
+            ).to_polars()  # fmt: skip
+        except fastexcel.InvalidParametersError:  # fastexcel's answer to skipping past the sheet's last row
+            head = pl.DataFrame()
         if head.height < cls.header_row - top + 1:
             msg = f"sheet {name!r} ends before its header row {cls.header_row + 1}"
             raise UnknownLayoutError(msg)

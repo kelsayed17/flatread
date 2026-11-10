@@ -62,7 +62,7 @@ class _Framed:
     rows: bytes
     #: The 1-based line of the first byte of *rows*.
     first_line: int
-    carried: dict[str, str]
+    carried: dict[str, str | None]
     count: int | None
 
 
@@ -135,7 +135,7 @@ class Csv(Layout):
         return next(csv.reader([text], delimiter=cls.separator, strict=True), [""])
 
     @classmethod
-    def _trailer(cls, body: bytes) -> tuple[dict[str, str], int | None, int]:
+    def _trailer(cls, body: bytes) -> tuple[dict[str, str | None], int | None, int]:
         """Return the trailer's carried values, its row count, and where the rows end: the trailer's start."""
         if cls.trailer is None:
             return {}, None, len(body)
@@ -168,7 +168,8 @@ class Csv(Layout):
                 if wanted[0] == "find":
                     msg = f"no line matches the header pattern {cls.header_line!r}"
                     raise UnknownLayoutError(msg)
-                msg = f"the file ends before its {wanted[0]}"
+                what = {"preamble": "preamble", "skip": "skipped lines", "headings": "headings", "header": "header"}
+                msg = f"the file ends before its {what[wanted[0]]}"
                 raise UnknownLayoutError(msg)
             stop = body.find(b"\n", pos, end)
             stop = end if stop < 0 else stop
