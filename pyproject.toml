@@ -62,6 +62,7 @@ dev = [
     "deptry>=0.25.1",  # [tool.deptry]: the dependencies against what src/ imports
     "import-linter>=2.15",  # [tool.importlinter]: the module layers
     "typos>=1.51.1",
+    "pytest-codspeed>=5.0.3",
 ]
 
 [tool.uv]
