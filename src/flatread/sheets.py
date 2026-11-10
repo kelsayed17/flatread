@@ -27,6 +27,7 @@ import polars as pl
 
 from flatread import core
 from flatread.archives import Member, pick
+from flatread.cells import as_text
 from flatread.core import Plan, Text, column_names
 from flatread.errors import CellError, CorruptArchiveError, RaggedRowError, UnknownLayoutError
 from flatread.layout import Layout
@@ -136,8 +137,6 @@ class Sheet(Layout):
     @classmethod
     def _strict_first(cls) -> bool:
         """Return whether the strict load is worth trying: no setting says a column mixes text into its values."""
-        if cls.errata or "cells" in cls._hooks():  # each reads the cells as text, as every other format gives them
-            return False
         return not (frozenset(cls.missing) - {""} or cls.missing_by_field or cls.strip or cls.footer is not None)
 
     @classmethod
@@ -171,6 +170,8 @@ class Sheet(Layout):
         frame = whole.select(source)
         if mixed:
             frame = cls._mixed(reader, name, frame, common, cls._kind_of(plan, column_names(labels)))
+        elif cls.errata or "cells" in cls._hooks():  # each reads text cells, as every other format gives them
+            frame = frame.with_columns(_text_of(pl.col(c), t) for c, t in frame.schema.items() if t != pl.String)
         frame, rows = cls._bound(frame, name)
         first = cls.header_row + 2
         cls._past_header(whole.drop(source), sheet.selected_columns, rows, name, first)
@@ -319,6 +320,16 @@ def _matches(name: str, member: Member) -> bool:
     if isinstance(member, re.Pattern):
         return bool(member.fullmatch(name))
     return member(name)
+
+
+def _text_of(column: pl.Expr, dtype: pl.DataType) -> pl.Expr:
+    """Return a typed column as the text its cells mean: a midnight as an ISO date, a number as its round trip."""
+    if isinstance(dtype, pl.Datetime):
+        midnight = column.dt.time() == dt.time()
+        return (
+            pl.when(midnight).then(column.dt.strftime("%Y-%m-%d")).otherwise(column.dt.strftime("%Y-%m-%dT%H:%M:%S%.f"))
+        )
+    return as_text(column, dtype)
 
 
 def _letters(index: int) -> str:

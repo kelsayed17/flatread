@@ -14,6 +14,7 @@ from flatread.errors import CellError, RaggedRowError, ReadError, UnknownLayoutE
 from flatread.fixed import FixedWidth
 from flatread.records import Json
 from flatread.sheets import Sheet, Sheets
+from tests.test_sheets import count_loads
 from tests.xlsx import Error, workbook
 
 # --- sheets ---
@@ -68,7 +69,7 @@ def test_an_error_cell_outside_the_table_is_no_fault() -> None:
     assert MixedSheet.frame(body).height == 1
 
 
-def test_an_erratum_and_a_cells_hook_see_text_on_an_all_number_sheet() -> None:
+def test_an_erratum_and_a_cells_hook_see_text_on_an_all_number_sheet(monkeypatch: pytest.MonkeyPatch) -> None:
     class Fixed(Sheet):
         row = Mixed
         labels = {"Code": "code", "Value": "value"}
@@ -80,7 +81,9 @@ def test_an_erratum_and_a_cells_hook_see_text_on_an_all_number_sheet() -> None:
             return frame.with_columns(pl.col("Code").str.replace("x", "y"))
 
     body = workbook({"S": [["Code", "Value"], [1.0, 1.5], [2.0, 3.0]]})
+    calls = count_loads(monkeypatch)
     assert Fixed.frame(body).rows() == [("1", 2.5), ("2", 3.0)]
+    assert len(calls) == 1  # the typed load rendered as text, not a second parse
 
 
 def test_a_filled_column_past_the_header_raises() -> None:
@@ -169,3 +172,14 @@ def test_dates_stay_dates() -> None:  # a guard on the fallback's datetime branc
         dt.date(2026, 11, 9),
         None,
     ]
+
+
+def test_a_typed_sheet_cell_renders_as_the_text_it_means() -> None:
+    from flatread.sheets import _text_of  # noqa: PLC0415  # the rendering a hook sees, pinned directly
+
+    stamps = pl.Series([dt.datetime(2026, 11, 9), dt.datetime(2026, 11, 9, 14, 30)])
+    floats = pl.Series([7.0, 0.1, 1e-12])
+    assert pl.select(_text_of(pl.lit(stamps), stamps.dtype)).to_series().to_list() == [
+        "2026-11-09", "2026-11-09T14:30:00"
+    ]  # fmt: skip
+    assert pl.select(_text_of(pl.lit(floats), floats.dtype)).to_series().to_list() == ["7", "0.1", "1e-12"]

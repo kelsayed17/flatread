@@ -62,7 +62,7 @@ In prism-clients each dataset's constants are then `body_reader(FmhpiStates.fram
 | Base | Reads | How |
 |---|---|---|
 | `Csv`, `Pipe`, `Tsv` | delimited text | one `pl.read_csv` of the whole body, every cell text. A sentinel field on every line makes a short row show instead of being padded. A body where a quoted field spans lines (or that holds a `\x01` byte) reads through the stdlib `csv` module instead. |
-| `Sheet` | a sheet of an xlsx or xls (the `excel` extra) | one fastexcel load, each column's type inferred from every cell, strictly. A column mixing kinds, an erratum or a `cells` hook falls back to a text load plus a typed load. Floats keep every digit. An xlsx error cell (`#N/A`) in the table raises; in an xls it reads as empty, since fastexcel does not report it. A filled cell right of the header's last label raises. |
+| `Sheet` | a sheet of an xlsx or xls (the `excel` extra) | one fastexcel load, each column's type inferred from every cell, strictly. A column mixing kinds falls back to a text load plus a typed load; an erratum or a `cells` hook sees the typed cells as text. Floats keep every digit. An xlsx error cell (`#N/A`) in the table raises; in an xls it reads as empty, since fastexcel does not report it. A filled cell right of the header's last label raises. |
 | `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively; a provider writing numbers as strings with its own `"null"` reads in text mode. `Json.page(body)` also returns the cursor at `next`. |
 | `FixedWidth` | fixed-width records | `str.slice` per column at the provider's 1-based positions; a line shorter than the last column raises. |
 

@@ -31,6 +31,7 @@ __all__ = [
     "YEAR_MONTH",
     "DateFormat",
     "Field",
+    "as_text",
     "dtype_of",
     "fields_of",
     "first_bad",
@@ -289,7 +290,7 @@ def _native_read(  # noqa: PLR0911  # one return per native kind
     return None  # read as its text: a number into a str, Decimal or serial date, or a type it is not
 
 
-def _as_text(column: pl.Expr, dtype: pl.DataType) -> pl.Expr:
+def as_text(column: pl.Expr, dtype: pl.DataType) -> pl.Expr:
     """Return a native column as text: a whole float as its integer, every other float its shortest round trip."""
     if dtype.is_float():
         whole = column.is_finite() & (column == column.floor()) & (column.abs() < 2**53)
@@ -310,7 +311,7 @@ def type_frame(text: pl.DataFrame, fields: Sequence[Field]) -> tuple[pl.DataFram
             value, bad = native
             missing = column.is_null()
         else:
-            cell = column if dtype == pl.String else _as_text(column, dtype)
+            cell = column if dtype == pl.String else as_text(column, dtype)
             if field.strip:
                 cell = cell.str.strip_chars()
             scale = 0
