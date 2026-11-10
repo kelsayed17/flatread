@@ -169,14 +169,14 @@ def test_a_stray_0x01_takes_the_fallback() -> None:
 
 def test_non_utf8_raises_encoding_error() -> None:
     with pytest.raises(EncodingError):
-        Observations.frame(b"Date,Value,Note\n2026-11-09,1,caf\xe9\n")
+        Observations.frame(b"Date,Value,Note\n2026-11-09,1,\xe9t\xe9\n")
 
 
 def test_another_encoding_is_declared() -> None:
     class Latin(Observations):
         encoding = "latin-1"
 
-    assert Latin.frame(b"Date,Value,Note\n2026-11-09,1,caf\xe9\n")["note"][0] == "café"
+    assert Latin.frame(b"Date,Value,Note\n2026-11-09,1,\xe9t\xe9\n")["note"][0] == "été"
 
 
 def test_an_error_on_the_fast_path_names_the_line() -> None:

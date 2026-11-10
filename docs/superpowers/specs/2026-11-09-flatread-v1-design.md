@@ -358,7 +358,7 @@ Package: `msgspec`, `polars` and (extra `excel`) `fastexcel` stay; `stream-unzip
 - The exact `Report` and `Diff` structures and their text rendering.
 - Which corpus bodies beyond those named, and the benchmark script's shape.
 - Error message wording, as long as each names line (or sheet row / record), label and text.
-- Whether `Pipe`/`Tsv` are subclasses or just `Csv` with `separator` (behaviour must be identical).
+- Whether `Pipe`/`Tsv` are subclasses or just `Csv` with `separator` (behavior must be identical).
 
 ## Open (to confirm with the user or a client session)
 
