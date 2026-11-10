@@ -139,8 +139,8 @@ ban-relative-imports = "all"
     "DTZ001", "DTZ007",
     # A read float is compared exactly with the literal it was read from: equality is what is tested.
     "RUF069",
-    # A test collects a stream an item at a time, so the items before an error are kept.
-    "PERF401",
+    # A layout's settings are class attributes; flatread reads them, never mutates them.
+    "RUF012",
 ]
 
 [tool.ty.environment]
