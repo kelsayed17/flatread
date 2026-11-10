@@ -140,7 +140,7 @@ Every error is a `flatread.errors.ReadError`, a `ValueError`: `EmptyBodyError`, 
 
 ## From 2.0
 
-This release makes two cases strict that 2.0 let through:
+3.0 makes two cases strict that 2.0 let through:
 - **Long tables:** a missing melted cell no longer drops silently. Set `Long(..., drop_missing=True)` for the old behavior.
 - **Blank lines:** a blank line between two rows raises `RaggedRowError`.
 
@@ -174,7 +174,7 @@ The design and its reasons are in `docs/superpowers/specs/2026-11-09-flatread-v1
 ## Install
 
 ```
-uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v2.0.0"
+uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v3.0.0"
 ```
 
 Python 3.14; polars, msgspec, and fastexcel for sheets.
