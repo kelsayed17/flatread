@@ -13,11 +13,14 @@ A body is a workbook by its bytes, not its URL: an xls served as ``.xlsx`` reads
 """
 
 import datetime as dt
+import io
 import logging
 import re
+import zipfile
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, ClassVar, Final, Literal, override
+from xml.etree import ElementTree as ET
 
 import fastexcel
 import polars as pl
@@ -25,15 +28,19 @@ import polars as pl
 from flatread import core
 from flatread.archives import Member, pick
 from flatread.core import Plan, Text, column_names
-from flatread.errors import CorruptArchiveError, UnknownLayoutError
+from flatread.errors import CellError, CorruptArchiveError, RaggedRowError, UnknownLayoutError
 from flatread.layout import Layout
 
 __all__ = ["Sheet", "Sheets"]
 
 #: An xlsx is a ZIP; an xls is a compound file.
 _SIGNATURES: Final = (b"PK\x03\x04", bytes.fromhex("d0cf11e0a1b11ae1"))
-#: A cell the text load wrote as a decimal number, its digits rounded to nine: a point or an exponent.
-_DECIMAL: Final = r"^[+-]?(\d+\.\d*|\.\d+|\d+(\.\d*)?[eE][+-]?\d+)$"
+#: calamine's text of a number cell, its fraction rounded to nine digits (1e-12 is "0"); a text cell written any
+#: other way ("1.50", "1e5", "007") is the provider's text, kept as written.
+_RENDERED: Final = r"^-?(0|[1-9]\d{0,14})(\.\d{0,8}[1-9])?$"
+_MAIN: Final = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_REL: Final = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_PKG: Final = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 
 # fastexcel logs a warning for every column it cannot type, which an all-empty column always is.
 logging.getLogger("fastexcel").setLevel(logging.ERROR)
@@ -129,10 +136,12 @@ class Sheet(Layout):
     @classmethod
     def _strict_first(cls) -> bool:
         """Return whether the strict load is worth trying: no setting says a column mixes text into its values."""
+        if cls.errata or "cells" in cls._hooks():  # each reads the cells as text, as every other format gives them
+            return False
         return not (frozenset(cls.missing) - {""} or cls.missing_by_field or cls.strip or cls.footer is not None)
 
     @classmethod
-    def _load(cls, reader: fastexcel.ExcelReader, name: str, plan: Plan) -> Text:
+    def _load(cls, reader: fastexcel.ExcelReader, name: str, plan: Plan, body: bytes) -> Text:
         """Return sheet *name*'s table as cells under its labels, typed where fastexcel types them.
 
         calamine parses a sheet whole on every load, so the header comes from the table's own load: one parse on the
@@ -158,10 +167,15 @@ class Sheet(Layout):
         if not labels:
             msg = f"sheet {name!r} has no header in row {cls.header_row + 1}"
             raise UnknownLayoutError(msg)
-        frame = sheet.to_polars().select(source)
+        whole = sheet.to_polars()
+        frame = whole.select(source)
         if mixed:
             frame = cls._mixed(reader, name, frame, common, cls._kind_of(plan, column_names(labels)))
         frame, rows = cls._bound(frame, name)
+        first = cls.header_row + 2
+        cls._past_header(whole.drop(source), sheet.selected_columns, rows, name, first)
+        under = {_letters(c.absolute_index): label for c, label in zip(sheet.selected_columns, labels, strict=False)}
+        cls._errors(body, name, under, {first + r for r in rows})
         frame.columns = column_names(labels)
         headings = None
         if cls.headings is not None:  # the one setting that costs a parse of its own: the row above the header
@@ -170,7 +184,6 @@ class Sheet(Layout):
                 use_columns=common.get("use_columns"),
             ).to_polars()  # fmt: skip
             headings = tuple(above.row(0)[: len(labels)]) if above.height else None
-        first = cls.header_row + 2
         return Text(frame, lambda i: f"sheet {name!r} row {first + rows[i]}", headings=headings)
 
     @classmethod
@@ -203,12 +216,41 @@ class Sheet(Layout):
             else:
                 whole = value.is_finite() & (value == value.floor()) & (value.abs() < 2**53)
                 as_text = pl.select(
-                    pl.when(whole).then(value.cast(pl.Int64).cast(pl.String)).otherwise(value.cast(pl.String))
+                    pl.when(whole)
+                    .then(value.cast(pl.Int64, strict=False).cast(pl.String))
+                    .otherwise(value.cast(pl.String))
                 ).to_series()
-                choose = value.is_not_null() & written.str.contains(_DECIMAL).fill_null(value=False)
+                choose = value.is_not_null() & written.str.contains(_RENDERED).fill_null(value=False)
                 choose = choose | (value.is_not_null() & written.is_null())
             columns.append(pl.when(choose).then(pl.lit(as_text)).otherwise(written).alias(str(column)))
         return text.with_columns(columns)
+
+    @staticmethod
+    def _past_header(
+        rest: pl.DataFrame, columns: list[fastexcel.ColumnInfo], rows: list[int], name: str, first: int
+    ) -> None:
+        """Raise where a column past the header's last label holds a cell in the table's rows: a row wider than it."""
+        letters = {c.name: _letters(c.absolute_index) for c in columns}
+        for column in rest.iter_columns():
+            cells = column[rows].cast(pl.String)
+            if (filled := (cells.is_not_null() & (cells != "")).arg_true()).len():
+                at = int(filled[0])
+                msg = (
+                    f"sheet {name!r} row {first + rows[at]}: column {letters[column.name]} holds {cells[at]!r} "
+                    "under no label, so the row is wider than the header"
+                )
+                raise RaggedRowError(msg)
+
+    @staticmethod
+    def _errors(body: bytes, name: str, under: dict[str, str], rows: set[int]) -> None:
+        """Raise at the table's first Excel error cell (``#N/A``, ``#DIV/0!``), which fastexcel reads as empty.
+
+        *under* maps each labeled column's letters to its label, and *rows* holds the table's sheet row numbers.
+        """
+        for letters, row, text in _error_cells(body, name):
+            if letters in under and row in rows:
+                where = f"sheet {name!r} row {row}"
+                raise CellError(where, under[letters], text, "a value: it is an Excel error, a formula that failed")
 
     @classmethod
     def _bound(cls, frame: pl.DataFrame, name: str) -> tuple[pl.DataFrame, list[int]]:
@@ -232,7 +274,7 @@ class Sheet(Layout):
     @override
     def read_text(cls, body: bytes) -> Text:
         reader = cls._reader(body)
-        return cls._load(reader, cls._names(reader)[0], cls._checked_plan())
+        return cls._load(reader, cls._names(reader)[0], cls._checked_plan(), body)
 
     @classmethod
     @override
@@ -241,13 +283,14 @@ class Sheet(Layout):
             return super().frame(body)
         plan = cls._checked_plan()
         cls._refuse(body)
-        reader = cls._reader(cls._unwrap(body))
+        body = cls._unwrap(body)
+        reader = cls._reader(body)
         frames = []
         for name in cls._names(reader):
-            text = cls._load(reader, name, plan)
+            text = cls._load(reader, name, plan, body)
             text.carried[cls.every_sheet.name] = name
             frames.append(core.run(plan, text, **cls._hooks()))
-        return pl.concat(frames, how="vertical")
+        return pl.concat(frames, how="vertical_relaxed")  # a Decimal column takes the widest sheet's scale
 
 
 def _labels(columns: list[fastexcel.ColumnInfo]) -> tuple[list[str], list[str]]:
@@ -276,3 +319,39 @@ def _matches(name: str, member: Member) -> bool:
     if isinstance(member, re.Pattern):
         return bool(member.fullmatch(name))
     return member(name)
+
+
+def _letters(index: int) -> str:
+    """Return a 0-based column index as the sheet's letters: 0 is A, 26 is AA."""
+    letters = ""
+    index += 1
+    while index:
+        index, rest = divmod(index - 1, 26)
+        letters = chr(65 + rest) + letters
+    return letters
+
+
+def _error_cells(body: bytes, name: str) -> list[tuple[str, int, str]]:
+    """Return sheet *name*'s error cells, each its column's letters, its row and its text, from the xlsx's XML.
+
+    fastexcel reads an error cell as empty, and an empty cell is a missing value, so the XML is the only place it
+    shows. Only a sheet holding one pays more than a substring search of its XML.
+    """
+    if not body.startswith(b"PK"):
+        return []  # shortcut: an xls's error cells read as empty; parse its BIFF records if a provider writes them.
+    with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        # expat refuses entity-expansion bombs, and these two parts are small.
+        book = ET.fromstring(zf.read("xl/workbook.xml"))  # noqa: S314
+        rels = ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))  # noqa: S314
+        rid = next(s.get(f"{_REL}id") for s in book.iter(f"{_MAIN}sheet") if s.get("name") == name)
+        target = next(r.get("Target", "") for r in rels.iter(f"{_PKG}Relationship") if r.get("Id") == rid)
+        xml = zf.read(target.lstrip("/") if target.startswith("/") else f"xl/{target}")
+    if b't="e"' not in xml and b"t='e'" not in xml:
+        return []
+    found: list[tuple[str, int, str]] = []
+    for cell in re.finditer(rb"<c\b([^>]*\bt=[\"']e[\"'][^>]*)>(.*?)</c>", xml, re.DOTALL):
+        ref = re.search(rb"\br=[\"']([A-Z]+)(\d+)[\"']", cell[1])
+        value = re.search(rb"<v>(.*?)</v>", cell[2], re.DOTALL)
+        if ref is not None:
+            found.append((ref[1].decode(), int(ref[2]), "" if value is None else value[1].decode()))
+    return found

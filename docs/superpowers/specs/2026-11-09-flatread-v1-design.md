@@ -150,10 +150,9 @@ Settings that are not on the list below do not exist. A provider quirk outside t
 | `missing_by_field` | `{}` | Extra tokens for one field (`{"rate": {"NA"}, "margin": {"Default"}}`, IBKR). |
 | `dates` | `{}` | field → `strftime` format, or a tuple of formats. Checked by writing the value back (polars' `%Y` alone reads `12/31/25` as year 25), so no separate shape regex. Built-in named formats for the shapes three or more providers write: `flatread.QUARTER` (`2024Q1`, `2024:Q1`), `flatread.EXCEL_SERIAL`, `flatread.YEAR_MONTH`. |
 | `nonfinite` | `False` | Whether a float column admits NaN and infinities. |
-| `long` | `None` | `flatread.Long(index=[…], name="series", value="value", names=r"…")`: the columns not in `index` are melted. Their header labels become the `name` column's values, typed by `row`'s `name` field (a date for dated columns), and each must match the `names` regex whole, so a renamed column raises instead of becoming a new series (SF Fed, Philadelphia, Chicago). A melted cell that is missing yields no row, as every hand-written long read does. |
+| `long` | `None` | `flatread.Long(value="value", names=r"…", name="series")`: the columns `labels` does not name are melted. Their header labels become the `name` field's values, typed by `row`'s `name` field (a date for dated columns), the regex's named groups fill the fields they name, and each label must match the `names` regex whole, so a renamed column raises instead of becoming a new series (SF Fed, Philadelphia, Chicago). A melted cell that is missing yields no row, as every hand-written long read does. |
 | `headings` | `None` | For `long`: a row above the header whose cells carry rightwards as a group key (three providers write these). |
 | `where` | `None` | A polars expression the read frame is filtered by: one body, several tables (FMHPI by geography). Each table's method reads the whole body (FMHPI: 23 ms each); no cache. |
-| `carry` | `{}` | Values read off the body outside the table (a stamp, a trailer, an envelope field) → a column on every row, as `trailer`/`preamble`/`envelope` capture them. |
 | `errata` | `()` | `flatread.Erratum(label="…", wrote="…", means="…", why="…", where={label: text, …})`: a known provider mistake, fixed on the text cell before typing. `where` picks the row by other cells' text (its key, as written); without it every cell of `label` that reads `wrote` is fixed. **Raises `ErratumGoneError` if no cell matches**, so a fix never outlives the mistake (SF Fed's model). |
 | `refusals` | `{}` | Body text → error: a provider's "no file" answer inside a 2xx (Nasdaq's "Page Not Available", OCC's "File requested does not exist.", a zero-byte body) raises `NotPublishedError` (or another named error) before any parse. |
 | `min_rows` | `1` | Fewer rows raises: a header and nothing is not a file. `0` where an empty day is real (NYSE threshold). |
@@ -179,7 +178,7 @@ its signature, not its URL, so an xls served as `.xlsx` reads (NY Fed GSCPI). Ho
   styled as dates (Atlanta's serials) declares `dates = {field: flatread.EXCEL_SERIAL}`.
 
 **`Json`**: `records` (a path: `"data"`, `"results[].bars[]"`; `[]` walks a list), `envelope` (paths to scalars
-copied onto every row, via `carry`), `next` (the path of the page cursor, read by
+copied onto every row), `next` (the path of the page cursor, read by
 `Layout.page(body) -> (frame, cursor | None)`, see "Paging").
 
 Cut by the three-provider rule (each stays a hook in its one or two clients until a third needs it): thousands

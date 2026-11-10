@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, ClassVar, override
 import polars as pl
 
 from flatread.core import Plan, Text
-from flatread.errors import EncodingError, TruncatedFileError, UnknownLayoutError
+from flatread.errors import EncodingError, RaggedRowError, TruncatedFileError, UnknownLayoutError
 from flatread.layout import Labels, Layout
 
 if TYPE_CHECKING:
@@ -71,6 +71,11 @@ class FixedWidth(Layout):
             number, line = bad.row(0)[0], bad.row(0)[1]
             msg = f"line {number} is not a record this layout reads: {line[:200]!r}"
             raise UnknownLayoutError(msg)
+        width = max(end for _, end in cls.columns.values())
+        if (short := lines.filter(pl.col("line").str.len_chars() < width)).height:
+            number, line = short.row(0)
+            msg = f"line {number} is {len(line)} characters, short of the record's {width}: {line[:200]!r}"
+            raise RaggedRowError(msg)
         numbers = lines["number"]
         frame = lines.select(
             pl.col("line").str.slice(start - 1, end - start + 1).alias(name)

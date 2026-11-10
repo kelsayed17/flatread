@@ -8,6 +8,13 @@ from xml.sax.saxutils import escape
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
+
+class Error(str):
+    """An Excel error cell, such as ``#N/A``."""
+
+    __slots__ = ()
+
+
 type Cell = float | int | str | None
 
 
@@ -28,7 +35,9 @@ def _sheet(rows: Sequence[Sequence[Cell]]) -> str:
             ref = f"{_column(c)}{r}"
             if value is None:
                 continue
-            if isinstance(value, str):
+            if isinstance(value, Error):
+                cells.append(f'<c r="{ref}" t="e"><v>{escape(value)}</v></c>')
+            elif isinstance(value, str):
                 cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{escape(value)}</t></is></c>')
             else:
                 cells.append(f'<c r="{ref}"><v>{value!r}</v></c>')

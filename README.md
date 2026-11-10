@@ -62,9 +62,9 @@ In prism-clients each dataset's constants are then `body_reader(FmhpiStates.fram
 | Base | Reads | How |
 |---|---|---|
 | `Csv`, `Pipe`, `Tsv` | delimited text | one `pl.read_csv` of the whole body, every cell text. A sentinel field on every line makes a short row show instead of being padded. A body where a quoted field spans lines (or that holds a `\x01` byte) reads through the stdlib `csv` module instead. |
-| `Sheet` | a sheet of an xlsx or xls (the `excel` extra) | one fastexcel load, each column's type inferred from every cell, strictly. A column mixing kinds falls back to a text load plus a typed load. Floats keep every digit. |
+| `Sheet` | a sheet of an xlsx or xls (the `excel` extra) | one fastexcel load, each column's type inferred from every cell, strictly. A column mixing kinds, an erratum or a `cells` hook falls back to a text load plus a typed load. Floats keep every digit. An xlsx error cell (`#N/A`) in the table raises; in an xls it reads as empty, since fastexcel does not report it. A filled cell right of the header's last label raises. |
 | `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively; a provider writing numbers as strings with its own `"null"` reads in text mode. `Json.page(body)` also returns the cursor at `next`. |
-| `FixedWidth` | fixed-width records | `str.slice` per column at the provider's 1-based positions. |
+| `FixedWidth` | fixed-width records | `str.slice` per column at the provider's 1-based positions; a line shorter than the last column raises. |
 
 Any layout can read a zip member: `member = "x.csv"`, a regex, or a callable.
 
@@ -85,7 +85,7 @@ a provider's defaults and is never read.
 | `strip` | `False` | take whitespace off every text cell first |
 | `dates` | `{}` | field → `strftime` format, a tuple of them, or `flatread.QUARTER` / `YEAR_MONTH` / `EXCEL_SERIAL`; checked by writing the date back. A date with none reads ISO |
 | `nonfinite` | `False` | admit NaN and infinities in float fields |
-| `long` | `None` | `Long(index, name, value, names)`: melt the columns after `index`; their labels must match `names` |
+| `long` | `None` | `Long(value=, names=, name=None)`: melt every column `labels` does not name into `value`; each label must match the regex `names` whole, its named groups fill those fields, and `name` takes the whole label |
 | `headings` | `None` | the field a group heading above the header fills, for a long table |
 | `errata` | `()` | `Erratum(label, wrote, means, why, where={...})`: a provider mistake fixed before typing; raises `ErratumGoneError` once the provider fixes it |
 | `refusals` | `{}` | body text → error, for a "no file" answer in a 200 (`b""` is an empty body) |

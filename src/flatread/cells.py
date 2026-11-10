@@ -273,8 +273,8 @@ def _native_read(  # noqa: PLR0911  # one return per native kind
         bad = pl.lit(value=False) if field.nonfinite else column.is_not_null() & ~number.is_finite()
         return number, bad
     if field.kind is int and dtype.is_float():
-        whole = column.is_finite() & (column == column.floor())
-        return pl.when(whole).then(column.cast(pl.Int64)), column.is_not_null() & ~whole
+        whole = column.is_finite() & (column == column.floor()) & (column.abs() < 2**63)
+        return pl.when(whole).then(column.cast(pl.Int64, strict=False)), column.is_not_null() & ~whole
     if field.kind is int and dtype.is_integer():
         return column.cast(pl.Int64), pl.lit(value=False)
     if field.kind is dt.date and isinstance(dtype, pl.Datetime):  # a sheet's date cell: a midnight datetime
@@ -293,7 +293,9 @@ def _as_text(column: pl.Expr, dtype: pl.DataType) -> pl.Expr:
     """Return a native column as text: a whole float as its integer, every other float its shortest round trip."""
     if dtype.is_float():
         whole = column.is_finite() & (column == column.floor()) & (column.abs() < 2**53)
-        return pl.when(whole).then(column.cast(pl.Int64).cast(pl.String)).otherwise(column.cast(pl.String))
+        return (
+            pl.when(whole).then(column.cast(pl.Int64, strict=False).cast(pl.String)).otherwise(column.cast(pl.String))
+        )
     return column.cast(pl.String)
 
 

@@ -115,7 +115,7 @@ class Csv(Layout):
         if cls.encoding.replace("_", "-").lower() in {"utf-8", "utf8"}:
             body = body.removeprefix(codecs.BOM_UTF8)
             try:
-                body.decode()
+                body.isascii() or body.decode()  # ASCII is UTF-8, checked without a copy
             except UnicodeDecodeError as exc:
                 msg = f"the body is not UTF-8: {exc}"
                 raise EncodingError(msg) from exc
@@ -132,7 +132,11 @@ class Csv(Layout):
         text = line.decode().removesuffix("\r")
         if not cls.quoted:
             return text.split(cls.separator)
-        return next(csv.reader([text], delimiter=cls.separator, strict=True), [""])
+        try:
+            return next(csv.reader([text], delimiter=cls.separator, strict=True), [""])
+        except csv.Error as exc:
+            msg = f"the header (or headings) line {text[:200]!r} does not parse: {exc}"
+            raise UnknownLayoutError(msg) from exc
 
     @classmethod
     def _trailer(cls, body: bytes) -> tuple[dict[str, str | None], int | None, int]:

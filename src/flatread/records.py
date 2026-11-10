@@ -13,7 +13,7 @@ added column in a CSV does. A missing key is an error unless its field is ``| No
 
 from decimal import Decimal
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Final, override
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, override
 
 import msgspec
 import polars as pl
@@ -30,7 +30,9 @@ if TYPE_CHECKING:
 
 __all__ = ["Json"]
 
-_NATIVE: Final[dict[object, object]] = {int: int, float: float, bool: bool, Decimal: Decimal}
+#: A JSON int a polars Int64 holds; a wider one fails the decode, naming its record.
+_INT64: Final = Annotated[int, msgspec.Meta(ge=-(2**63), le=2**63 - 1)]
+_NATIVE: Final[dict[object, object]] = {int: _INT64, float: float, bool: bool, Decimal: Decimal}
 _COLUMN: Final[dict[object, pl.DataType]] = {int: pl.Int64(), float: pl.Float64(), bool: pl.Boolean()}
 type _Scalar = str | int | float | bool | None
 
@@ -187,10 +189,10 @@ def _level(name: str, depth: int, envelope: list[list[str]], records: list[tuple
             keys[key] = (_level(name, depth + 1, paths, [], record), False)
     if records:
         if len(records) == 1:
-            keys[head] = (list[record], False)  # ty: ignore[invalid-type-form]
-        else:
+            keys[head] = (list[record] | None, True)  # ty: ignore[invalid-type-form]
+        else:  # the records path is required: a body without it is an error page, not an empty one
             inner = _level(name, depth + 1, below.get(head, []), records[1:], record)
-            keys[head] = (list[inner] if walks else inner, False)  # ty: ignore[invalid-type-form]
+            keys[head] = (list[inner] | None if walks else inner | None, True)  # ty: ignore[invalid-type-form]
     return _struct(f"{name}Level{depth}", keys)
 
 

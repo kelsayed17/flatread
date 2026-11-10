@@ -195,7 +195,7 @@ class Layout:
     def _refuse(cls, body: bytes) -> None:
         head = body[:_REFUSAL_WINDOW]
         for marker, error in cls.refusals.items():
-            if (not marker and not body.strip()) or (marker and marker in head):
+            if (not marker and (not body or body.isspace())) or (marker and marker in head):
                 msg = f"the body is the provider's answer that it has no file: {marker!r}"
                 raise error(msg)
 
@@ -205,7 +205,7 @@ class Layout:
         plan = cls._checked_plan()
         cls._refuse(body)
         body = cls._unwrap(body)
-        if not body.strip():
+        if not body or body.isspace():  # no copy of a large body, as strip() would make
             if plan.min_rows == 0:
                 return core.empty_frame(plan)
             msg = "the body is empty"
