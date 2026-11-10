@@ -125,7 +125,7 @@ class Layout:
                 if field is not None and field not in names:
                     msg = f"{cls.__name__}: the label {label!r} names no field {field!r} of {row.__name__}"
                     raise TypeError(msg)
-        filled = {f for _, f in label_sets[0] if f is not None} | cls._carried_fields()
+        filled = set(cls._carried_fields())
         if cls.long is not None:
             _compiles(cls.long.names, f"{cls.__name__}.long.names")
             parts = set(re.compile(cls.long.names).groupindex)
@@ -139,7 +139,14 @@ class Layout:
             if field not in names:
                 msg = f"{cls.__name__} names no field {field!r} of {row.__name__}"
                 raise TypeError(msg)
-        if unfilled := [f for f in row.__struct_fields__ if f not in filled]:
+        required = {f.name for f in fields if not f.nullable}
+        for i, labels in enumerate(label_sets):  # a set may leave a nullable field unfilled: it reads as null
+            if unfilled := sorted(required - filled - {f for _, f in labels}):
+                where = "the labels" if i == 0 else f"variant {i}"
+                msg = f"{cls.__name__}: {where} leave the required fields {unfilled!r} of {row.__name__} unfilled"
+                raise TypeError(msg)
+        everywhere = filled | {f for labels in label_sets for _, f in labels}
+        if unfilled := [f for f in row.__struct_fields__ if f not in everywhere]:
             msg = f"{cls.__name__}: no label fills the fields {unfilled!r} of {row.__name__}"
             raise TypeError(msg)
         return Plan(
@@ -206,9 +213,7 @@ class Layout:
         cls._refuse(body)
         body = cls._unwrap(body)
         if not body or body.isspace():  # no copy of a large body, as strip() would make
-            if plan.min_rows == 0:
-                return core.empty_frame(plan)
-            msg = "the body is empty"
+            msg = "the body is empty: a table with no rows still has its file (min_rows = 0 is about rows)"
             raise EmptyBodyError(msg)
         return core.run(plan, cls.read_text(body), **cls._hooks())
 

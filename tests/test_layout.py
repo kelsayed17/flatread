@@ -288,15 +288,13 @@ def test_frame_reads_through_read_text_and_names_the_line() -> None:
         Body.frame(b"Date,Rate\n2026-11-09,1\n2026-11-10,x\n")
 
 
-def test_an_empty_body_with_min_rows_zero_is_an_empty_frame() -> None:
-    with pytest.raises(EmptyBodyError):
-        Body.frame(b"  \n")
-
+def test_an_empty_body_raises_whatever_min_rows_allows() -> None:
     class Empty(Body):
         min_rows = 0
 
-    assert Empty.frame(b"").height == 0
-    assert Empty.rows(b"") == []
+    for layout in (Body, Empty):
+        with pytest.raises(EmptyBodyError):
+            layout.frame(b"  \n")
 
 
 def test_rows_equal_frame() -> None:

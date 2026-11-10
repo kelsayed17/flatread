@@ -82,7 +82,7 @@ def test_messages_name_what_the_cell_must_be() -> None:
     class Empty(Days):
         min_rows = 0
 
-    assert Empty.frame(b"").schema["kind"] == pl.Enum(["US", "State"])
+    assert Empty.frame(b"Kind,Day\n").schema["kind"] == pl.Enum(["US", "State"])
 
 
 def test_settings_naming_no_field_or_the_wrong_kind_raise() -> None:

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Final
 
 import polars as pl
 
-from flatread.cells import Field, dtype_of, first_bad, type_frame
+from flatread.cells import Field, first_bad, type_frame
 from flatread.errors import CheckError, EmptyBodyError, ErratumGoneError, UnknownLayoutError
 
 if TYPE_CHECKING:
@@ -22,7 +22,8 @@ if TYPE_CHECKING:
     import msgspec
 
 __all__ = [
-    "Erratum", "Long", "Plan", "Text", "column_names", "empty_frame", "erratum_found", "field_labels", "place",
+    "Erratum", "Long", "Plan", "Text", "column_names", "erratum_found", "field_labels", "match_header",
+    "place",
     "prepare", "run",
 ]  # fmt: skip
 
@@ -104,12 +105,7 @@ def column_names(labels: Sequence[str]) -> list[str]:
     return names
 
 
-def empty_frame(plan: Plan) -> pl.DataFrame:
-    """Return a frame of *plan*'s row with no rows, for a body that is a day with none."""
-    return pl.DataFrame(schema={f.name: dtype_of(f) for f in plan.fields})
-
-
-def _match(plan: Plan, columns: list[str]) -> LabelSet:
+def match_header(plan: Plan, columns: list[str]) -> LabelSet:
     """Return the label set *columns* are written in; none raises, naming what was found."""
     for labels in plan.label_sets:
         names = column_names([label for label, _ in labels])
@@ -199,8 +195,8 @@ def place(frame: pl.DataFrame, i: int) -> int:
 
 
 def field_labels(plan: Plan) -> dict[str, str]:
-    """Return each field's label in the layout's first label set, for an error."""
-    return {f: label for label, f in plan.label_sets[0] if f is not None}
+    """Return each field's label, from the first label set that has one, for an error."""
+    return {f: label for labels in reversed(plan.label_sets) for label, f in labels if f is not None}
 
 
 def prepare(plan: Plan, text: Text, *, cells: Callable[[pl.DataFrame], pl.DataFrame] | None = None) -> pl.DataFrame:
@@ -209,7 +205,7 @@ def prepare(plan: Plan, text: Text, *, cells: Callable[[pl.DataFrame], pl.DataFr
     A long frame keeps a hidden row column, so a typing error can name the row's place in the body after the melt.
     """
     frame = text.frame
-    labels = _match(plan, frame.columns)
+    labels = match_header(plan, frame.columns)
     frame = _fix(frame, plan.errata)
     if cells is not None:
         frame = cells(frame)
@@ -229,7 +225,24 @@ def prepare(plan: Plan, text: Text, *, cells: Callable[[pl.DataFrame], pl.DataFr
         frame = frame.filter(filled)
     if text.carried:
         frame = frame.with_columns(pl.lit(value, dtype=pl.String).alias(name) for name, value in text.carried.items())
+    absent = [f.name for f in plan.fields if f.name not in frame.columns]
+    if absent:  # a nullable field the header's label set leaves unfilled (the compile refused a required one)
+        frame = frame.with_columns(pl.lit(None, dtype=pl.String).alias(name) for name in absent)
     return frame
+
+
+def _type_carried(plan: Plan, carried: Mapping[str, str | None]) -> None:
+    """Raise where a value read off the body outside the table (a stamp, a count's line) is not its field's type.
+
+    Typed once, apart from the rows: a file with no rows still has its stamp, and a bad one is no row's fault.
+    """
+    fields = [f for f in plan.fields if f.name in carried]
+    if not fields:
+        return
+    text = pl.DataFrame({f.name: [carried[f.name]] for f in fields}, schema=dict.fromkeys(carried, pl.String))
+    _, bad = type_frame(text.select([f.name for f in fields]), fields)
+    if bad.select(pl.any_horizontal(pl.all()).any()).item():
+        raise first_bad(text, bad, fields, {f.name: f.name for f in fields}, lambda _: "outside the table")
 
 
 def run(
@@ -240,6 +253,7 @@ def run(
     check: Callable[[pl.DataFrame], None] | None = None,
 ) -> pl.DataFrame:
     """Return *text* read into *plan*'s row: a frame of its fields, typed, checked and filtered."""
+    _type_carried(plan, text.carried)
     frame = prepare(plan, text, cells=cells)
     fields = [f.name for f in plan.fields]
     typed, bad = type_frame(frame.select(fields), plan.fields)

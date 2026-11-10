@@ -63,7 +63,7 @@ In prism-clients each dataset's constants are then `body_reader(FmhpiStates.fram
 |---|---|---|
 | `Csv`, `Pipe`, `Tsv` | delimited text | one `pl.read_csv` of the whole body, every cell text. A sentinel field on every line makes a short row show instead of being padded. A body where a quoted field spans lines (or that holds a `\x01` byte) reads through the stdlib `csv` module instead. |
 | `Sheet` | a sheet of an xlsx or xls (the `excel` extra) | one fastexcel load, each column's type inferred from every cell, strictly. A column mixing kinds falls back to a text load plus a typed load; an erratum or a `cells` hook sees the typed cells as text. Floats keep every digit. An xlsx error cell (`#N/A`) in the table raises; in an xls it reads as empty, since fastexcel does not report it. A filled cell right of the header's last label raises. |
-| `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively; a provider writing numbers as strings with its own `"null"` reads in text mode. `Json.page(body)` also returns the cursor at `next`. |
+| `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively, and a text field must be a JSON string; a provider writing every value as a string with its own `"null"` reads in text mode, where any other JSON value raises. The records path must be present and a list. `Json.page(body)` also returns the cursor at `next`. |
 | `FixedWidth` | fixed-width records | `str.slice` per column at the provider's 1-based positions; a line shorter than the last column raises. |
 
 Any layout can read a zip member: `member = "x.csv"`, a regex, or a callable.
@@ -77,25 +77,26 @@ a provider's defaults and is never read.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `row` | — | the msgspec struct; its fields, in order, are the frame's columns. `str`, `int`, `float`, `Decimal`, `bool` (`true`/`false`), `date`, `datetime`, `Literal[...]`, any `\| None` |
+| `row` | — | the msgspec struct; its fields, in order, are the frame's columns. `str`, `int`, `float`, `Decimal`, `bool` (`true`/`false`), `date`, `datetime`, `time`, `Literal[...]`, any `\| None` |
 | `labels` | — | provider label → field, in the file's order; `None` checks a column present and drops it; ordered `(label, field)` pairs when a label repeats |
-| `variants` | `()` | other whole label maps, tried in order (a header that changed on a date) |
+| `variants` | `()` | other whole label maps, tried in order (a header that changed on a date); any label set may leave a `\| None` field out, which then reads as null |
 | `missing` | `{""}` | tokens for no value; a field that is not `\| None` refuses them |
 | `missing_by_field` | `{}` | extra tokens for one field |
 | `strip` | `False` | take whitespace off every text cell first |
-| `dates` | `{}` | field → `strftime` format, a tuple of them, or `flatread.QUARTER` / `YEAR_MONTH` / `EXCEL_SERIAL`; checked by writing the date back. A date with none reads ISO |
+| `dates` | `{}` | field → `strftime` format, a tuple of them, or `flatread.QUARTER` / `YEAR_MONTH` / `EXCEL_SERIAL`; checked by writing the value back. A date, datetime or time with none reads ISO |
 | `nonfinite` | `False` | admit NaN and infinities in float fields |
 | `long` | `None` | `Long(value=, names=, name=None)`: melt every column `labels` does not name into `value`; each label must match the regex `names` whole, its named groups fill those fields, and `name` takes the whole label |
 | `headings` | `None` | the field a group heading above the header fills, for a long table |
 | `errata` | `()` | `Erratum(label, wrote, means, why, where={...})`: a provider mistake fixed before typing; raises `ErratumGoneError` once the provider fixes it |
 | `refusals` | `{}` | body text → error, for a "no file" answer in a 200 (`b""` is an empty body) |
-| `min_rows` | `1` | fewer rows raise `EmptyBodyError`; `0` makes an empty body an empty frame |
+| `min_rows` | `1` | fewer rows raise `EmptyBodyError`; `0` lets a file hold no rows. An empty body always raises: a file with no rows still has its header |
 | `key` | `()` | fields that identify a row: checked unique, and compared by `diff` |
 | `where` | `None` | a polars filter of the typed frame |
 | `member` | `None` | the zip member this table is |
 
 `Csv`: `separator`, `quoted`, `header`, `skip_lines`, `header_line` (a regex the header line matches), `trailing_separator`,
-`final_line_ending`, `encoding`, `preamble` and `trailer` (each a `Line(pattern, carry={group: field}, count=group)`).
+`final_line_ending` (`True` required, `False` refused, `None` either), `encoding`, `preamble` and `trailer` (each a
+`Line(pattern, carry={group: field}, count=group)`; a carried value is typed even when the file has no rows).
 `Sheet`: `sheet`, `header_row`, `columns` (`"A:G"`), `end` (`"blank_row"` or `"last_row"`), `footer` (a regex for
 notes after the table), `every_sheet` (`Sheets(name)`: every matching sheet into one table). `Json`: `records`
 (`"data"`, `"results[].bars"`, `""` for a list body), `envelope` (`{path: field}`), `next`. `FixedWidth`: `columns`
@@ -137,6 +138,13 @@ Every error is a `flatread.errors.ReadError`, a `ValueError`: `EmptyBodyError`, 
 `CellError` for one cell, with `.where`, `.label`, `.text`), `RaggedRowError`, `TruncatedFileError`,
 `ControlTotalError`, `CheckError`, `ErratumGoneError`, `NotPublishedError`, `CorruptArchiveError`, `EncodingError`.
 
+## From 1.0
+
+2.0 breaks three things 1.0 allowed:
+- **An empty body:** it raises `EmptyBodyError` even with `min_rows = 0`, which now only lets a file hold no rows.
+- **`final_line_ending = False`:** it now refuses a final line ending. `None` is the old "either".
+- **JSON text:** a text-read field must be a JSON string, and the records path must be a list, not null.
+
 ## From 0.4
 
 v1 replaces 0.4 outright, with no aliases.
@@ -158,7 +166,7 @@ The design and its reasons are in `docs/superpowers/specs/2026-11-09-flatread-v1
 ## Install
 
 ```
-uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v1.0.0"
+uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v2.0.0"
 ```
 
 Python 3.14; polars, msgspec, and fastexcel for sheets.
