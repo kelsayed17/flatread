@@ -268,8 +268,8 @@ GAPS = [
             "The reader derives three fields from each melted label: `column` (the label, stripped), `series` (the "
             "prefix CF/CF3/PI/..., mapped per sheet, :1104-1113, :1154-1155) and `vintage` (the label's month "
             "and year, with five misprinted labels fixed by sheet and position, :1120-1126). Since this benchmark "
-            "first ran, `Long.names` fills fields from its named groups, so a `cells` hook that renames each vintage column to "
-            "`<series>_<YYYY-MM>` (fixing the misprints by position) plus "
+            "first ran, `Long.names` fills fields from its named groups, so a `cells` hook that renames each "
+            "vintage column to `<series>_<YYYY-MM>` (fixing the misprints by position) plus "
             "`Long(names=r'(?P<series>\\w+)_(?P<vintage>\\d{4}-\\d{2})')` and `dates={'vintage': YEAR_MONTH}` express "
             "it. Not ported here."
         ),
