@@ -20,7 +20,10 @@ if TYPE_CHECKING:
 
     import msgspec
 
-__all__ = ["Erratum", "Long", "Plan", "Text", "column_names", "empty_frame", "prepare", "run"]
+__all__ = [
+    "Erratum", "Long", "Plan", "Text", "column_names", "empty_frame", "erratum_found", "field_labels", "place",
+    "prepare", "run",
+]  # fmt: skip
 
 #: The hidden column that keeps each row's place in the text, for an error, through the melt and the typing.
 _ROW: Final = "\x00row"
@@ -116,19 +119,28 @@ def _match(plan: Plan, columns: list[str]) -> LabelSet:
     raise UnknownLayoutError(msg)
 
 
+def _erratum_at(erratum: Erratum) -> pl.Expr:
+    at = pl.col(erratum.label) == erratum.wrote
+    for label, written in erratum.where.items():
+        at &= pl.col(label) == written
+    return at
+
+
+def erratum_found(frame: pl.DataFrame, erratum: Erratum) -> bool:
+    """Return whether *frame*, a text frame under labels, still holds the mistake *erratum* fixes."""
+    if not {erratum.label, *erratum.where} <= set(frame.columns):
+        return False
+    return bool(frame.select(_erratum_at(erratum).any()).item())
+
+
 def _fix(frame: pl.DataFrame, errata: Sequence[Erratum]) -> pl.DataFrame:
     for erratum in errata:
-        if erratum.label not in frame.columns:
-            msg = f"the erratum {erratum.why!r} names the column {erratum.label!r}, which the file does not have"
-            raise ErratumGoneError(msg)
-        at = pl.col(erratum.label) == erratum.wrote
-        for label, written in erratum.where.items():
-            at &= pl.col(label) == written
-        if not frame.select(at.any()).item():
+        if not erratum_found(frame, erratum):
             msg = (
                 f"the erratum {erratum.why!r} is gone: no {erratum.label!r} cell reads {erratum.wrote!r} where expected"
             )
             raise ErratumGoneError(msg)
+        at = _erratum_at(erratum)
         frame = frame.with_columns(
             pl.when(at).then(pl.lit(erratum.means)).otherwise(erratum.label).alias(erratum.label)
         )
@@ -172,6 +184,16 @@ def _full(pattern: str, text: str) -> bool:
     return bool(pl.Series([text]).str.contains(f"^(?:{pattern})$").item())
 
 
+def place(frame: pl.DataFrame, i: int) -> int:
+    """Return the text row a prepared frame's row *i* came from: itself, or where a melt took it from."""
+    return int(frame[_ROW][i]) if _ROW in frame.columns else i
+
+
+def field_labels(plan: Plan) -> dict[str, str]:
+    """Return each field's label in the layout's first label set, for an error."""
+    return {f: label for label, f in plan.label_sets[0] if f is not None}
+
+
 def prepare(plan: Plan, text: Text, *, cells: Callable[[pl.DataFrame], pl.DataFrame] | None = None) -> pl.DataFrame:
     """Return *text*'s cells under the row's field names, before typing: steps 1 to 4 of :func:`run`.
 
@@ -213,9 +235,7 @@ def run(
     fields = [f.name for f in plan.fields]
     typed, bad = type_frame(frame.select(fields), plan.fields)
     if bad.select(pl.any_horizontal(pl.all()).any()).item():
-        place = (lambda i: int(frame[_ROW][i])) if _ROW in frame.columns else int
-        labels = {f: label for label, f in plan.label_sets[0] if f is not None}
-        raise first_bad(frame, bad, plan.fields, labels, lambda i: text.locate(place(i)))
+        raise first_bad(frame, bad, plan.fields, field_labels(plan), lambda i: text.locate(place(frame, i)))
     if check is not None:
         check(typed)
     if plan.key and (dupes := typed.filter(pl.struct(plan.key).is_duplicated())).height:
