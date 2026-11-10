@@ -175,7 +175,7 @@ def _full(pattern: str, text: str) -> bool:
 def prepare(plan: Plan, text: Text, *, cells: Callable[[pl.DataFrame], pl.DataFrame] | None = None) -> pl.DataFrame:
     """Return *text*'s cells under the row's field names, before typing: steps 1 to 4 of :func:`run`.
 
-    The frame keeps the hidden row column, so a typing error can name the row's place in the body.
+    A long frame keeps a hidden row column, so a typing error can name the row's place in the body after the melt.
     """
     frame = text.frame
     labels = _match(plan, frame.columns)
@@ -185,7 +185,9 @@ def prepare(plan: Plan, text: Text, *, cells: Callable[[pl.DataFrame], pl.DataFr
     groups = _groups(frame.columns, text.headings)
     names = column_names([label for label, _ in labels])
     renames = {name: f for name, (_, f) in zip(names, labels, strict=True) if f is not None}
-    frame = frame.with_row_index(_ROW).drop([n for n, (_, f) in zip(names, labels, strict=True) if f is None])
+    frame = frame.drop([n for n, (_, f) in zip(names, labels, strict=True) if f is None])
+    if plan.long is not None:  # only a melt moves rows; a row index would also merge polars' parallel chunks
+        frame = frame.with_row_index(_ROW)
     frame = frame.rename(renames)
     if plan.long is not None:
         frame = _melt(plan, frame, list(renames.values()), groups)
@@ -209,9 +211,9 @@ def run(
     fields = [f.name for f in plan.fields]
     typed, bad = type_frame(frame.select(fields), plan.fields)
     if bad.select(pl.any_horizontal(pl.all()).any()).item():
-        rows = frame[_ROW]
+        place = (lambda i: int(frame[_ROW][i])) if _ROW in frame.columns else int
         labels = {f: label for label, f in plan.label_sets[0] if f is not None}
-        raise first_bad(frame, bad, plan.fields, labels, lambda i: text.locate(int(rows[i])))
+        raise first_bad(frame, bad, plan.fields, labels, lambda i: text.locate(place(i)))
     if check is not None:
         check(typed)
     if plan.key and (dupes := typed.filter(pl.struct(plan.key).is_duplicated())).height:

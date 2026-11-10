@@ -57,7 +57,8 @@ def _quarter(text: pl.Expr) -> pl.Expr:
 def _year_month(text: pl.Expr) -> pl.Expr:
     parts = text.str.extract_groups(r"^(\d{4})-(\d{2})$")
     month = parts.struct[1].cast(pl.Int8)
-    return pl.when(month.is_between(1, 12)).then(pl.date(parts.struct[0].cast(pl.Int32), month, 1))
+    month = pl.when(month.is_between(1, 12)).then(month)  # polars raises on a 13th month even where unselected
+    return pl.date(parts.struct[0].cast(pl.Int32), month, 1)
 
 
 def _excel_serial(text: pl.Expr) -> pl.Expr:
@@ -74,6 +75,9 @@ EXCEL_SERIAL: Final = DateFormat("an Excel day number", r"^\d+$", _excel_serial)
 
 #: The default of a mapping setting: read-only, so no call can change another's.
 _EMPTY: Final[Mapping[str, Any]] = MappingProxyType({})
+
+#: The prefix of a fault column while it shares the typing pass's frame with the values.
+_BAD: Final = "\x00bad:"
 
 _ISO_DATE: Final = ("%Y-%m-%d",)
 _ISO_DATETIME: Final = ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
@@ -312,8 +316,10 @@ def type_frame(text: pl.DataFrame, fields: Sequence[Field]) -> tuple[pl.DataFram
         if not field.nullable:
             bad |= missing
         values.append(value.alias(field.name))
-        bads.append(bad.fill_null(value=True).alias(field.name))
-    return text.select(values), text.select(bads)
+        bads.append(bad.fill_null(value=True).alias(_BAD + field.name))
+    both = text.select(*values, *bads)  # one pass: each cell is read once for its value and its fault
+    names = [field.name for field in fields]
+    return both.select(names), both.select(pl.col(_BAD + name).alias(name) for name in names)
 
 
 def first_bad(
