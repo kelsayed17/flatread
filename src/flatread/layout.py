@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final
 import polars as pl
 
 from flatread import core
+from flatread.archives import Member, read_member
 from flatread.cells import Format, fields_of
 from flatread.core import Erratum, Long, Plan, Text
 from flatread.errors import EmptyBodyError, ReadError
@@ -84,11 +85,13 @@ class Layout:
     key: ClassVar[Sequence[str]] = ()
     #: A filter of the read frame: one body, several tables.
     where: ClassVar[pl.Expr | None] = None
+    #: The file in a ZIP body this table is: a name, a regex the whole name matches, or a callable.
+    member: ClassVar[Member | None] = None
 
     #: The setting names a class may set; a format base adds its own.
     _SETTINGS: ClassVar[frozenset[str]] = frozenset({
         "row", "labels", "variants", "missing", "missing_by_field", "strip", "dates", "nonfinite", "long",
-        "headings", "errata", "refusals", "min_rows", "key", "where",
+        "headings", "errata", "refusals", "min_rows", "key", "where", "member",
     })  # fmt: skip
     _plan: ClassVar[Plan]
 
@@ -206,8 +209,8 @@ class Layout:
 
     @classmethod
     def _unwrap(cls, body: bytes) -> bytes:
-        """Return the file inside *body*: the body itself, or a format's or archive's member."""
-        return body
+        """Return the file inside *body*: the body itself, or the archive's member ``member`` names."""
+        return body if cls.member is None else read_member(body, cls.member)
 
     @classmethod
     def rows(cls, body: bytes) -> list[Any]:
