@@ -133,8 +133,8 @@ Settings that are not on the list below do not exist. A provider quirk outside t
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `row` | — | The msgspec struct a row is. Its fields, in order, are the frame's columns, snake_case. Types: `str`, `int`, `float`, `Decimal`, `bool`, `date`, `datetime`, `Literal[...]`, any of them `\| None`. |
-| `labels` | — | The provider's label → field. Labels live only here, never on the struct. A field may take several labels (`("Old", "New")`) across the file's history. A label mapped to `None` is checked present and then dropped (a notes or blank column: SF Fed, Chicago, Atlanta). |
+| `row` | — | The msgspec struct a row is. Its fields, in order, are the frame's columns, snake_case. Types: `str`, `int`, `float`, `Decimal`, `bool` (text `true`/`false` in any case; any other tokens are a `cells` hook), `date`, `datetime`, `Literal[...]`, any of them `\| None`. A date with no `dates` entry reads ISO 8601. |
+| `labels` | — | The provider's label → field, in the file's column order. Labels live only here, never on the struct. A label mapped to `None` is checked present and then dropped (a notes or blank column: SF Fed, Chicago, Atlanta). A file that writes one label twice (Nasdaq's and NYSE's two `Filler` columns) gives `labels` as a sequence of `(label, field)` pairs, matched in order. A label that changed over the file's history is a `variants` entry. |
 | `strip` | `False` | Take whitespace off both ends of every text cell before anything else; a cell of only whitespace is then `""` (SF Fed, Atlanta, Chicago's release JSON). Off by default: strict means as written. |
 | `variants` | `()` | Other whole label maps tried in order when the header is not `labels`'s: a header that changed on a date (Nasdaq's `Filler`/`Rule 3210`, CFTC's 2004 rename, SEC notes from Dec-2020). The first exact match wins; none matching raises `UnknownLayoutError` listing what was found. |
 | `missing` | `{""}` | Texts that stand for no value, in every column. A field that is not `\| None` refuses all of them. |
