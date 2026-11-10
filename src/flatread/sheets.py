@@ -17,7 +17,7 @@ import io
 import logging
 import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, ClassVar, Final, Literal, override
 from xml.etree import ElementTree as ET
@@ -29,7 +29,7 @@ from flatread import core
 from flatread.archives import Member, pick
 from flatread.cells import as_text
 from flatread.core import Plan, Text, column_names
-from flatread.errors import CellError, CorruptArchiveError, RaggedRowError, UnknownLayoutError
+from flatread.errors import CellError, CorruptArchiveError, ErratumGoneError, RaggedRowError, UnknownLayoutError
 from flatread.layout import Layout
 
 __all__ = ["Sheet", "Sheets"]
@@ -120,7 +120,7 @@ class Sheet(Layout):
             return matched
         if cls.sheet is None:
             return names[:1]
-        return [pick(names, cls.sheet)]
+        return [pick(names, cls.sheet, kind="sheet", of="the workbook")]
 
     @classmethod
     def _kind_of(cls, plan: Plan, labels: list[str]) -> list[object]:
@@ -287,11 +287,20 @@ class Sheet(Layout):
         cls._refuse(body)
         body = cls._unwrap(body)
         reader = cls._reader(body)
-        frames = []
+        texts = []
         for name in cls._names(reader):
             text = cls._load(reader, name, plan, body)
             text.carried[cls.every_sheet.name] = name
-            frames.append(core.run(plan, text, **cls._hooks()))
+            texts.append((text, [core.erratum_found(text.frame, erratum) for erratum in plan.errata]))
+        for i, erratum in enumerate(plan.errata):  # an erratum need be on one sheet, not every one
+            if not any(here[i] for _, here in texts):
+                msg = f"the erratum {erratum.why!r} is gone: no sheet's {erratum.label!r} cell reads {erratum.wrote!r}"
+                raise ErratumGoneError(msg)
+        frames = [
+            core.run(replace(plan, errata=tuple(e for e, on in zip(plan.errata, here, strict=True) if on)), text,
+                     **cls._hooks())  # each sheet fixes the errata it holds
+            for text, here in texts
+        ]  # fmt: skip
         return pl.concat(frames, how="vertical_relaxed")  # a Decimal column takes the widest sheet's scale
 
 

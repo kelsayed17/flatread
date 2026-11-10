@@ -182,7 +182,7 @@ def test_a_pipe_on_the_fallback_keeps_quotes_as_text() -> None:
         row = Pair
         labels = {"A": "a", "B": "b"}
 
-    body = b'A|B\n"x"|y\x01\n\nz|w\n'
+    body = b'A|B\n"x"|y\x01\nz|w\n'
     assert Piped.frame(body).rows() == [('"x"', "y\x01"), ("z", "w")]
 
 

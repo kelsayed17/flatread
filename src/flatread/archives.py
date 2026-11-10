@@ -18,6 +18,9 @@ type Member = str | re.Pattern[str] | Callable[[str], bool]
 
 
 def _open(body: bytes) -> zipfile.ZipFile:
+    if not body.startswith(b"PK"):  # a provider's HTML or text page where the archive should be is no damaged ZIP
+        msg = f"the body is not a ZIP archive: it opens with {body[:40]!r}"
+        raise UnknownLayoutError(msg)
     try:
         return zipfile.ZipFile(io.BytesIO(body))
     except (zipfile.BadZipFile, ValueError) as exc:
@@ -39,8 +42,8 @@ def unzip(body: bytes) -> dict[str, bytes]:
         return {info.filename: _read(archive, info.filename) for info in archive.infolist() if not info.is_dir()}
 
 
-def pick(names: Sequence[str], member: Member) -> str:
-    """Return the one of *names* that *member* names; none, or more than one, raises naming the members."""
+def pick(names: Sequence[str], member: Member, *, kind: str = "member", of: str = "the archive") -> str:
+    """Return the one of *names* that *member* names; none, or more than one, raises naming them all."""
     if isinstance(member, str):
         found = [name for name in names if name == member]
     elif isinstance(member, re.Pattern):
@@ -48,8 +51,8 @@ def pick(names: Sequence[str], member: Member) -> str:
     else:
         found = [name for name in names if member(name)]
     if len(found) != 1:
-        which = "no member" if not found else f"{len(found)} members"
-        msg = f"{which} of the archive match {member!r}: it holds {list(names)!r}"
+        which = f"no {kind} of {of} matches" if not found else f"{len(found)} {kind}s of {of} match"
+        msg = f"{which} {member!r}: it holds {list(names)!r}"
         raise UnknownLayoutError(msg)
     return found[0]
 

@@ -71,9 +71,9 @@ def test_a_multiline_quoted_record_reads_on_the_fallback() -> None:
     assert frame["note"].to_list() == ["a", "two\nlines", "c"]
 
 
-def test_blank_lines_are_framing() -> None:
-    body = b"\nDate,Value,Note\n\n2026-11-09,1,a\n\n\n2026-11-10,x,b\n\n"
-    with pytest.raises(CellError, match="line 7:"):
+def test_blank_lines_around_the_rows_are_framing() -> None:
+    body = b"\nDate,Value,Note\n\n2026-11-09,1,a\n2026-11-10,x,b\n\n"
+    with pytest.raises(CellError, match="line 5:"):
         Observations.frame(body)
     assert Observations.frame(body.replace(b",x,", b",2,")).height == 2
 

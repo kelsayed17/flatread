@@ -129,7 +129,7 @@ class Point(msgspec.Struct, frozen=True):
 class Wide(Layout):
     row = Point
     labels = {"Date": "day"}
-    long = Long(name="series", value="value", names=r"[A-Z]+")
+    long = Long(name="series", value="value", names=r"[A-Z]+", drop_missing=True)
     missing = frozenset({"", "."})
 
 

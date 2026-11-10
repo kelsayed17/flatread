@@ -227,9 +227,8 @@ class Csv(Layout):
     def _read_fast(cls, rows: bytes, names: list[str]) -> pl.DataFrame | None:
         """Return *rows* read by one ``pl.read_csv``, or ``None`` where a row is not *names*' width."""
         data = rows.replace(b"\r\n", b"\n") if b"\r" in rows else rows
-        while b"\n\n" in data:
-            data = data.replace(b"\n\n", b"\n")
-        data = data.removeprefix(b"\n")
+        if b"\n\n" in data:  # a blank line inside the table: the csv fallback names it, or reads one empty cell
+            return None
         if not data:
             return pl.DataFrame(schema=dict.fromkeys(names, pl.String))
         if not data.endswith(b"\n"):
@@ -249,7 +248,7 @@ class Csv(Layout):
             return None
         if not frame[_SENTINEL].eq_missing(_SENTINEL).all():
             return None
-        return frame.drop(_SENTINEL)
+        return frame[names]
 
     @classmethod
     def _read_slow(cls, rows: bytes, names: list[str], first_line: int) -> tuple[pl.DataFrame, list[int]]:
@@ -264,10 +263,12 @@ class Csv(Layout):
         lines: list[int] = []
         last = 0
         try:
-            for record in reader:
+            for read in reader:
                 start, last = first_line + last, reader.line_num
-                if not record or (record == [""] and len(names) > 1):
-                    continue
+                if not read and len(names) > 1:
+                    msg = f"line {start} is blank, inside the table: a row of {len(names)} fields"
+                    raise RaggedRowError(msg)
+                record = read or [""]  # a one-column row whose only value is empty
                 if len(record) != len(names):
                     wide, want = len(record) - cls.trailing_separator, len(names) - cls.trailing_separator
                     msg = f"line {start} has {wide} fields, not the header's {want}"
@@ -304,11 +305,15 @@ class Csv(Layout):
                     raise UnknownLayoutError(msg)
                 labels = labels[:-1]
         names = cls._width(labels)
-        frame = cls._read_fast(framed.rows, names) if cls._fast(framed.rows) else None
+        # Blank lines before the first row and after the last are framing; one between two rows is a fault.
+        rows = framed.rows.lstrip(b"\r\n")
+        first_line = framed.first_line + framed.rows[: len(framed.rows) - len(rows)].count(b"\n")
+        rows = rows.rstrip(b"\r\n") + b"\n" if rows.strip(b"\r\n") else b""
+        frame = cls._read_fast(rows, names) if cls._fast(rows) else None
         if frame is not None:
-            locate = cls._lines_of(framed.rows, framed.first_line)
+            locate = cls._lines_of(rows, first_line)
         else:
-            frame, lines = cls._read_slow(framed.rows, names, framed.first_line)
+            frame, lines = cls._read_slow(rows, names, first_line)
             locate = lambda i: f"line {lines[i]}"  # noqa: E731  # the slow path counted every record's line
         if cls.trailing_separator:
             if (filled := frame[_TRAIL] != "").any():

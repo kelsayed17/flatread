@@ -18,6 +18,7 @@ from flatread.errors import CheckError, EmptyBodyError, ErratumGoneError, Unknow
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
     import msgspec
 
@@ -61,6 +62,8 @@ class Long:
     names: str
     #: The field the whole label fills, if any (a date for dated columns).
     name: str | None = None
+    #: Whether a melted cell that is missing yields no row; otherwise it is the value field's missing value.
+    drop_missing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,8 +154,10 @@ def _melt(plan: Plan, frame: pl.DataFrame, index: list[str], groups: Mapping[str
     long = plan.long
     assert long is not None  # noqa: S101  # only a long plan melts
     melted = [c for c in frame.columns if c not in {*index, _ROW}]
-    label_of = {c: _label(c, frame.columns) for c in melted}
-    if bad := [label_of[c] for c in melted if not _full(long.names, label_of[c])]:
+    columns = set(frame.columns)
+    label_of = {c: _label(c, columns) for c in melted}
+    matched = pl.Series(list(label_of.values()), dtype=pl.String).str.contains(f"^(?:{long.names})$")
+    if bad := [label for label, ok in zip(label_of.values(), matched, strict=True) if not ok]:  # one match, any width
         msg = f"the columns {bad!r} are not series this layout reads (their labels must match {long.names!r})"
         raise UnknownLayoutError(msg)
     frame = frame.unpivot(melted, index=[_ROW, *index], variable_name=_NAME, value_name=long.value)
@@ -169,7 +174,7 @@ def _melt(plan: Plan, frame: pl.DataFrame, index: list[str], groups: Mapping[str
     return frame.drop(_NAME).sort(_ROW, maintain_order=True)
 
 
-def _label(name: str, columns: Sequence[str]) -> str:
+def _label(name: str, columns: AbstractSet[str]) -> str:
     """Return the label a column name stands for: ``A#2`` is the second ``A`` when the frame has an ``A``."""
     head, sep, tail = name.rpartition("#")
     return head if sep and tail.isdigit() and head in columns else name
@@ -183,10 +188,6 @@ def _groups(columns: Sequence[str], headings: tuple[str | None, ...] | None) -> 
         current = heading if heading not in {None, ""} else current
         groups[column] = current
     return groups
-
-
-def _full(pattern: str, text: str) -> bool:
-    return bool(pl.Series([text]).str.contains(f"^(?:{pattern})$").item())
 
 
 def place(frame: pl.DataFrame, i: int) -> int:
@@ -212,17 +213,18 @@ def prepare(plan: Plan, text: Text, *, cells: Callable[[pl.DataFrame], pl.DataFr
     groups = _groups(frame.columns, text.headings)
     names = column_names([label for label, _ in labels])
     renames = {name: f for name, (_, f) in zip(names, labels, strict=True) if f is not None}
-    frame = frame.drop([n for n, (_, f) in zip(names, labels, strict=True) if f is None])
+    frame = frame[[n for n in frame.columns if n not in names or n in renames]]  # a label without a field dropped
+    frame.columns = [renames.get(n, n) for n in frame.columns]  # indexing and renaming in place run no query
     if plan.long is not None:  # only a melt moves rows; a row index would also merge polars' parallel chunks
         frame = frame.with_row_index(_ROW)
-    frame = frame.rename(renames)
     if plan.long is not None:
         frame = _melt(plan, frame, list(renames.values()), groups)
         value = next(f for f in plan.fields if f.name == plan.long.value)
         filled = pl.col(plan.long.value).is_not_null()
         if frame.schema[plan.long.value] == pl.String:  # a typed column (a sheet's floats) has no missing tokens
             filled &= ~pl.col(plan.long.value).is_in(list(value.missing))
-        frame = frame.filter(filled)
+        if plan.long.drop_missing:
+            frame = frame.filter(filled)
     if text.carried:
         frame = frame.with_columns(pl.lit(value, dtype=pl.String).alias(name) for name, value in text.carried.items())
     absent = [f.name for f in plan.fields if f.name not in frame.columns]
@@ -256,8 +258,8 @@ def run(
     _type_carried(plan, text.carried)
     frame = prepare(plan, text, cells=cells)
     fields = [f.name for f in plan.fields]
-    typed, bad = type_frame(frame.select(fields), plan.fields)
-    if bad.select(pl.any_horizontal(pl.all()).any()).item():
+    typed, bad = type_frame(frame[fields], plan.fields)
+    if any(column.any() for column in bad.iter_columns()):
         raise first_bad(frame, bad, plan.fields, field_labels(plan), lambda i: text.locate(place(frame, i)))
     if check is not None:
         check(typed)

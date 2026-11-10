@@ -11,6 +11,7 @@ the layout does not name is ignored: a JSON record names its values, so an added
 added column in a CSV does. A missing key is an error unless its field is ``| None``.
 """
 
+import codecs
 from decimal import Decimal
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Final, override
@@ -70,7 +71,8 @@ class Json(Layout):
             raise TypeError(msg)
         plan = super()._compile(row)  # ty: ignore[invalid-argument-type]
         fields = {f.name: f for f in plan.fields}
-        cls._native = not cls.strip and not (frozenset(cls.missing) - {""}) and not cls.missing_by_field
+        # Text mode is for a provider's own missing tokens; strip touches text cells only, and native numbers stay.
+        cls._native = not (frozenset(cls.missing) - {""}) and not cls.missing_by_field
         pairs = [(label, f) for label, f in plan.label_sets[0] if f is not None]
         cls._pairs = pairs
         record = _struct(
@@ -81,7 +83,7 @@ class Json(Layout):
         body: object = (
             list[record] if not cls.records else _level(cls.__name__, 0, envelope, _path(cls.records), record)  # ty: ignore[invalid-type-form]
         )
-        cls._decoder = msgspec.json.Decoder(body)
+        cls._decoder = msgspec.json.Decoder(body, strict=False)  # a number written as a string ("1.25") reads too
         return plan
 
     _pairs: ClassVar[list[tuple[str, str]]]
@@ -96,7 +98,7 @@ class Json(Layout):
     @classmethod
     def _decode(cls, body: bytes) -> Any:  # noqa: ANN401  # the struct flatread built for this layout
         try:
-            return cls._decoder.decode(body)
+            return cls._decoder.decode(body.removeprefix(codecs.BOM_UTF8))
         except msgspec.ValidationError as exc:
             msg = f"the body is not the JSON this layout reads: {exc}"
             raise UnknownLayoutError(msg) from exc
