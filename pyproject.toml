@@ -62,6 +62,7 @@ dev = [
     "deptry>=0.25.1",  # [tool.deptry]: the dependencies against what src/ imports
     "import-linter>=2.15",  # [tool.importlinter]: the module layers
     "typos>=1.51.1",
+    "pytest-codspeed>=5.0.4",  # the benchmark fixture in benchmarks/, measured by CodSpeed in ci
 ]
 
 [tool.uv]
@@ -123,7 +124,8 @@ ban-relative-imports = "all"
 
 [tool.ruff.lint.per-file-ignores]
 # The benchmark is a script over a prism-clients checkout: it prints a table, and its layouts are class settings.
-"benchmarks/**" = ["D1", "INP001", "RUF012", "T201", "S101", "PT018"]
+# The CodSpeed benchmarks (test_*.py) generate their bodies with a seeded `random`, not for any security purpose.
+"benchmarks/**" = ["D1", "INP001", "RUF012", "T201", "S101", "PT018", "S311"]
 "tests/**" = [
     # Docstrings are required in src; a test's name says what it checks.
     "D1", "D205",

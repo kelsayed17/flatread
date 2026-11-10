@@ -1,5 +1,7 @@
 # flatread
 
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/kelsayed17/flatread?utm_source=badge)
+
 Declare a provider's table once, as a class, and read its body on one native polars path, exactly, or fail loudly.
 
 Exchanges, regulators and statistics agencies publish data as CSV and pipe files, Excel workbooks, JSON APIs, zips
@@ -154,6 +156,12 @@ v1 replaces 0.4 outright, with no aliases.
 | `errors.or_not_published` | `refusals` and `NotPublishedError` |
 
 The design and its reasons are in `docs/superpowers/specs/2026-11-09-flatread-v1-design.md`.
+
+## Benchmarks
+
+`benchmarks/test_reads.py` times each layout base, zip members, `report` and `diff` on generated bodies, and
+[CodSpeed](https://codspeed.io) measures them on every pull request (`.github/workflows/codspeed.yml`). Run them
+locally with `uv run python -m pytest benchmarks --codspeed`.
 
 ## Install
 
