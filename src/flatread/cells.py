@@ -212,6 +212,10 @@ def _decimal_scale(column: pl.Series) -> int:
     return min(int(longest), 38) if isinstance(longest, int) else 0  # polars' widest; a longer fraction is no cell
 
 
+def _no_trailing_zeros(text: pl.Expr) -> pl.Expr:
+    return text.str.replace(r"(\.\d*?)0*$", "${1}").str.replace(r"\.$", "")
+
+
 def _date_read(text: pl.Expr, field: Field) -> pl.Expr:
     reads = []
     for fmt in field.formats:
@@ -224,7 +228,15 @@ def _date_read(text: pl.Expr, field: Field) -> pl.Expr:
             parsed = text.str.to_time(fmt, strict=False)
         else:
             parsed = text.str.to_datetime(fmt, strict=False, time_unit="us")
-        reads.append(pl.when(parsed.dt.strftime(fmt) == text).then(parsed))
+        if "%z" in fmt or "%:z" in fmt:  # an offset reads as its UTC time; the written offset cannot be written back
+            reads.append(parsed.dt.convert_time_zone("UTC").dt.replace_time_zone(None))
+            continue
+        written, cell = parsed.dt.strftime(fmt), text
+        if any(name in fmt for name in ("%b", "%B", "%a", "%A", "%p")):  # SEP, Sep and sep are one month
+            written, cell = written.str.to_lowercase(), cell.str.to_lowercase()
+        if "%.f" in fmt:  # a fraction reads with however many digits it has: 00.0, 00.000000 and 00 are one time
+            written, cell = _no_trailing_zeros(written), _no_trailing_zeros(cell)
+        reads.append(pl.when(written == cell).then(parsed))
     return pl.coalesce(reads) if len(reads) > 1 else reads[0]
 
 
@@ -316,7 +328,8 @@ def type_frame(text: pl.DataFrame, fields: Sequence[Field]) -> tuple[pl.DataFram
         bads.append(bad.fill_null(value=True).alias(_BAD + field.name))
     both = text.select(*values, *bads)  # one pass: each cell is read once for its value and its fault
     names = [field.name for field in fields]
-    return both.select(names), both.select(pl.col(_BAD + name).alias(name) for name in names)
+    # Indexing and building from Series run no query: each eager select is a polars collect, a fixed cost per read.
+    return both[names], pl.DataFrame([both[_BAD + name].alias(name) for name in names])
 
 
 def first_bad(

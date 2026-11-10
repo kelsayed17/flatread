@@ -211,6 +211,9 @@ class Layout:
         """Return *body*'s table: a frame of the row's fields, typed, checked and filtered."""
         plan = cls._checked_plan()
         cls._refuse(body)
+        if cls.member is not None and (not body or body.isspace()):
+            msg = "the body is empty: no archive"
+            raise EmptyBodyError(msg)
         body = cls._unwrap(body)
         if not body or body.isspace():  # no copy of a large body, as strip() would make
             msg = "the body is empty: a table with no rows still has its file (min_rows = 0 is about rows)"

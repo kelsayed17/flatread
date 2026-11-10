@@ -91,7 +91,7 @@ def test_native_mode_is_chosen_when_it_can_be() -> None:
 
 
 def test_a_wrong_type_in_native_mode_names_the_record() -> None:
-    bad = BARS.replace(b'"c": 231,', b'"c": "231",')
+    bad = BARS.replace(b'"c": 231,', b'"c": "two",')  # a number written as a string reads; this is no number
     with pytest.raises(UnknownLayoutError, match=r"\$\.results\[0\]\.bars\[1\]\.c"):
         Bars.frame(bad)
 

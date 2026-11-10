@@ -61,9 +61,9 @@ In prism-clients each dataset's constants are then `body_reader(FmhpiStates.fram
 
 | Base | Reads | How |
 |---|---|---|
-| `Csv`, `Pipe`, `Tsv` | delimited text | one `pl.read_csv` of the whole body, every cell text. A sentinel field on every line makes a short row show instead of being padded. A body where a quoted field spans lines (or that holds a `\x01` byte) reads through the stdlib `csv` module instead. |
+| `Csv`, `Pipe`, `Tsv` | delimited text | one `pl.read_csv` of the whole body, every cell text. A sentinel field on every line makes a short row show instead of being padded. A body where a quoted field spans lines (or that holds a `\x01` byte) reads through the stdlib `csv` module instead. Blank lines before the first row and after the last are framing; one between two rows raises (in a one-column table it is an empty cell). |
 | `Sheet` | a sheet of an xlsx or xls (the `excel` extra) | one fastexcel load, each column's type inferred from every cell, strictly. A column mixing kinds falls back to a text load plus a typed load; an erratum or a `cells` hook sees the typed cells as text. Floats keep every digit. An xlsx error cell (`#N/A`) in the table raises; in an xls it reads as empty, since fastexcel does not report it. A filled cell right of the header's last label raises. |
-| `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively, and a text field must be a JSON string; a provider writing every value as a string with its own `"null"` reads in text mode, where any other JSON value raises. The records path must be present and a list. `Json.page(body)` also returns the cursor at `next`. |
+| `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively, a number written as a string (`"1.25"`) included, and a text field must be a JSON string; a provider writing every value as a string with its own `"null"` reads in text mode, where any other JSON value raises. The records path must be present and a list. `Json.page(body)` also returns the cursor at `next`. A UTF-8 byte-order mark is allowed. |
 | `FixedWidth` | fixed-width records | `str.slice` per column at the provider's 1-based positions; a line shorter than the last column raises. |
 
 Any layout can read a zip member: `member = "x.csv"`, a regex, or a callable.
@@ -83,9 +83,9 @@ a provider's defaults and is never read.
 | `missing` | `{""}` | tokens for no value; a field that is not `\| None` refuses them |
 | `missing_by_field` | `{}` | extra tokens for one field |
 | `strip` | `False` | take whitespace off every text cell first |
-| `dates` | `{}` | field → `strftime` format, a tuple of them, or `flatread.QUARTER` / `YEAR_MONTH` / `EXCEL_SERIAL`; checked by writing the value back. A date, datetime or time with none reads ISO |
+| `dates` | `{}` | field → `strftime` format, a tuple of them, or `flatread.QUARTER` / `YEAR_MONTH` / `EXCEL_SERIAL`; checked by writing the value back. A date, datetime or time with none reads ISO. A month or day name reads in any case (`SEP`, `Sep`), `%.f` takes any number of fraction digits, and an offset (`%z`) reads as its UTC time |
 | `nonfinite` | `False` | admit NaN and infinities in float fields |
-| `long` | `None` | `Long(value=, names=, name=None)`: melt every column `labels` does not name into `value`; each label must match the regex `names` whole, its named groups fill those fields, and `name` takes the whole label |
+| `long` | `None` | `Long(value=, names=, name=None, drop_missing=False)`: melt every column `labels` does not name into `value`; each label must match the regex `names` whole, its named groups fill those fields, and `name` takes the whole label; a missing melted cell is the value field's missing value (an error unless it is `\| None`), or no row with `drop_missing=True` |
 | `headings` | `None` | the field a group heading above the header fills, for a long table |
 | `errata` | `()` | `Erratum(label, wrote, means, why, where={...})`: a provider mistake fixed before typing; raises `ErratumGoneError` once the provider fixes it |
 | `refusals` | `{}` | body text → error, for a "no file" answer in a 200 (`b""` is an empty body) |
@@ -137,6 +137,14 @@ package of layouts ignores it (`per-file-ignores = {"*/decoders.py" = ["RUF012"]
 Every error is a `flatread.errors.ReadError`, a `ValueError`: `EmptyBodyError`, `UnknownLayoutError` (and
 `CellError` for one cell, with `.where`, `.label`, `.text`), `RaggedRowError`, `TruncatedFileError`,
 `ControlTotalError`, `CheckError`, `ErratumGoneError`, `NotPublishedError`, `CorruptArchiveError`, `EncodingError`.
+
+## From 2.0
+
+This release makes two cases strict that 2.0 let through:
+- **Long tables:** a missing melted cell no longer drops silently. Set `Long(..., drop_missing=True)` for the old behavior.
+- **Blank lines:** a blank line between two rows raises `RaggedRowError`.
+
+Two things are looser: a JSON number written as a string reads natively, and `strip` no longer moves a JSON layout to text mode.
 
 ## From 1.0
 
