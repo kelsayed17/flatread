@@ -58,23 +58,32 @@ configuration".
 ```python
 import flatread
 
-class FreddieMac(flatread.Csv):          # the provider's defaults, once per package
-    final_line_ending = True
-    missing = {"", "."}                  # an override replaces the parent's set whole
 
-class Fmhpi(FreddieMac):                 # one table: only what differs
-    row = HpiRow                         # a plain msgspec struct, snake_case fields, no annotations
+class FreddieMac(flatread.Csv):  # the provider's defaults, once per package
+    final_line_ending = True
+    missing = {"", "."}  # an override replaces the parent's set whole
+
+
+class Fmhpi(FreddieMac):  # one table: only what differs
+    row = HpiRow  # a plain msgspec struct, snake_case fields, no annotations
     labels = {
-        "Year": "year", "Month": "month", "GEO_Type": "geo_type", "GEO_Name": "geo_name",
-        "GEO_Code": "geo_code", "Index_NSA": "index_nsa", "Index_SA": "index_sa",
+        "Year": "year",
+        "Month": "month",
+        "GEO_Type": "geo_type",
+        "GEO_Name": "geo_name",
+        "GEO_Code": "geo_code",
+        "Index_NSA": "index_nsa",
+        "Index_SA": "index_sa",
     }
 
     @classmethod
-    def check(cls, frame: pl.DataFrame) -> None:    # the one Freddie-only rule, plain polars
+    def check(cls, frame: pl.DataFrame) -> None:  # the one Freddie-only rule, plain polars
         ...
 
+
 class FmhpiStates(Fmhpi):
-    where = pl.col("geo_type") == "State"           # one body, several tables: a filter
+    where = pl.col("geo_type") == "State"  # one body, several tables: a filter
+
 
 # decoders.py, the constants client.py's methods pass as expect=
 FMHPI_STATES_FRAME: Final = body_reader(FmhpiStates.frame)
@@ -266,20 +275,26 @@ Today `freddie_mac/decoders.py` is 542 lines: `_DateFormat`, eight `_Table`s, `_
 class FreddieMac(flatread.Csv):
     final_line_ending = True
 
+
 class PmmsHistory(FreddieMac):
     row = PmmsRow
-    labels = {name: name for name in PmmsRow.__struct_fields__}   # the file's labels are already snake_case
+    labels = {name: name for name in PmmsRow.__struct_fields__}  # the file's labels are already snake_case
     dates = {"date": "%m/%d/%Y"}
-    missing = {"", " "}      # pmms30p holds a single space for 32 weeks of 1971
+    missing = {"", " "}  # pmms30p holds a single space for 32 weeks of 1971
+
 
 class Fmhpi(FreddieMac):
     row = HpiRow
     labels = {...}
     missing = {"", "."}
-    def check(self, frame): ...   # GEO_Type in US/State/CBSA; a CBSA row has a code, others none; month 1..12
+
+    def check(self, frame): ...  # GEO_Type in US/State/CBSA; a CBSA row has a code, others none; month 1..12
+
 
 class FmhpiStates(Fmhpi):
     where = pl.col("geo_type") == "State"
+
+
 ...
 PMMS_HISTORY_FRAME: Final = body_reader(PmmsHistory.frame)
 PMMS_HISTORY_ROWS: Final = body_reader(PmmsHistory.rows)
