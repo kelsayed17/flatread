@@ -32,7 +32,6 @@ __all__ = [
     "DateFormat",
     "Field",
     "as_text",
-    "dtype_of",
     "fields_of",
     "first_bad",
     "type_frame",
@@ -80,8 +79,6 @@ _EMPTY: Final[Mapping[str, Any]] = MappingProxyType({})
 #: The prefix of a fault column while it shares the typing pass's frame with the values.
 _BAD: Final = "\x00bad:"
 
-_ISO_DATE: Final = ("%Y-%m-%d",)
-_ISO_DATETIME: Final = ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
 
 type Kind = type | tuple[str, ...]
 type Format = str | DateFormat
@@ -94,6 +91,13 @@ _SCALARS: Final[Mapping[type, type]] = {
     msgspec.inspect.BoolType: bool,
     msgspec.inspect.DateType: dt.date,
     msgspec.inspect.DateTimeType: dt.datetime,
+    msgspec.inspect.TimeType: dt.time,
+}
+#: The kinds a ``dates`` format reads, each with its ISO formats and its name in an error.
+_WHEN: Final[Mapping[type, tuple[tuple[str, ...], str]]] = {
+    dt.date: (("%Y-%m-%d",), "date"),
+    dt.datetime: (("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"), "datetime"),
+    dt.time: (("%H:%M:%S",), "time"),
 }
 
 _EXPECTED: Final[Mapping[type, str]] = {
@@ -123,9 +127,9 @@ class Field:
         """What a cell of the field must be, for an error."""
         if isinstance(self.kind, tuple):
             return f"one of {list(self.kind)!r}"
-        if self.kind in {dt.date, dt.datetime}:
+        if self.kind in _WHEN:
             shapes = [f.name if isinstance(f, DateFormat) else f for f in self.formats]
-            return f"a {'date' if self.kind is dt.date else 'datetime'} written {' or '.join(shapes)}"
+            return f"a {_WHEN[self.kind][1]} written {' or '.join(shapes)}"
         return _EXPECTED[self.kind]
 
 
@@ -184,11 +188,11 @@ def fields_of(  # noqa: PLR0913  # the struct, then each setting a field's readi
             formats = given
         elif given is not None:
             formats = (given,)
-        if given is not None and kind not in {dt.date, dt.datetime}:
+        if given is not None and kind not in _WHEN:
             msg = f"{row.__name__}.{field.name} has a date format but is not a date"
             raise TypeError(msg)
-        if not formats and kind in {dt.date, dt.datetime}:
-            formats = _ISO_DATE if kind is dt.date else _ISO_DATETIME
+        if not formats and isinstance(kind, type) and kind in _WHEN:
+            formats = _WHEN[kind][0]
         fields.append(
             Field(
                 field.name,
@@ -203,25 +207,9 @@ def fields_of(  # noqa: PLR0913  # the struct, then each setting a field's readi
     return tuple(fields)
 
 
-def dtype_of(field: Field) -> pl.DataType:
-    """Return the polars type of *field*'s column (a ``Decimal``'s scale is its column's, so 0 for an empty one)."""
-    if isinstance(field.kind, tuple):
-        return pl.Enum(list(field.kind))
-    dtypes: dict[object, pl.DataType] = {
-        str: pl.String(),
-        int: pl.Int64(),
-        float: pl.Float64(),
-        Decimal: pl.Decimal(38, 0),
-        bool: pl.Boolean(),
-        dt.date: pl.Date(),
-        dt.datetime: pl.Datetime("us"),
-    }
-    return dtypes[field.kind]
-
-
 def _decimal_scale(column: pl.Series) -> int:
     longest = column.str.extract(r"\.(\d+)$").str.len_chars().max()
-    return int(longest) if isinstance(longest, int) else 0
+    return min(int(longest), 38) if isinstance(longest, int) else 0  # polars' widest; a longer fraction is no cell
 
 
 def _date_read(text: pl.Expr, field: Field) -> pl.Expr:
@@ -230,11 +218,12 @@ def _date_read(text: pl.Expr, field: Field) -> pl.Expr:
         if isinstance(fmt, DateFormat):
             reads.append(pl.when(text.str.contains(fmt.pattern)).then(fmt.to_date(text)))
             continue
-        parsed = (
-            text.str.to_date(fmt, strict=False)
-            if field.kind is dt.date
-            else text.str.to_datetime(fmt, strict=False, time_unit="us")
-        )
+        if field.kind is dt.date:
+            parsed = text.str.to_date(fmt, strict=False)
+        elif field.kind is dt.time:
+            parsed = text.str.to_time(fmt, strict=False)
+        else:
+            parsed = text.str.to_datetime(fmt, strict=False, time_unit="us")
         reads.append(pl.when(parsed.dt.strftime(fmt) == text).then(parsed))
     return pl.coalesce(reads) if len(reads) > 1 else reads[0]
 

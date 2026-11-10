@@ -34,7 +34,7 @@ __all__ = ["Json"]
 _INT64: Final = Annotated[int, msgspec.Meta(ge=-(2**63), le=2**63 - 1)]
 _NATIVE: Final[dict[object, object]] = {int: _INT64, float: float, bool: bool, Decimal: Decimal}
 _COLUMN: Final[dict[object, pl.DataType]] = {int: pl.Int64(), float: pl.Float64(), bool: pl.Boolean()}
-type _Scalar = str | int | float | bool | None
+type _Text = str | None
 
 
 def _path(path: str) -> list[tuple[str, bool]]:
@@ -88,10 +88,10 @@ class Json(Layout):
 
     @classmethod
     def _decode_type(cls, field: Field) -> object:
-        """Return the type a field's JSON value decodes as: its own where native, else any JSON scalar."""
+        """Return the type a field's JSON value decodes as: its own where native, else a string typed by the core."""
         if cls._native and field.kind in _NATIVE:
             return _NATIVE[field.kind] | None  # ty: ignore[unsupported-operator]
-        return _Scalar
+        return _Text
 
     @classmethod
     def _decode(cls, body: bytes) -> Any:  # noqa: ANN401  # the struct flatread built for this layout
@@ -180,7 +180,7 @@ def _level(name: str, depth: int, envelope: list[list[str]], records: list[tuple
     below: dict[str, list[list[str]]] = {}
     for path in envelope:
         if len(path) == 1:
-            keys[path[0]] = (_Scalar, False)
+            keys[path[0]] = (str | int | float | bool | None, False)
         else:
             below.setdefault(path[0], []).append(path[1:])
     head, walks = records[0] if records else ("", False)
@@ -189,10 +189,10 @@ def _level(name: str, depth: int, envelope: list[list[str]], records: list[tuple
             keys[key] = (_level(name, depth + 1, paths, [], record), False)
     if records:
         if len(records) == 1:
-            keys[head] = (list[record] | None, True)  # ty: ignore[invalid-type-form]
-        else:  # the records path is required: a body without it is an error page, not an empty one
+            keys[head] = (list[record], True)  # ty: ignore[invalid-type-form]
+        else:  # the records path is required and not null: a body without it is an error page, not an empty one
             inner = _level(name, depth + 1, below.get(head, []), records[1:], record)
-            keys[head] = (list[inner] | None if walks else inner | None, True)  # ty: ignore[invalid-type-form]
+            keys[head] = (list[inner] if walks else inner, True)  # ty: ignore[invalid-type-form]
     return _struct(f"{name}Level{depth}", keys)
 
 

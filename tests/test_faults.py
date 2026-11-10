@@ -129,7 +129,6 @@ class Paged(Json):
 def test_a_json_body_without_its_records_key_raises() -> None:
     with pytest.raises(UnknownLayoutError, match="data"):
         Paged.page(b'{"error": "rate limited"}')
-    assert Paged.page(b'{"data": null}')[0].height == 0
 
 
 def test_a_json_int_past_int64_is_a_read_error() -> None:

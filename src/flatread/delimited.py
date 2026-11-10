@@ -75,7 +75,7 @@ class Csv(Layout):
     skip_lines: ClassVar[int] = 0
     header_line: ClassVar[str | None] = None
     trailing_separator: ClassVar[bool] = False
-    final_line_ending: ClassVar[bool] = True
+    final_line_ending: ClassVar[bool | None] = True
     encoding: ClassVar[str] = "utf-8"
     preamble: ClassVar[Line | None] = None
     trailer: ClassVar[Line | None] = None
@@ -154,12 +154,20 @@ class Csv(Layout):
         return {f: found[g] for g, f in cls.trailer.carry.items()}, count, start
 
     @classmethod
-    def _frame(cls, body: bytes) -> _Framed:  # one pass over the lines around the rows
-        """Split *body* into its preamble, header, headings, rows and trailer, the top and bottom read line by line."""
-        if cls.final_line_ending and not body.endswith(b"\n"):
+    def _ending(cls, body: bytes) -> None:
+        """Raise where the body's end is not ``final_line_ending``'s: required, refused, or ``None`` for either."""
+        if cls.final_line_ending is True and not body.endswith(b"\n"):
             tail = body.rsplit(b"\n", 1)[-1][:200]
             msg = f"the file ends mid-line, with {tail!r}, so it may have been cut off"
             raise TruncatedFileError(msg)
+        if cls.final_line_ending is False and body.endswith(b"\n"):
+            msg = "the file ends with a line ending, which this provider never writes after its last line"
+            raise UnknownLayoutError(msg)
+
+    @classmethod
+    def _frame(cls, body: bytes) -> _Framed:  # one pass over the lines around the rows
+        """Split *body* into its preamble, header, headings, rows and trailer, the top and bottom read line by line."""
+        cls._ending(body)
         carried, count, end = cls._trailer(body)
         pos, number = 0, 1
         wanted = ["preamble"] * (cls.preamble is not None) + ["skip"] * cls.skip_lines
@@ -199,14 +207,14 @@ class Csv(Layout):
             wanted.pop(0)
         return _Framed(header, headings, body[pos:end], number, carried, count)
 
-    @staticmethod
-    def _fast(rows: bytes) -> bool:
+    @classmethod
+    def _fast(cls, rows: bytes) -> bool:
         """Return whether *rows* reads on the fast path: every line a record, uniform endings, no sentinel byte."""
         if _SENTINEL.encode() in rows:
             return False
         if b"\r" in rows and rows.count(b"\r\n") != rows.count(b"\r"):
             return False
-        if b'"' in rows:
+        if cls.quoted and b'"' in rows:  # an unquoted format reads a quote as text, on either path
             lines = pl.Series([rows.decode()]).str.split("\n").explode()
             return bool((lines.str.count_matches('"', literal=True) % 2 == 0).all())
         return True

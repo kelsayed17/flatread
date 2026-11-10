@@ -26,7 +26,7 @@ class FixedWidth(Layout):
     columns: ClassVar[Mapping[str, tuple[int, int]]] = MappingProxyType[str, tuple[int, int]]({})
     record: ClassVar[str] = r".*"
     skip: ClassVar[str | None] = None
-    final_line_ending: ClassVar[bool] = True
+    final_line_ending: ClassVar[bool | None] = True
 
     # A base extends its parent's settings; its fields are named by position, so it has no labels.
     _SETTINGS: ClassVar[frozenset[str]] = (Layout._SETTINGS - {"labels", "variants"}) | {  # noqa: SLF001
@@ -58,7 +58,10 @@ class FixedWidth(Layout):
         except UnicodeDecodeError as exc:
             msg = f"the body is not UTF-8: {exc}"
             raise EncodingError(msg) from exc
-        if cls.final_line_ending and not text.endswith("\n"):
+        if cls.final_line_ending is False and text.endswith("\n"):
+            msg = "the file ends with a line ending, which this provider never writes after its last line"
+            raise UnknownLayoutError(msg)
+        if cls.final_line_ending is True and not text.endswith("\n"):
             msg = f"the file ends mid-line, with {text.rsplit(chr(10), 1)[-1][:200]!r}, so it may have been cut off"
             raise TruncatedFileError(msg)
         lines = (

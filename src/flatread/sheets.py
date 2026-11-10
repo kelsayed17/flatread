@@ -174,6 +174,7 @@ class Sheet(Layout):
             frame = frame.with_columns(_text_of(pl.col(c), t) for c, t in frame.schema.items() if t != pl.String)
         frame, rows = cls._bound(frame, name)
         first = cls.header_row + 2
+        core.match_header(plan, column_names(labels))  # a header on the wrong row is named, not a row too wide
         cls._past_header(whole.drop(source), sheet.selected_columns, rows, name, first)
         under = {_letters(c.absolute_index): label for c, label in zip(sheet.selected_columns, labels, strict=False)}
         cls._errors(body, name, under, {first + r for r in rows})
