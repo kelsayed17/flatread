@@ -347,8 +347,15 @@ Package: `msgspec`, `polars` and (extra `excel`) `fastexcel` stay; `stream-unzip
 
 ## Open (to confirm with the user or a client session)
 
-- **ECB has no plan in the shared notes**, so its formats are not inventoried. Assumed: SDMX-CSV reads as `Csv`,
-  SDMX-JSON as a client-side parser through `read_text`. To confirm with the ECB session before release.
+- **ECB (confirmed by the ECB session, 2026-11-09, `flatread-v1-ecb-formats.md`):** SDMX-CSV only, no SDMX-JSON.
+  Each body fits `Csv` with no new setting:
+  - Layout: long, CRLF line endings, quoted commas, 21 to 49 columns per data structure definition (83 of them).
+  - Missing values: `missing = {""}`, and `nonfinite = True` because NaN, INF and -INF are written by name.
+  - `TIME_PERIOD` stays a `str` field, with shapes YYYY, YYYY-Qn, YYYY-MM, YYYY-MM-DD and YYYY-Sn.
+  - The `ACTION` column, present on `updatedAfter` calls only, is a `variants` entry.
+  - The zero-byte empty window is `min_rows = 0` plus a `refusals` entry, or `headgate`'s `empty=`.
+
+  The dataflow list is SDMX-ML. It is not a table, so it stays in the client.
 - The three-provider rule is "for now": when a fourth client hand-writes the same XML records reader, XML records
   become a fifth base.
 
