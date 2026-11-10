@@ -219,7 +219,7 @@ def test_headings_above_the_header() -> None:
     class Grouped(Csv):
         row = Group
         labels = {"Date": "day"}
-        long = Long(("Date",), "series", "value", r"[A-Z]+")
+        long = Long(name="series", value="value", names=r"[A-Z]+")
         headings = "group"
 
     frame = Grouped.frame(b",Prices,,Rates\nDate,A,B,A\n2026-11-09,1,2,3\n")

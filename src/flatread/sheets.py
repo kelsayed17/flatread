@@ -17,7 +17,7 @@ import logging
 import re
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import ClassVar, Final, Literal, override
+from typing import Any, ClassVar, Final, Literal, override
 
 import fastexcel
 import polars as pl
@@ -127,52 +127,71 @@ class Sheet(Layout):
         return [None] * len(labels)  # the core names the header that is not the layout's
 
     @classmethod
+    def _strict_first(cls) -> bool:
+        """Return whether the strict load is worth trying: no setting says a column mixes text into its values."""
+        return not (frozenset(cls.missing) - {""} or cls.missing_by_field or cls.strip or cls.footer is not None)
+
+    @classmethod
     def _load(cls, reader: fastexcel.ExcelReader, name: str, plan: Plan) -> Text:
-        """Return sheet *name*'s table as cells under its labels, typed where fastexcel types them."""
-        wanted = _column_range(cls.columns) if cls.columns is not None else None
-        top = cls.header_row - (cls.headings is not None)
+        """Return sheet *name*'s table as cells under its labels, typed where fastexcel types them.
+
+        calamine parses a sheet whole on every load, so the header comes from the table's own load: one parse on the
+        fast path, two on the fallback, as many as today's hand-written readers make.
+        """
+        common: dict[str, Any] = {"header_row": cls.header_row}
+        if cls.columns is not None:
+            common["use_columns"] = _column_range(cls.columns)
+        sheet = None
         try:
-            head = reader.load_sheet(
-                name, header_row=None, skip_rows=top, n_rows=cls.header_row - top + 1, dtypes="string",
-                use_columns=wanted,
-            ).to_polars()  # fmt: skip
-        except fastexcel.InvalidParametersError:  # fastexcel's answer to skipping past the sheet's last row
-            head = pl.DataFrame()
-        if head.height < cls.header_row - top + 1:
-            msg = f"sheet {name!r} ends before its header row {cls.header_row + 1}"
+            if cls._strict_first():
+                try:
+                    sheet = reader.load_sheet(name, dtype_coercion="strict", schema_sample_rows=None, **common)
+                except fastexcel.UnsupportedColumnTypeCombinationError:
+                    sheet = None
+            mixed = sheet is None
+            if sheet is None:
+                sheet = reader.load_sheet(name, dtypes="string", **common)
+        except fastexcel.InvalidParametersError as exc:  # fastexcel's answer to a header row past the sheet's end
+            msg = f"sheet {name!r} has no header in row {cls.header_row + 1}"
+            raise UnknownLayoutError(msg) from exc
+        labels, source = _labels(sheet.selected_columns)
+        if not labels:
+            msg = f"sheet {name!r} has no header in row {cls.header_row + 1}"
             raise UnknownLayoutError(msg)
-        cells = ["" if cell is None else str(cell) for cell in head.row(-1)]
-        while cells and not cells[-1]:
-            cells.pop()
-        source = head.columns[: len(cells)]
-        headings = tuple(head.row(0)[: len(cells)]) if cls.headings is not None else None
-        try:
-            frame = reader.load_sheet(
-                name, header_row=None, skip_rows=cls.header_row + 1, use_columns=source,
-                dtype_coercion="strict", schema_sample_rows=None,
+        frame = sheet.to_polars().select(source)
+        if mixed:
+            frame = cls._mixed(reader, name, frame, common, cls._kind_of(plan, column_names(labels)))
+        frame, rows = cls._bound(frame, name)
+        frame.columns = column_names(labels)
+        headings = None
+        if cls.headings is not None:  # the one setting that costs a parse of its own: the row above the header
+            above = reader.load_sheet(
+                name, header_row=None, skip_rows=cls.header_row - 1, n_rows=1, dtypes="string",
+                use_columns=common.get("use_columns"),
             ).to_polars()  # fmt: skip
-        except fastexcel.UnsupportedColumnTypeCombinationError:
-            frame = cls._mixed(reader, name, source, cls._kind_of(plan, column_names(cells)))
-        frame, rows = cls._bound(frame.select(source), name)
-        frame.columns = column_names(cells)
+            headings = tuple(above.row(0)[: len(labels)]) if above.height else None
         first = cls.header_row + 2
         return Text(frame, lambda i: f"sheet {name!r} row {first + rows[i]}", headings=headings)
 
     @classmethod
-    def _mixed(cls, reader: fastexcel.ExcelReader, name: str, source: list[str], kinds: list[object]) -> pl.DataFrame:
-        """Return the table as text, each number and date its typed load's value: the two-load fallback."""
-        text = reader.load_sheet(
-            name, header_row=None, skip_rows=cls.header_row + 1, use_columns=source, dtypes="string"
-        ).to_polars()
+    def _mixed(
+        cls,
+        reader: fastexcel.ExcelReader,
+        name: str,
+        text: pl.DataFrame,
+        common: dict[str, Any],
+        kinds: list[object],
+    ) -> pl.DataFrame:
+        """Return the text load, each number and date its typed load's value: the fallback's second parse."""
         typed_kinds: dict[str | int, fastexcel.DType] = {
             column: "datetime" if kind in {dt.date, dt.datetime} else "float"
-            for column, kind in zip(source, kinds, strict=True)
+            for column, kind in zip(text.columns, kinds, strict=True)
             if kind in {int, float, Decimal, dt.date, dt.datetime, str}
         }
         if not typed_kinds:
             return text
         typed = reader.load_sheet(
-            name, header_row=None, skip_rows=cls.header_row + 1, use_columns=[str(column) for column in typed_kinds],
+            name, header_row=common["header_row"], use_columns=[str(column) for column in typed_kinds],
             dtypes=typed_kinds, dtype_coercion="coerce",
         ).to_polars()  # fmt: skip
         columns = []
@@ -229,6 +248,26 @@ class Sheet(Layout):
             text.carried[cls.every_sheet.name] = name
             frames.append(core.run(plan, text, **cls._hooks()))
         return pl.concat(frames, how="vertical")
+
+
+def _labels(columns: list[fastexcel.ColumnInfo]) -> tuple[list[str], list[str]]:
+    """Return the header's labels as written and fastexcel's names for their columns, trailing empty ones dropped.
+
+    fastexcel names an empty label ``__UNNAMED__<i>`` and a repeat ``<label>_1``, ``<label>_2``.
+    """
+    labels: list[str] = []
+    names: list[str] = []
+    for column in columns:
+        label = "" if column.column_name_from == "generated" else column.name
+        # shortcut: a label written `X_1` after an `X` reads as X's repeat; split the load if a provider writes one.
+        if (found := re.fullmatch(r"(.+)_(\d+)", label)) and found[1] in labels:
+            label = found[1]
+        labels.append(label)
+        names.append(column.name)
+    while labels and not labels[-1]:
+        labels.pop()
+        names.pop()
+    return labels, names
 
 
 def _matches(name: str, member: Member) -> bool:

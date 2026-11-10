@@ -6,6 +6,7 @@ Building a class with a ``row`` checks every setting and compiles them into a :c
 does no set-up work. ``frame`` and ``rows`` are classmethods, so they pass straight to headgate's ``body_reader``.
 """
 
+import re
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from types import MappingProxyType
@@ -127,7 +128,11 @@ class Layout:
         filled = {f for _, f in label_sets[0] if f is not None} | cls._carried_fields()
         if cls.long is not None:
             _compiles(cls.long.names, f"{cls.__name__}.long.names")
-            filled |= {cls.long.name, cls.long.value}
+            parts = set(re.compile(cls.long.names).groupindex)
+            if unknown := sorted(parts - names):
+                msg = f"{cls.__name__}: the long names' groups {unknown!r} name no field of {row.__name__}"
+                raise TypeError(msg)
+            filled |= {cls.long.value, *parts, *((cls.long.name,) if cls.long.name is not None else ())}
         if cls.headings is not None:
             filled.add(cls.headings)
         for field in (*cls.key, *(f for f in (cls.headings,) if f is not None)):

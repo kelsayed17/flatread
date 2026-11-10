@@ -5,6 +5,7 @@ import msgspec
 import polars as pl
 import pytest
 
+from flatread.cells import YEAR_MONTH
 from flatread.core import Erratum, Long, Text, run
 from flatread.errors import (
     CellError,
@@ -128,7 +129,7 @@ class Point(msgspec.Struct, frozen=True):
 class Wide(Layout):
     row = Point
     labels = {"Date": "day"}
-    long = Long(index=("Date",), name="series", value="value", names=r"[A-Z]+")
+    long = Long(name="series", value="value", names=r"[A-Z]+")
     missing = frozenset({"", "."})
 
 
@@ -143,6 +144,31 @@ def test_long_melts_checks_names_and_drops_missing_values() -> None:
         Wide.from_text(text(Date=["2026-11-09"], gdp_2=["1"]))
 
 
+class Vintage(msgspec.Struct, frozen=True):
+    day: dt.date
+    series: str
+    vintage: dt.date
+    value: float
+
+
+def test_a_long_label_fills_fields_from_its_named_groups() -> None:
+    class Vintages(Layout):
+        row = Vintage
+        labels = {"Date": "day"}
+        long = Long(value="value", names=r"(?P<series>[A-Z]+)_(?P<vintage>\d{4}-\d{2})")
+        dates = {"vintage": YEAR_MONTH}
+
+    frame = Vintages.from_text(text(Date=["2026-11-09"], **{"CFNAI_2020-03": ["1"], "CFNAI_2020-04": ["2"]}))
+    assert frame.rows() == [
+        (dt.date(2026, 11, 9), "CFNAI", dt.date(2020, 3, 1), 1.0),
+        (dt.date(2026, 11, 9), "CFNAI", dt.date(2020, 4, 1), 2.0),
+    ]
+    with pytest.raises(TypeError, match="'month'"):
+
+        class Unknown(Vintages):
+            long = Long(value="value", names=r"(?P<month>\d+)")
+
+
 class Grouped(msgspec.Struct, frozen=True):
     day: dt.date
     group: str
@@ -154,7 +180,7 @@ def test_headings_carry_rightwards_into_long_rows() -> None:
     class Groups(Layout):
         row = Grouped
         labels = {"Date": "day"}
-        long = Long(index=("Date",), name="series", value="value", names=r"[A-Z]+")
+        long = Long(name="series", value="value", names=r"[A-Z]+")
         headings = "group"
 
     frame = run(

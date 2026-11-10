@@ -6,6 +6,7 @@ in order: the header against the layout's label sets, the errata, the ``cells`` 
 values, the typing (:func:`~flatread.cells.type_frame`), the ``check`` hook, the key, ``where`` and ``min_rows``.
 """
 
+import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
@@ -27,6 +28,8 @@ __all__ = [
 
 #: The hidden column that keeps each row's place in the text, for an error, through the melt and the typing.
 _ROW: Final = "\x00row"
+#: The hidden column a melted column's name is held in until the label's fields are read off it.
+_NAME: Final = "\x00name"
 
 type LabelSet = tuple[tuple[str, str | None], ...]
 
@@ -46,18 +49,17 @@ class Text:
     headings: tuple[str | None, ...] | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Long:
-    """A wide table read long: the columns after *index* melt into a *name* field and a *value* field."""
+    """A wide table read long: every column ``labels`` does not name melts into rows, one per filled cell."""
 
-    #: The labels of the columns every row keeps.
-    index: tuple[str, ...]
-    #: The field each melted column's label becomes, typed as that field is (a date for dated columns).
-    name: str
     #: The field each melted cell becomes.
     value: str
     #: The regex every melted column's label matches whole: a renamed column raises instead of becoming a new series.
+    #: Its named groups fill the fields they name (a series, a vintage, a maturity), typed as those fields are.
     names: str
+    #: The field the whole label fills, if any (a date for dated columns).
+    name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,7 +151,7 @@ def _fix(frame: pl.DataFrame, errata: Sequence[Erratum]) -> pl.DataFrame:
 
 
 def _melt(plan: Plan, frame: pl.DataFrame, index: list[str], groups: Mapping[str, str | None]) -> pl.DataFrame:
-    """Melt every column but *index* into the long plan's name and value fields, in row order then column order."""
+    """Melt every column but *index* into the long plan's fields, in row order then column order."""
     long = plan.long
     assert long is not None  # noqa: S101  # only a long plan melts
     melted = [c for c in frame.columns if c not in {*index, _ROW}]
@@ -157,12 +159,18 @@ def _melt(plan: Plan, frame: pl.DataFrame, index: list[str], groups: Mapping[str
     if bad := [label_of[c] for c in melted if not _full(long.names, label_of[c])]:
         msg = f"the columns {bad!r} are not series this layout reads (their labels must match {long.names!r})"
         raise UnknownLayoutError(msg)
-    frame = frame.unpivot(melted, index=[_ROW, *index], variable_name=long.name, value_name=long.value)
+    frame = frame.unpivot(melted, index=[_ROW, *index], variable_name=_NAME, value_name=long.value)
     if plan.headings is not None:
-        heading = pl.col(long.name).replace_strict({c: groups.get(c) for c in melted}, return_dtype=pl.String)
+        heading = pl.col(_NAME).replace_strict({c: groups.get(c) for c in melted}, return_dtype=pl.String)
         frame = frame.with_columns(heading.alias(plan.headings))
-    frame = frame.with_columns(pl.col(long.name).replace_strict(label_of, return_dtype=pl.String))
-    return frame.sort(_ROW, maintain_order=True)
+    label = pl.col(_NAME).replace_strict(label_of, return_dtype=pl.String)
+    parts = re.compile(long.names).groupindex
+    if parts:
+        found = label.str.extract_groups(f"^(?:{long.names})$")
+        frame = frame.with_columns(found.struct.field(group).alias(group) for group in parts)
+    if long.name is not None:
+        frame = frame.with_columns(label.alias(long.name))
+    return frame.drop(_NAME).sort(_ROW, maintain_order=True)
 
 
 def _label(name: str, columns: Sequence[str]) -> str:

@@ -122,6 +122,8 @@ ban-relative-imports = "all"
 "__future__.annotations".msg = "Python 3.14 defers every annotation (PEP 649); the future import would stringify them again."
 
 [tool.ruff.lint.per-file-ignores]
+# The benchmark is a script over a prism-clients checkout: it prints a table, and its layouts are class settings.
+"benchmarks/**" = ["D1", "INP001", "RUF012", "T201", "S101", "PT018"]
 "tests/**" = [
     # Docstrings are required in src; a test's name says what it checks.
     "D1", "D205",
@@ -142,6 +144,10 @@ ban-relative-imports = "all"
     # A layout's settings are class attributes; flatread reads them, never mutates them.
     "RUF012",
 ]
+
+[tool.ty.src]
+# The benchmark imports prism-clients' readers, which only its own checkout has.
+exclude = ["benchmarks"]
 
 [tool.ty.environment]
 python-version = "3.14"

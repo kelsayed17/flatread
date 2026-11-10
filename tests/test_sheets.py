@@ -48,7 +48,7 @@ def count_loads(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 def test_ads_index_reads_in_one_typed_load(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = count_loads(monkeypatch)
     frame = AdsIndex.frame(ADS)
-    assert len(calls) == 2  # the header row, then the table once
+    assert len(calls) == 1  # the header and the table in one load: calamine parses a sheet whole each time
     assert frame.height == 6
     # Every digit of the cell's XML (<v>-0.5816963701473981</v>), not calamine's nine-digit text.
     assert frame.row(0) == (dt.date(1960, 3, 1), -0.5816963701473981, 0)
@@ -75,7 +75,7 @@ def test_a_mixed_column_takes_the_two_load_fallback(monkeypatch: pytest.MonkeyPa
     body = workbook({"S": [["Date", "Rate", "Code"], ["a", 13442.008862616791, 1001], ["b", ".", 2020.5]]})
     calls = count_loads(monkeypatch)
     frame = Rates.frame(body)
-    assert len(calls) == 4  # the header, the refused strict load, then text and numbers
+    assert len(calls) == 2  # '.' is a missing token, so no strict load is tried: text, then numbers
     assert frame["rate"].to_list() == [13442.008862616791, None]
     assert frame["code"].to_list() == ["1001", "2020.5"]
 
@@ -127,7 +127,7 @@ def test_every_sheet_reads_long_with_the_sheet_name() -> None:
         row = Yield
         labels = {"DATE": "day"}
         dates = {"day": "%d-%b-%Y"}
-        long = Long(("DATE",), "maturity", "value", r"ACM(Y|TP|RNY)\d{2}")
+        long = Long(name="maturity", value="value", names=r"ACM(Y|TP|RNY)\d{2}")
         every_sheet = Sheets("frequency")
 
     frame = Acm.frame(ACM)

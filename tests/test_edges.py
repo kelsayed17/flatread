@@ -95,7 +95,7 @@ def test_settings_naming_no_field_or_the_wrong_kind_raise() -> None:
         class Lookaround(Csv):
             row = Kinds
             labels = {"Kind": "kind"}
-            long = Long(("Kind",), "day", "kind", r"(?=x)")
+            long = Long(name="day", value="kind", names=r"(?=x)")
 
     with pytest.raises(TypeError, match="no field 'when'"):
 
@@ -262,7 +262,7 @@ def test_sheet_refusals() -> None:
     class Deep(Cells):
         header_row = 5
 
-    with pytest.raises(UnknownLayoutError, match="ends before its header row 6"):
+    with pytest.raises(UnknownLayoutError, match="no header in row 6"):
         Deep.frame(workbook({"S": [["Name", "Value"]]}))
 
 
