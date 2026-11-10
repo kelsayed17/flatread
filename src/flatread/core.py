@@ -192,7 +192,9 @@ def prepare(plan: Plan, text: Text, *, cells: Callable[[pl.DataFrame], pl.DataFr
     if plan.long is not None:
         frame = _melt(plan, frame, list(renames.values()), groups)
         value = next(f for f in plan.fields if f.name == plan.long.value)
-        filled = pl.col(plan.long.value).is_not_null() & ~pl.col(plan.long.value).is_in(list(value.missing))
+        filled = pl.col(plan.long.value).is_not_null()
+        if frame.schema[plan.long.value] == pl.String:  # a typed column (a sheet's floats) has no missing tokens
+            filled &= ~pl.col(plan.long.value).is_in(list(value.missing))
         frame = frame.filter(filled)
     if text.carried:
         frame = frame.with_columns(pl.lit(value).alias(name) for name, value in text.carried.items())

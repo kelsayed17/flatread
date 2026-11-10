@@ -103,7 +103,7 @@ flatread cannot read, a regex polars cannot compile) and compiles the read plan,
 | Base | Reads | Fast path | Fallback |
 |---|---|---|---|
 | `Csv` (and `Pipe`, `Tsv`: `Csv` with `separator` set) | delimited text | one `pl.read_csv` of the whole body, every cell text, after appending a sentinel field to every line (below) | stdlib `csv` for a body where a quoted field spans lines or a blank line sits between rows |
-| `Sheet` | one sheet of an xls/xlsx | one fastexcel load of the table's rows, each column loaded as its field's type (`dtype_coercion="strict"`) | when the strict load refuses (a column mixes text, such as `.`, into numbers; fastexcel does not say which), one text load plus one float load of only the number fields' columns: today's cost, never more |
+| `Sheet` | one sheet of an xls/xlsx | one fastexcel load of the table's rows, each column's type inferred from every cell with `dtype_coercion="strict"` (explicit dtypes are not used: fastexcel turns a text cell in a float column into a silent null; found while building, 2026-11-09) | when the strict load refuses (a column mixes kinds, such as `.` among numbers), one text load plus one typed (`coerce`) load of only the number and date fields' columns: today's cost, never more |
 | `Json` | records at a path in a JSON body | `msgspec.json.decode` into a struct flatread derives from `row` and `labels` (`msgspec.defstruct(..., rename=…)`), then columns | text columns through the shared typer, for a provider that writes numbers as strings (Treasury) |
 | `FixedWidth` | fixed-column text | one split into lines, `str.slice` per column in polars | — |
 

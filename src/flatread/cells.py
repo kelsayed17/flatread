@@ -264,7 +264,9 @@ def _text_read(text: pl.Expr, field: Field, scale: int) -> pl.Expr:  # noqa: PLR
     return _date_read(text, field)
 
 
-def _native_read(column: pl.Expr, dtype: pl.DataType, field: Field) -> tuple[pl.Expr, pl.Expr] | None:
+def _native_read(  # noqa: PLR0911  # one return per native kind
+    column: pl.Expr, dtype: pl.DataType, field: Field
+) -> tuple[pl.Expr, pl.Expr] | None:
     """Return (value, bad) for a column already typed *dtype*, or ``None`` to read it as text instead."""
     if field.kind is float and dtype.is_numeric():
         number = column.cast(pl.Float64)
@@ -275,6 +277,9 @@ def _native_read(column: pl.Expr, dtype: pl.DataType, field: Field) -> tuple[pl.
         return pl.when(whole).then(column.cast(pl.Int64)), column.is_not_null() & ~whole
     if field.kind is int and dtype.is_integer():
         return column.cast(pl.Int64), pl.lit(value=False)
+    if field.kind is dt.date and isinstance(dtype, pl.Datetime):  # a sheet's date cell: a midnight datetime
+        midnight = column.dt.time() == dt.time()
+        return pl.when(midnight).then(column.dt.date()), column.is_not_null() & ~midnight
     natives: dict[object, pl.DataType] = {bool: pl.Boolean(), dt.date: pl.Date()}
     native = natives.get(field.kind)
     if native is not None and dtype == native:
