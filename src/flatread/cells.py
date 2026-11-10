@@ -1,473 +1,348 @@
-r"""A table's columns, declared on its row struct, and its text cells read into them strictly.
+"""Cells read into their fields' types, strictly, in one polars ``select``.
 
-A row struct declares each field's column with :class:`Column` in its annotation:
-``price: Annotated[float | None, Column("PRICE", missing=("", "."))]``. :func:`read_table` takes a frame whose columns
-are the source's own labels (as ``pl.read_csv`` or ``pl.read_excel`` names them) and reads every cell by polars' own
-conversions. Each cell is its field's value, ``None`` for one of the column's ``missing`` tokens, or an
-:class:`~flatread.errors.UnknownLayoutError` naming the row, the column and the text: never silently ``None``.
+:func:`fields_of` compiles a row struct's fields once, when a layout class is built. :func:`type_frame` then reads a
+frame whose columns are those fields, each as text or already typed (a sheet's floats, a JSON number), and returns
+the typed frame and a frame of the same columns that is true where a cell failed: text that is neither one of the
+field's missing tokens nor its type, or a missing cell in a field that is not ``| None``. The success path builds no
+message; :func:`first_bad` builds one only when a read is about to raise.
 
-``int`` reads by ``str.to_integer``, ``float`` by a cast to ``Float64`` (a number too large for one is refused, not
-read as an infinity; a NaN or an infinity is refused unless the column's ``pattern`` admits it, as :data:`NONFINITE`
-does), ``bool`` by ``replace_strict`` on the column's two tokens, a ``Literal`` as a ``pl.Enum``, and a
-date or datetime by ``str.to_datetime`` in one of the column's formats, checked by writing the value back in that
-format (polars' ``%Y`` alone reads ``12/31/25`` as the year 25). A format with an offset (``%z`` or ``%#z``) ends with
-it, and the cell's text before its offset is the text checked so; a leap second (``:60``) is read only where it rolls
-over to midnight after 30 June or 31 December, in UTC for a cell with an offset. A field's ``Meta`` constraints are
-checked too, and a cell that reads as its type but fails them is named so. A column's ``pattern`` and a ``Meta``
-pattern are run by polars' regex, so one it cannot compile (a look-around, a backreference) is refused when the row
-struct is.
+A date is read by ``strftime`` format and checked by writing it back in that format, since polars' ``%Y`` alone
+reads ``12/31/25`` as the year 25. A ``Decimal`` never lets polars guess its scale from sampled rows: the column's
+largest scale is found first, and a cell that does not write back to its own digits is refused.
 """
 
 import datetime as dt
-import re
-import weakref
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Final, NamedTuple, get_args, get_origin
+from decimal import Decimal
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Final, Literal, get_args, get_origin
 
 import msgspec
 import polars as pl
 
-from flatread.errors import UnknownLayoutError
+from flatread.errors import CellError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
 __all__ = [
-    "DECIMAL",
-    "NONFINITE",
-    "CellError",
-    "Column",
-    "ColumnSpec",
-    "UtcDatetime",
-    "column_specs",
+    "EXCEL_SERIAL",
+    "QUARTER",
+    "YEAR_MONTH",
+    "DateFormat",
+    "Field",
+    "as_text",
     "dtype_of",
-    "match_header",
-    "read_table",
-    "resolve_type",
-    "wire_names",
+    "fields_of",
+    "first_bad",
+    "type_frame",
 ]
-
-#: A moment the source states in UTC: a field so typed decodes aware, and its frame column is ``Datetime`` in UTC.
-type UtcDatetime = Annotated[dt.datetime, msgspec.Meta(tz=True)]
-
-#: A float written by name: an infinity or a NaN, any case, signed or not. A float column refuses one unless its
-#: ``pattern`` admits it: ``pattern=f"{DECIMAL}|{NONFINITE}"``.
-NONFINITE: Final = r"[+-]?(?i:inf|infinity|nan)"
-
-#: A decimal number: a sign, digits with an optional point, or a point and digits, and an optional exponent.
-DECIMAL: Final = r"[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
-
-_AT: Final = "row index"
-
-#: A format's offset directive, ``%z`` or ``%#z``.
-_OFFSET_DIRECTIVE: Final = re.compile(r"%#?z")
-
-#: A cell's offset at its end, as polars' ``%#z`` reads one: ``Z``, ``+HH``, ``+HHMM`` or ``+HH:MM``, either sign.
-_OFFSET: Final = r"(?:Z|[+-][0-9]{2}(?::?[0-9]{2})?)$"
-
-#: What a cell of each type is, in an error.
-_WHAT: Final[dict[type, str]] = {
-    str: "text",
-    int: "a whole number",
-    float: "a number",
-    bool: "a true or false token",
-}  # no field is named so: a field name is an identifier
-
-
-class CellError(UnknownLayoutError):
-    """A cell that is neither its column's value nor a missing token; *index* is its row's place in the frame."""
-
-    def __init__(self, message: str, index: int) -> None:
-        """Hold the message and the row's place."""
-        super().__init__(message)
-        self.index = index
 
 
 @dataclass(frozen=True, slots=True)
-class Column:
-    """One column of a table, declared in its row struct field's annotation.
-
-    *label* is the source's name for the column, or the names it has gone by. *format* is a date's or datetime's
-    ``strftime`` format, or the formats its cells are written in. *pattern* is a shape every cell must match whole.
-    *missing* is the texts that stand for no value. *true* and *false* are a ``bool``'s tokens. *strip* and
-    *strip_start* are characters taken off a cell first, *prefix* text every cell begins with, *grouping* a number's
-    thousands separator, and *parens_negative* that ``(95.1)`` is negative. *optional* says the source may leave the
-    column out.
-    """
-
-    label: str | tuple[str, ...]
-    format: str | tuple[str, ...] | None = None
-    pattern: str | None = None
-    missing: tuple[str, ...] = ()
-    true: str | None = None
-    false: str | None = None
-    strip: str | None = None
-    strip_start: str | None = None
-    prefix: str | None = None
-    grouping: str | None = None
-    parens_negative: bool = False
-    optional: bool = False
-
-
-class ColumnSpec(NamedTuple):
-    """A row struct field's column, checked: its name, declaration, labels, cell type and polars type."""
+class DateFormat:
+    """A date shape that no ``strftime`` format reads: a name, the regex a cell matches whole, and the read."""
 
     name: str
-    column: Column
-    labels: tuple[str, ...]
-    kind: type
-    nullable: bool
-    dtype: pl.DataType
-    formats: tuple[str, ...]
-    #: The field's msgspec type, ``Meta`` constraints included.
-    info: msgspec.inspect.Type
+    pattern: str
+    #: The cell's text (matching *pattern*) to its date; null where it is no real date.
+    to_date: Callable[[pl.Expr], pl.Expr]
 
 
-def resolve_type(info: msgspec.inspect.Type) -> tuple[msgspec.inspect.Type, bool]:
-    """Return *info* without its ``Meta`` wrapper and its ``| None``, and whether it may be ``None``."""
-    nullable = False
-    while True:
-        if isinstance(info, msgspec.inspect.Metadata):
-            info = info.type
-        elif isinstance(info, msgspec.inspect.UnionType):
-            arms = [arm for arm in info.types if not isinstance(arm, msgspec.inspect.NoneType)]
-            if len(arms) != 1:
-                msg = f"a union of {arms!r}, which no cell reads as"
-                raise TypeError(msg)
-            nullable = nullable or len(arms) < len(info.types)
-            info = arms[0]
-        else:
-            return info, nullable
+def _quarter(text: pl.Expr) -> pl.Expr:
+    parts = text.str.extract_groups(r"^(\d{4}):?Q([1-4])$")
+    quarter = parts.struct[1].cast(pl.Int8)
+    return pl.date(parts.struct[0].cast(pl.Int32), (quarter - 1) * 3 + 1, 1)
 
 
-#: The cell type and the column type of each msgspec type a cell reads as.
-_KINDS: Final[dict[type, tuple[type, pl.DataType]]] = {
-    msgspec.inspect.StrType: (str, pl.String()),
-    msgspec.inspect.IntType: (int, pl.Int64()),
-    msgspec.inspect.FloatType: (float, pl.Float64()),
-    msgspec.inspect.BoolType: (bool, pl.Boolean()),
-    msgspec.inspect.DateType: (dt.date, pl.Date()),
-    msgspec.inspect.DateTimeType: (dt.datetime, pl.Datetime("us")),
+def _year_month(text: pl.Expr) -> pl.Expr:
+    parts = text.str.extract_groups(r"^(\d{4})-(\d{2})$")
+    month = parts.struct[1].cast(pl.Int8)
+    month = pl.when(month.is_between(1, 12)).then(month)  # polars raises on a 13th month even where unselected
+    return pl.date(parts.struct[0].cast(pl.Int32), month, 1)
+
+
+def _excel_serial(text: pl.Expr) -> pl.Expr:
+    days = text.str.extract(r"^(\d+)$").cast(pl.Int64)
+    return pl.lit(dt.date(1899, 12, 30)) + pl.duration(days=days)
+
+
+#: ``2024Q1`` or ``2024:Q1``: the quarter's first day.
+QUARTER: Final = DateFormat("a quarter written 2024Q1", r"^\d{4}:?Q[1-4]$", _quarter)
+#: ``2026-09``: the month's first day.
+YEAR_MONTH: Final = DateFormat("a month written 2026-09", r"^\d{4}-\d{2}$", _year_month)
+#: Excel's day number, whole days after 1899-12-30, as a sheet's number cell styled as a date holds it.
+EXCEL_SERIAL: Final = DateFormat("an Excel day number", r"^\d+$", _excel_serial)
+
+#: The default of a mapping setting: read-only, so no call can change another's.
+_EMPTY: Final[Mapping[str, Any]] = MappingProxyType({})
+
+#: The prefix of a fault column while it shares the typing pass's frame with the values.
+_BAD: Final = "\x00bad:"
+
+_ISO_DATE: Final = ("%Y-%m-%d",)
+_ISO_DATETIME: Final = ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S")
+
+type Kind = type | tuple[str, ...]
+type Format = str | DateFormat
+
+_SCALARS: Final[Mapping[type, type]] = {
+    msgspec.inspect.StrType: str,
+    msgspec.inspect.IntType: int,
+    msgspec.inspect.FloatType: float,
+    msgspec.inspect.DecimalType: Decimal,
+    msgspec.inspect.BoolType: bool,
+    msgspec.inspect.DateType: dt.date,
+    msgspec.inspect.DateTimeType: dt.datetime,
+}
+
+_EXPECTED: Final[Mapping[type, str]] = {
+    str: "text",
+    int: "a whole number",
+    float: "a number",
+    Decimal: "a decimal number",
+    bool: "true or false",
 }
 
 
-def dtype_of(info: msgspec.inspect.Type) -> pl.DataType | None:
-    """Return the column type of a field of msgspec type *info*, resolved (:func:`resolve_type`); ``None`` for none.
+@dataclass(frozen=True, slots=True)
+class Field:
+    """One row-struct field, compiled: its name, cell type, whether it may be missing, and how its cells read."""
 
-    A ``Literal`` of texts is an ``Enum`` of them, sorted, and a ``Meta(tz=True)`` datetime (a :data:`UtcDatetime`) is
-    a ``Datetime`` in UTC.
-    """
-    if isinstance(info, msgspec.inspect.LiteralType):
-        texts = all(isinstance(value, str) for value in info.values)
-        return pl.Enum(sorted(str(value) for value in info.values)) if texts else None
-    if isinstance(info, msgspec.inspect.DateTimeType) and info.tz is True:
-        return pl.Datetime("us", "UTC")
-    found = _KINDS.get(type(info))
-    return found[1] if found is not None else None
+    name: str
+    #: ``str``, ``int``, ``float``, ``Decimal``, ``bool``, ``date`` or ``datetime``; or a ``Literal``'s values.
+    kind: Kind
+    nullable: bool
+    missing: frozenset[str]
+    formats: tuple[Format, ...]
+    nonfinite: bool
+    strip: bool
+
+    @property
+    def expected(self) -> str:
+        """What a cell of the field must be, for an error."""
+        if isinstance(self.kind, tuple):
+            return f"one of {list(self.kind)!r}"
+        if self.kind in {dt.date, dt.datetime}:
+            shapes = [f.name if isinstance(f, DateFormat) else f for f in self.formats]
+            return f"a {'date' if self.kind is dt.date else 'datetime'} written {' or '.join(shapes)}"
+        return _EXPECTED[self.kind]
 
 
-#: Each row struct's checked columns, held only while the struct lives: a row struct built per header (a file whose
-#: columns are its dates) is freed with its builder's cache entry, not kept for the life of the process.
-_SPECS: Final[weakref.WeakKeyDictionary[type[msgspec.Struct], tuple[ColumnSpec, ...]]] = weakref.WeakKeyDictionary()
+def _literal_values(annotation: object) -> tuple[str, ...] | None:
+    """Return a ``Literal``'s values in their written order (msgspec's inspection sorts them), or ``None``."""
+    if get_origin(annotation) is Literal:
+        return tuple(str(value) for value in get_args(annotation))
+    for arg in get_args(annotation):
+        if (values := _literal_values(arg)) is not None:
+            return values
+    return None
 
 
-def column_specs(row_type: type[msgspec.Struct]) -> tuple[ColumnSpec, ...]:
-    """Return *row_type*'s columns in field order; a declaration that cannot be read raises.
+def _kind(info: msgspec.inspect.Type, annotation: object, where: str) -> tuple[Kind, bool]:
+    """Return the cell type of a field typed *info* (annotated *annotation*) and whether it may be ``None``."""
+    nullable = False
+    if isinstance(info, msgspec.inspect.UnionType):
+        others = [t for t in info.types if not isinstance(t, msgspec.inspect.NoneType)]
+        nullable = len(others) < len(info.types)
+        if len(others) == 1:
+            info = others[0]
+    if isinstance(info, msgspec.inspect.LiteralType) and all(isinstance(v, str) for v in info.values):
+        return _literal_values(annotation) or tuple(str(value) for value in info.values), nullable
+    for type_class, kind in _SCALARS.items():
+        if isinstance(info, type_class):
+            return kind, nullable
+    msg = f"{where} has a type flatread does not read a cell into: {info!r}"
+    raise TypeError(msg)
 
-    Checked once per row struct and kept while the struct lives; the cache holds the struct weakly.
-    """
-    if (specs := _SPECS.get(row_type)) is None:
-        infos = {field.name: field.type for field in msgspec.inspect.type_info(row_type).fields}  # ty: ignore[unresolved-attribute]  # a Struct's info is a StructType
-        specs = _SPECS[row_type] = tuple(
-            _spec(row_type, field, infos[field.name]) for field in msgspec.structs.fields(row_type)
+
+def fields_of(  # noqa: PLR0913  # the struct, then each setting a field's reading takes
+    row: type[msgspec.Struct],
+    *,
+    missing: frozenset[str] = frozenset({""}),
+    missing_by_field: Mapping[str, frozenset[str]] = _EMPTY,
+    dates: Mapping[str, Format | tuple[Format, ...]] = _EMPTY,
+    nonfinite: bool = False,
+    strip: bool = False,
+) -> tuple[Field, ...]:
+    """Compile *row*'s fields in order; a type no cell reads into raises :class:`TypeError`."""
+    by_field, formats_of = missing_by_field, dates
+    for name in (*by_field, *formats_of):
+        if name not in row.__struct_fields__:
+            msg = f"{row.__name__} has no field {name!r}"
+            raise TypeError(msg)
+    info = msgspec.inspect.type_info(row)
+    if not isinstance(info, msgspec.inspect.StructType):  # pragma: no cover  # row is a Struct by its annotation
+        raise TypeError(row)
+    annotations = {field.name: field.type for field in msgspec.structs.fields(row)}
+    fields = []
+    for field in info.fields:
+        kind, nullable = _kind(field.type, annotations[field.name], f"{row.__name__}.{field.name}")
+        given = formats_of.get(field.name)
+        formats: tuple[Format, ...] = ()
+        if isinstance(given, tuple):
+            formats = given
+        elif given is not None:
+            formats = (given,)
+        if given is not None and kind not in {dt.date, dt.datetime}:
+            msg = f"{row.__name__}.{field.name} has a date format but is not a date"
+            raise TypeError(msg)
+        if not formats and kind in {dt.date, dt.datetime}:
+            formats = _ISO_DATE if kind is dt.date else _ISO_DATETIME
+        fields.append(
+            Field(
+                field.name,
+                kind,
+                nullable,
+                missing | by_field.get(field.name, frozenset()),
+                formats,
+                nonfinite,
+                strip,
+            )
         )
-    return specs
+    return tuple(fields)
 
 
-def _spec(row_type: type, field: msgspec.structs.FieldInfo, info: msgspec.inspect.Type) -> ColumnSpec:
-    where = f"{row_type.__name__}.{field.name}"
-    _, *metadata = get_args(field.type) if get_origin(field.type) is Annotated else (None,)
-    columns = [item for item in metadata if isinstance(item, Column)]
-    if len(columns) != 1:
-        msg = f"{where} declares {len(columns)} Columns, not one"
-        raise TypeError(msg)
-    (column,) = columns
-    try:
-        resolved, nullable = resolve_type(info)
-    except TypeError as exc:
-        msg = f"{where} is {exc}"
-        raise TypeError(msg) from None
-    if (dtype := dtype_of(resolved)) is None:
-        if isinstance(resolved, msgspec.inspect.LiteralType):
-            msg = f"{where} is a Literal of {resolved.values!r}: only text values read from a cell"
-        else:
-            msg = f"{where} is a {resolved!r}, which no cell reads as"
-        raise TypeError(msg)
-    kind = str if isinstance(dtype, pl.Enum) else _KINDS[type(resolved)][0]
-    if (column.missing or column.optional) and not nullable:
-        msg = f"{where} declares missing tokens or an optional column but cannot be None"
-        raise ValueError(msg)
-    if nullable and not (column.missing or column.optional):
-        msg = f"{where} can be None, but its column declares no missing token and is not optional"
-        raise ValueError(msg)
-    formats = (column.format,) if isinstance(column.format, str) else column.format or ()
-    if (kind in {dt.date, dt.datetime}) != bool(formats):
-        msg = f"{where}: a date or datetime gives its format, and only it does"
-        raise ValueError(msg)
-    if any(_OFFSET_DIRECTIVE.search(fmt) for fmt in formats) and not (
-        isinstance(dtype, pl.Datetime) and dtype.time_zone is not None
-    ):
-        msg = f"{where} reads an offset, so it is a UtcDatetime"
-        raise ValueError(msg)
-    if any(_OFFSET_DIRECTIVE.search(_before_offset(fmt)) for fmt in formats):
-        msg = f"{where}: an offset (%z or %#z) ends its format"
-        raise ValueError(msg)
-    if kind is bool and (column.true is None or column.false is None):
-        msg = f"{where} is a bool without both its true and false tokens"
-        raise ValueError(msg)
-    labels = (column.label,) if isinstance(column.label, str) else column.label
-    _check_patterns(where, column, resolved)
-    return ColumnSpec(field.name, column, labels, kind, nullable, dtype, formats, resolved)
+def dtype_of(field: Field) -> pl.DataType:
+    """Return the polars type of *field*'s column (a ``Decimal``'s scale is its column's, so 0 for an empty one)."""
+    if isinstance(field.kind, tuple):
+        return pl.Enum(list(field.kind))
+    dtypes: dict[object, pl.DataType] = {
+        str: pl.String(),
+        int: pl.Int64(),
+        float: pl.Float64(),
+        Decimal: pl.Decimal(38, 0),
+        bool: pl.Boolean(),
+        dt.date: pl.Date(),
+        dt.datetime: pl.Datetime("us"),
+    }
+    return dtypes[field.kind]
 
 
-def _check_patterns(where: str, column: Column, info: msgspec.inspect.Type) -> None:
-    """Check that polars' regex, which runs them, compiles the column's pattern and the field's ``Meta`` pattern.
-
-    msgspec checks a ``Meta`` pattern with :mod:`re`, which reads what polars' Rust regex does not (a look-around, a
-    backreference), so one would otherwise pass here and fail at the first read, as polars' own error.
-    """
-    patterns = [] if column.pattern is None else [_whole(column.pattern)]
-    if isinstance(info, msgspec.inspect.StrType) and info.pattern is not None:
-        patterns.append(info.pattern)
-    for pattern in patterns:
-        try:
-            pl.select(pl.lit("").str.contains(pattern))
-        except pl.exceptions.ComputeError as exc:  # the regex engine's reason is the line that opens "error: "
-            lines = str(exc).splitlines()
-            reason = next((line.removeprefix("error: ") for line in lines if line.startswith("error: ")), lines[0])
-            msg = f"{where}'s pattern {pattern!r} is not one polars' regex reads: {reason}"
-            raise TypeError(msg) from None
+def _decimal_scale(column: pl.Series) -> int:
+    longest = column.str.extract(r"\.(\d+)$").str.len_chars().max()
+    return int(longest) if isinstance(longest, int) else 0
 
 
-def _whole(pattern: str) -> str:
-    """Return *pattern* matched against a whole cell."""
-    return f"^(?:{pattern})$"
+def _date_read(text: pl.Expr, field: Field) -> pl.Expr:
+    reads = []
+    for fmt in field.formats:
+        if isinstance(fmt, DateFormat):
+            reads.append(pl.when(text.str.contains(fmt.pattern)).then(fmt.to_date(text)))
+            continue
+        parsed = (
+            text.str.to_date(fmt, strict=False)
+            if field.kind is dt.date
+            else text.str.to_datetime(fmt, strict=False, time_unit="us")
+        )
+        reads.append(pl.when(parsed.dt.strftime(fmt) == text).then(parsed))
+    return pl.coalesce(reads) if len(reads) > 1 else reads[0]
 
 
-def wire_names(labels: Sequence[str]) -> list[str]:
-    """Return *labels* named as ``pl.read_csv`` names a header's: a repeat ``x`` is ``x_duplicated_0``, then ``_1``."""
-    seen: dict[str, int] = {}
-    names: list[str] = []
-    for label in labels:
-        names.append(label if label not in seen else f"{label}_duplicated_{seen[label]}")
-        seen[label] = seen.get(label, -1) + 1
-    return names
-
-
-def _match(columns: Sequence[str], specs: Sequence[ColumnSpec], *, ordered: bool) -> dict[str, str]:
-    """Return each frame column's field, by its label; a header that is not the declared columns raises."""
-    seen: dict[str, int] = {}
-    found: dict[str, str] = {}
-    remaining = list(columns)
-    for spec in specs:
-        name = None
-        for label in spec.labels:
-            repeat = seen.get(label, 0)
-            names = (label,) if not repeat else (f"{label}_duplicated_{repeat - 1}", f"{label}_{repeat}")
-            candidates = remaining[:1] if ordered else remaining
-            if (name := next((n for n in names if n in candidates), None)) is not None:
-                seen[label] = repeat + 1
-                break
-        if name is not None:
-            found[name] = spec.name
-            remaining.remove(name)
-        elif not spec.column.optional:
-            break
-    if remaining or any(spec.name not in found.values() and not spec.column.optional for spec in specs):
-        msg = f"the header {list(columns)!r} is not the columns {[spec.labels[0] for spec in specs]!r}"
-        raise UnknownLayoutError(msg)
-    return found
-
-
-def match_header(columns: Sequence[str], row_type: type[msgspec.Struct], *, ordered: bool = True) -> dict[str, str]:
-    """Return each of *columns*' field in *row_type*; a header that is not its declared columns raises.
-
-    The labels must be *row_type*'s, in field order (any order with *ordered* false), an ``optional`` column left out or
-    not, a repeated label named as polars names it; anything else raises :class:`~flatread.errors.UnknownLayoutError`.
-    """
-    return _match(columns, column_specs(row_type), ordered=ordered)
-
-
-def read_table(
-    frame: pl.DataFrame, row_type: type[msgspec.Struct], *, numbers: pl.Series | None = None, ordered: bool = True
-) -> pl.DataFrame:
-    """Read *frame*, its columns under the source's labels, into *row_type*'s typed columns, under the same labels.
-
-    The labels must be *row_type*'s, in field order (any order with *ordered* false), an ``optional`` column left out
-    or not; any other header raises :class:`~flatread.errors.UnknownLayoutError`. A null cell is an empty one (``""``).
-    *numbers* is each row's line or row in the source, for an error; ``1, 2, …`` by default. The first cell that is not
-    its column's value raises :class:`CellError`.
-    """
-    specs = {spec.name: spec for spec in column_specs(row_type)}
-    found = _match(frame.columns, list(specs.values()), ordered=ordered)
-    names = {wire: found[wire] for wire in frame.columns}  # the frame's own order
-    texts = frame.select(pl.col(wire).cast(pl.String).fill_null("").alias(name) for wire, name in names.items())
-    values = texts.select(_value(specs[name]) for name in names.values())
-    numbers = numbers if numbers is not None else pl.int_range(1, frame.height + 1, eager=True)
-    _check(texts, values, [specs[name] for name in names.values()], numbers)
-    return values.select(pl.col(name).cast(specs[name].dtype).alias(wire) for wire, name in names.items())
-
-
-def _stripped(spec: ColumnSpec) -> pl.Expr:
-    """Return the cell's text with the column's declared padding taken off."""
-    text = pl.col(spec.name)
-    if spec.column.strip is not None:
-        text = text.str.strip_chars(spec.column.strip)
-    if spec.column.strip_start is not None:
-        text = text.str.strip_chars_start(spec.column.strip_start)
-    return text
-
-
-def _missing(spec: ColumnSpec) -> pl.Expr:
-    return _stripped(spec).is_in(list(spec.column.missing))
-
-
-def _parsed(spec: ColumnSpec) -> pl.Expr:
-    """Return the cell read as its field's type, its ``Meta`` constraints aside: null for a cell that is not one."""
-    column, text = spec.column, _stripped(spec)
-    if column.prefix is not None:
-        text = pl.when(text.str.starts_with(column.prefix)).then(text.str.strip_prefix(column.prefix))
-    if column.pattern is not None:
-        text = pl.when(text.str.contains(_whole(column.pattern))).then(text)
-    return _read(text, spec)
-
-
-def _value(spec: ColumnSpec) -> pl.Expr:
-    """Return the cell read as its field's type: null for a missing token, and for a cell that is not a value."""
-    column, value = spec.column, _parsed(spec)
-    if (within := _within(value, spec.info)) is not None:
-        value = pl.when(within).then(value)
-    if column.missing:
-        value = pl.when(_missing(spec)).then(None).otherwise(value)
-    return value.alias(spec.name)
-
-
-def _read(text: pl.Expr, spec: ColumnSpec) -> pl.Expr:
-    """Return *text* read as the field's type by polars, non-strictly: null where polars reads no value."""
-    column = spec.column
-    if isinstance(spec.dtype, pl.Enum):
-        return pl.when(text.is_in(spec.dtype.categories.to_list())).then(text)
-    if spec.kind is bool:
-        return text.replace_strict({column.true: True, column.false: False}, default=None, return_dtype=pl.Boolean)
-    if spec.kind in {dt.date, dt.datetime}:
-        return pl.coalesce(_moment(text, fmt, spec) for fmt in spec.formats)
-    if spec.kind is str:
+def _text_read(text: pl.Expr, field: Field, scale: int) -> pl.Expr:  # noqa: PLR0911  # one return per kind
+    """Return *field*'s read of its text column *text*: its value, or null where the text is not its type."""
+    kind = field.kind
+    if isinstance(kind, tuple):
+        return text.cast(pl.Enum(list(kind)), strict=False)
+    if kind is str:
         return text
-    if column.grouping is not None:
-        group = re.escape(column.grouping)
-        grouped = text.str.contains(rf"^\(?[+-]?[0-9]{{1,3}}(?:{group}[0-9]{{3}})*(?:\.[0-9]+)?\)?$")
-        text = pl.when(grouped).then(text.str.replace_all(column.grouping, "", literal=True))
-    if column.parens_negative:
-        bracketed = text.str.starts_with("(") & text.str.ends_with(")")
-        text = pl.when(bracketed).then("-" + text.str.strip_prefix("(").str.strip_suffix(")")).otherwise(text)
-    if spec.kind is int:
+    if kind is int:
         return text.str.to_integer(strict=False)
-    value = text.cast(pl.Float64, strict=False)
-    # polars casts a number too large for a float to an infinity; only a NaN or infinity written by name, in a
-    # column whose pattern admits it (the text reaching here matched it whole), is one.
-    finite = value.is_finite()
-    if column.pattern is not None:
-        finite |= text.str.contains(f"^(?:{NONFINITE})$")
-    return pl.when(finite).then(value)
-
-
-def _before_offset(fmt: str) -> str:
-    """Return *fmt* without the offset directive (``%z`` or ``%#z``) that ends it; *fmt* itself without one."""
-    return re.sub(r"%#?z$", "", fmt)
-
-
-def _moment(text: pl.Expr, fmt: str, spec: ColumnSpec) -> pl.Expr:
-    """Return *text* read in *fmt*, kept only where writing it back in *fmt* gives the cell again.
-
-    A format with an offset ends with it (:func:`_spec` checks so). The cell is read whole, into UTC, and the text
-    before its offset is the one written back, in the format before the offset: polars does not write an offset as
-    the cell may (``Z``, or ``+00`` for ``%#z``).
-    """
-    if (head := _before_offset(fmt)) == fmt:
-        parsed = _written_back(text, fmt)
-        if isinstance(spec.dtype, pl.Datetime) and spec.dtype.time_zone == "UTC":
-            parsed = parsed.dt.replace_time_zone("UTC")
-    else:
-        whole = text.str.to_datetime(fmt, time_unit="us", time_zone="UTC", strict=False, exact=True)
-        local = _written_back(text.str.replace(_OFFSET, ""), head, leap_on=whole)  # a leap second is one in UTC
-        parsed = pl.when(local.is_not_null() & text.str.contains(_OFFSET)).then(whole)
-    return parsed.dt.date() if spec.kind is dt.date else parsed
-
-
-def _written_back(text: pl.Expr, fmt: str, *, leap_on: pl.Expr | None = None) -> pl.Expr:
-    """Return *text* read naive in *fmt*, kept only where writing it back in *fmt* gives the text again.
-
-    A leap second is checked on *leap_on*, the moment the cell names in UTC, when its text is local time before an
-    offset; on the value read otherwise.
-    """
-    parsed = text.str.to_datetime(fmt, time_unit="us", strict=False, exact=True)
-    moment = parsed if leap_on is None else leap_on
-    # Case aside (a month's name); a fraction (%.f) compared without it; a leap second written back as :60.
-    base, cell = fmt.replace("%.f", ""), text.str.to_lowercase()
-    if "%.f" in fmt:
-        cell = cell.str.replace(r"(:[0-9]{2})\.[0-9]{1,6}", "${1}")
-    written = parsed.dt.strftime(base).str.to_lowercase()
-    before = parsed - pl.duration(seconds=1)
-    leap = before.dt.strftime(base).str.to_lowercase() == cell.str.replace(r":60(\D|$)", ":59${1}")
-    # Only the last second of 30 June or 31 December, which rolls over to midnight, has ever been a leap second.
-    midnight = (moment.dt.hour() == 0) & (moment.dt.minute() == 0) & (moment.dt.second() == 0)
-    halves = (moment - pl.duration(seconds=1)).dt.strftime("%m-%d").is_in(["06-30", "12-31"])
-    same = (written == cell) | (leap & midnight & halves)
-    return pl.when(same & parsed.dt.year().is_between(dt.MINYEAR, dt.MAXYEAR)).then(parsed)
-
-
-def _within(value: pl.Expr, info: msgspec.inspect.Type) -> pl.Expr | None:
-    """Return whether *value* holds to its field's ``Meta`` constraints; ``None`` for a field with none."""
-    tests: list[pl.Expr] = []
-    if isinstance(info, msgspec.inspect.IntType | msgspec.inspect.FloatType):
-        bounds = {"gt": value.__gt__, "ge": value.__ge__, "lt": value.__lt__, "le": value.__le__}
-        tests.extend(test(limit) for name, test in bounds.items() if (limit := getattr(info, name)) is not None)
-        if info.multiple_of is not None:
-            tests.append((value % info.multiple_of) == 0)
-    elif isinstance(info, msgspec.inspect.StrType):
-        if info.min_length is not None:
-            tests.append(value.str.len_chars() >= info.min_length)
-        if info.max_length is not None:
-            tests.append(value.str.len_chars() <= info.max_length)
-        if info.pattern is not None:  # msgspec's pattern is a search, not a whole match
-            tests.append(value.str.contains(info.pattern))
-    return pl.all_horizontal(tests) if tests else None
-
-
-def _check(texts: pl.DataFrame, values: pl.DataFrame, specs: Sequence[ColumnSpec], numbers: pl.Series) -> None:
-    """Raise for the first cell, in row and then column order, that is neither a value nor a missing token."""
-    if not specs:
-        return
-    unread = texts.select((values[spec.name].is_null() & ~_missing(spec)).alias(spec.name) for spec in specs)
-    found = unread.with_row_index(_AT).filter(pl.any_horizontal(spec.name for spec in specs))
-    if found.is_empty():
-        return
-    first = found.row(0, named=True)
-    spec = next(spec for spec in specs if first[spec.name])
-    text = texts[spec.name][first[_AT]]
-    if texts.slice(first[_AT], 1).select(_parsed(spec)).item() is not None:  # its type, outside its Meta's limits
-        limits = ("gt", "ge", "lt", "le", "multiple_of", "min_length", "max_length", "pattern")
-        held = ", ".join(
-            f"{name}={limit!r}" for name in limits if (limit := getattr(spec.info, name, None)) is not None
+    if kind is float:
+        number = text.cast(pl.Float64, strict=False)
+        return number if field.nonfinite else pl.when(number.is_finite()).then(number)
+    if kind is Decimal:
+        number = text.cast(pl.Decimal(38, scale), strict=False)
+        whole = text.str.extract(r"^(-?\d+)", 1)
+        digits = text.str.extract(r"\.(\d+)$", 1).fill_null("")
+        written = whole + "." + digits.str.pad_end(scale, "0") if scale else whole
+        exact = text.str.contains(r"^-?\d+(\.\d+)?$") & (number.cast(pl.String) == written)
+        return pl.when(exact).then(number)
+    if kind is bool:
+        return text.str.to_lowercase().replace_strict(
+            {"true": True, "false": False}, default=None, return_dtype=pl.Boolean
         )
-        msg = f"row {numbers[first[_AT]]}: the {spec.labels[0]!r} cell {text!r} is not within its constraints ({held})"
-        raise CellError(msg, first[_AT])
-    if isinstance(spec.dtype, pl.Enum):
-        what = f"one of {spec.dtype.categories.to_list()!r}"
-    elif spec.formats:
-        what = f"a {spec.kind.__name__} in {' or '.join(spec.formats)}"
-    else:
-        what = _WHAT[spec.kind] + (f" matching {spec.column.pattern!r}" if spec.column.pattern is not None else "")
-    allowed = f", nor one of {list(spec.column.missing)!r}" if spec.column.missing else ""
-    msg = f"row {numbers[first[_AT]]}: the {spec.labels[0]!r} cell {text!r} is not {what}{allowed}"
-    raise CellError(msg, first[_AT])
+    return _date_read(text, field)
+
+
+def _native_read(  # noqa: PLR0911  # one return per native kind
+    column: pl.Expr, dtype: pl.DataType, field: Field
+) -> tuple[pl.Expr, pl.Expr] | None:
+    """Return (value, bad) for a column already typed *dtype*, or ``None`` to read it as text instead."""
+    if field.kind is float and dtype.is_numeric():
+        number = column.cast(pl.Float64)
+        bad = pl.lit(value=False) if field.nonfinite else column.is_not_null() & ~number.is_finite()
+        return number, bad
+    if field.kind is int and dtype.is_float():
+        whole = column.is_finite() & (column == column.floor()) & (column.abs() < 2**63)
+        return pl.when(whole).then(column.cast(pl.Int64, strict=False)), column.is_not_null() & ~whole
+    if field.kind is int and dtype.is_integer():
+        return column.cast(pl.Int64), pl.lit(value=False)
+    if field.kind is dt.date and isinstance(dtype, pl.Datetime):  # a sheet's date cell: a midnight datetime
+        midnight = column.dt.time() == dt.time()
+        return pl.when(midnight).then(column.dt.date()), column.is_not_null() & ~midnight
+    natives: dict[object, pl.DataType] = {bool: pl.Boolean(), dt.date: pl.Date()}
+    native = natives.get(field.kind)
+    if native is not None and dtype == native:
+        return column, pl.lit(value=False)
+    if field.kind is dt.datetime and isinstance(dtype, pl.Datetime):
+        return column.cast(pl.Datetime("us")), pl.lit(value=False)
+    return None  # read as its text: a number into a str, Decimal or serial date, or a type it is not
+
+
+def as_text(column: pl.Expr, dtype: pl.DataType) -> pl.Expr:
+    """Return a native column as text: a whole float as its integer, every other float its shortest round trip."""
+    if dtype.is_float():
+        whole = column.is_finite() & (column == column.floor()) & (column.abs() < 2**53)
+        return (
+            pl.when(whole).then(column.cast(pl.Int64, strict=False).cast(pl.String)).otherwise(column.cast(pl.String))
+        )
+    return column.cast(pl.String)
+
+
+def type_frame(text: pl.DataFrame, fields: Sequence[Field]) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Return *text*'s columns read into *fields*' types, and where a cell failed: both one column per field."""
+    values: list[pl.Expr] = []
+    bads: list[pl.Expr] = []
+    for field in fields:
+        column, dtype = pl.col(field.name), text.schema[field.name]
+        native = None if dtype == pl.String else _native_read(column, dtype, field)
+        if native is not None:
+            value, bad = native
+            missing = column.is_null()
+        else:
+            cell = column if dtype == pl.String else as_text(column, dtype)
+            if field.strip:
+                cell = cell.str.strip_chars()
+            scale = 0
+            if field.kind is Decimal:
+                scale = _decimal_scale(text.select(cell).to_series())
+            missing = cell.is_null() | cell.is_in(list(field.missing))
+            value = _text_read(cell, field, scale)
+            bad = ~missing & value.is_null()
+            value = pl.when(~missing).then(value)
+        if not field.nullable:
+            bad |= missing
+        values.append(value.alias(field.name))
+        bads.append(bad.fill_null(value=True).alias(_BAD + field.name))
+    both = text.select(*values, *bads)  # one pass: each cell is read once for its value and its fault
+    names = [field.name for field in fields]
+    return both.select(names), both.select(pl.col(_BAD + name).alias(name) for name in names)
+
+
+def first_bad(
+    text: pl.DataFrame,
+    bad: pl.DataFrame,
+    fields: Sequence[Field],
+    labels: Mapping[str, str],
+    locate: Callable[[int], str],
+) -> CellError:
+    """Return the error for *bad*'s first failing cell: the first row with one, its leftmost, named by its label."""
+    row = int(bad.select(pl.any_horizontal(pl.all())).to_series().arg_true()[0])
+    field = next(f for f in fields if bad[f.name][row])
+    cell = text[field.name][row]
+    written = "" if cell is None else str(cell)
+    expected = field.expected
+    if cell is None or written in field.missing:
+        expected += ": the field always holds a value"
+    return CellError(locate(row), labels.get(field.name, field.name), written, expected)

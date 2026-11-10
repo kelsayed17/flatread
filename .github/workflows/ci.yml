@@ -77,12 +77,10 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv venv "$RUNNER_TEMP/core" && uv pip install --python "$RUNNER_TEMP/core/bin/python" .
-      # Every module but the extras' (workbooks, pdf) imports on the core dependencies alone.
-      - run: >-
-          "$RUNNER_TEMP/core/bin/python" -c
-          "import flatread.archives, flatread.cells, flatread.delimited, flatread.errors, flatread.frames, flatread.text"
-      - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[excel,pdf]"
-      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.workbooks, flatread.pdf"'
+      # Every module but the excel extra's (sheets) imports on the core dependencies alone.
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread, flatread.check, flatread.scaffold"'
+      - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[excel]"
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.sheets"'
 
   audit:
     name: Dependency vulnerability audit

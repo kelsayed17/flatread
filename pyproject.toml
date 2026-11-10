@@ -1,7 +1,7 @@
 [project]
 name = "flatread"
-version = "0.4.0"
-description = "Read the flat files publishers serve (delimited text, sheets, archives, PDF text) exactly, or fail loudly."
+version = "1.0.0"
+description = "Declare a provider's table once as a class; read its body on one native polars path, exactly, or fail loudly."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -18,18 +18,16 @@ classifiers = [
 ]
 # Each floor is the oldest version the suite is known to pass on.
 dependencies = [
-    "msgspec>=0.22",  # the row and file structs a declaration is made of
+    "msgspec>=0.22",  # the row structs a layout reads into, and the JSON decode
     "polars>=2.0",  # the frames every read builds
-    "stream-unzip>=0.0.101",  # flatread.archives: an archive inflated as its chunks arrive
     # Windows has no system time zone database: polars builds a UTC datetime cell's Python value through zoneinfo,
     # which reads the IANA data from tzdata there.
     "tzdata>=2025.2; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
-# flatread.workbooks: Excel sheets, through polars' calamine engine (fastexcel), whose float reads it also makes itself
+# flatread.sheets: Excel sheets, through fastexcel (calamine)
 excel = ["fastexcel>=0.21", "polars[calamine]>=2.0"]
-pdf = ["pdfminer-six>=20260107"]  # flatread.pdf: a PDF's text in drawing order
 
 [project.urls]
 Repository = "https://github.com/kelsayed17/flatread"
@@ -54,7 +52,7 @@ asyncio_default_fixture_loop_scope = "session"
 [dependency-groups]
 # The tests and the gates in .github/workflows/ci.yml.
 dev = [
-    "flatread[excel,pdf]",  # the suite reads sheets and PDFs too
+    "flatread[excel]",  # the suite reads sheets too
     "pytest>=9.0.3",
     "pytest-asyncio>=0.24.0",  # asyncio_mode = "auto" above
     "pytest-cov>=7.1.0",
@@ -124,6 +122,8 @@ ban-relative-imports = "all"
 "__future__.annotations".msg = "Python 3.14 defers every annotation (PEP 649); the future import would stringify them again."
 
 [tool.ruff.lint.per-file-ignores]
+# The benchmark is a script over a prism-clients checkout: it prints a table, and its layouts are class settings.
+"benchmarks/**" = ["D1", "INP001", "RUF012", "T201", "S101", "PT018"]
 "tests/**" = [
     # Docstrings are required in src; a test's name says what it checks.
     "D1", "D205",
@@ -141,9 +141,13 @@ ban-relative-imports = "all"
     "DTZ001", "DTZ007",
     # A read float is compared exactly with the literal it was read from: equality is what is tested.
     "RUF069",
-    # A test collects a stream an item at a time, so the items before an error are kept.
-    "PERF401",
+    # A layout's settings are class attributes; flatread reads them, never mutates them.
+    "RUF012",
 ]
+
+[tool.ty.src]
+# The benchmark imports prism-clients' readers, which only its own checkout has.
+exclude = ["benchmarks"]
 
 [tool.ty.environment]
 python-version = "3.14"
@@ -167,22 +171,22 @@ known_first_party = ["flatread"]
 # tzdata is data zoneinfo reads on Windows (see [project.dependencies]), never imported.
 DEP002 = ["tzdata"]
 
-[tool.deptry.package_module_name_map]
-pdfminer-six = "pdfminer"
-stream-unzip = "stream_unzip"
 
 [tool.importlinter]
 root_packages = ["flatread"]
 
 [[tool.importlinter.contracts]]
-# flatread's modules in layers: a declared file over the frame, sheet, PDF and archive readers, over the cells and the
-# text, over the errors. A module imports only from the layers below it, and siblings (|) not from each other.
+# flatread's modules in layers: the utilities over the format bases, over the Layout base, over the shared core, over
+# cell typing and archives, over the errors. A module imports only from the layers below it, and siblings (|) not from
+# each other.
 name = "flatread is layered"
 type = "layers"
 layers = [
-    "flatread.delimited",
-    "flatread.frames | flatread.workbooks | flatread.pdf | flatread.archives",
-    "flatread.cells | flatread.text",
+    "flatread.check | flatread.scaffold",
+    "flatread.delimited | flatread.sheets | flatread.records | flatread.fixed",
+    "flatread.layout",
+    "flatread.core",
+    "flatread.cells | flatread.archives",
     "flatread.errors",
 ]
 
