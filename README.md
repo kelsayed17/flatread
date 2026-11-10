@@ -138,6 +138,13 @@ Every error is a `flatread.errors.ReadError`, a `ValueError`: `EmptyBodyError`, 
 `CellError` for one cell, with `.where`, `.label`, `.text`), `RaggedRowError`, `TruncatedFileError`,
 `ControlTotalError`, `CheckError`, `ErratumGoneError`, `NotPublishedError`, `CorruptArchiveError`, `EncodingError`.
 
+## From 1.0
+
+2.0 breaks three things 1.0 allowed:
+- **An empty body:** it raises `EmptyBodyError` even with `min_rows = 0`, which now only lets a file hold no rows.
+- **`final_line_ending = False`:** it now refuses a final line ending. `None` is the old "either".
+- **JSON text:** a text-read field must be a JSON string, and the records path must be a list, not null.
+
 ## From 0.4
 
 v1 replaces 0.4 outright, with no aliases.
@@ -159,7 +166,7 @@ The design and its reasons are in `docs/superpowers/specs/2026-11-09-flatread-v1
 ## Install
 
 ```
-uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v1.0.0"
+uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v2.0.0"
 ```
 
 Python 3.14; polars, msgspec, and fastexcel for sheets.
