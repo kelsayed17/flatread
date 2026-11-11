@@ -63,7 +63,7 @@ In prism-clients each dataset's constants are then `body_reader(FmhpiStates.fram
 |---|---|---|
 | `Csv`, `Pipe`, `Tsv` | delimited text | one `pl.read_csv` of the whole body, every cell text. A sentinel field on every line makes a short row show instead of being padded. A body where a quoted field spans lines (or that holds a `\x01` byte) reads through the stdlib `csv` module instead. Blank lines before the first row and after the last are framing; one between two rows raises (in a one-column table it is an empty cell). |
 | `Sheet` | a sheet of an xlsx or xls (the `excel` extra) | one fastexcel load, each column's type inferred from every cell, strictly. A column mixing kinds falls back to a text load plus a typed load; an erratum or a `cells` hook sees the typed cells as text. Floats keep every digit. An xlsx error cell (`#N/A`) in the table raises; in an xls it reads as empty, since fastexcel does not report it. A filled cell right of the header's last label raises. |
-| `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively, a number written as a string (`"1.25"`) included, and a text field must be a JSON string; a provider writing every value as a string with its own `"null"` reads in text mode, where any other JSON value raises. The records path must be present (an absent one is an error page); a `null` list holds no records. A key a record leaves out reads as null, where its field is `\| None`. `Json.page(body)` also returns the cursor at `next`. A UTF-8 byte-order mark is allowed. |
+| `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively, a number written as a string (`"1.25"`) included, and a text field must be a JSON string; a provider writing every value as a string with its own `"null"` reads in text mode, where any other JSON value raises. A key on the records path must be present (an absent one is an error page); a `null` anywhere on it holds no records. A key a record leaves out reads as null, where its field is `\| None`; an array record must be as long as the last position its labels name. `Json.page(body)` also returns the cursor at `next`. A UTF-8 byte-order mark is allowed. |
 | `FixedWidth` | fixed-width records | `str.slice` per column at the provider's 1-based positions; a line shorter than the last column raises. |
 
 Any layout can read a zip member: `member = "x.csv"`, a regex, or a callable.
@@ -102,8 +102,12 @@ a provider's defaults and is never read.
 empty cells; a long one still raises), `preamble` and `trailer` (each a
 `Line(pattern, carry={group: field}, count=group)`; a carried value is typed even when the file has no rows).
 `Sheet`: `sheet`, `header_row`, `columns` (`"A:G"`), `end` (`"blank_row"` or `"last_row"`), `footer` (a regex for
-notes after the table), `every_sheet` (`Sheets(name)`: every matching sheet into one table). `Json`: `records`
-(`"data"`, `"results[].bars"`, `""` for a list body), `envelope` (`{path: field}`), `next`. `FixedWidth`: `columns`
+notes after the table), `every_sheet` (`Sheets(name)`: every matching sheet into one table). `Json`: `records`, the path to the records, where `[]` walks a list's items and `{}` a map's values: a path
+ending in a walk reads each item (`"data[]"`, `"results[].bars[]"`, `"[]"` for a list body, `"bars{}[]"` for lists
+keyed by symbol), one ending in a key the one object there (`"entity.stats"`, `""` for the body). A label is a path
+from its record: `"bid"`, `"quote.bid"`, `"[0]"` in an array record; `"../x"` steps out to the item the walk before
+read, up to the body (`"../meta.as_of"`); `"{}"` is the key a map walk read the item by (`"../{}"` the parent's).
+`next` is the cursor's path from the body. `FixedWidth`: `columns`
 (`{field: (first, last)}`), `record`, `skip`, `final_line_ending`.
 
 A provider quirk outside these settings is a hook, written in plain polars, run only where a class overrides it:
@@ -141,6 +145,19 @@ package of layouts ignores it (`per-file-ignores = {"*/decoders.py" = ["RUF012"]
 Every error is a `flatread.errors.ReadError`, a `ValueError`: `EmptyBodyError`, `UnknownLayoutError` (and
 `CellError` for one cell, with `.where`, `.label`, `.text`), `RaggedRowError`, `TruncatedFileError`,
 `ControlTotalError`, `CheckError`, `ErratumGoneError`, `NotPublishedError`, `CorruptArchiveError`, `EncodingError`.
+
+## From 3.1
+
+4.0 gives JSON one path grammar, which breaks every `Json` layout:
+- **`records`:** a list is walked with `[]` at its end too: `"data"` is now `"data[]"`, `"results[].bars"` is
+  `"results[].bars[]"`, and a list body is `"[]"`. A path ending in a key (`"entity.stats"`, or `""`) now reads the one
+  object there.
+- **`envelope`** is gone: a label steps out to it, `envelope = {"meta.as_of": "as_of"}` becoming
+  `labels = {..., "../meta.as_of": "as_of"}`.
+- **A label naming no field** (`"x": None`) now checks its key is there, as it does in every other format.
+
+New: nested keys (`"quote.bid"`), array records (`"[0]"`), items above a record (`"../x"`), and map walks with their
+keys (`"{}"`).
 
 ## From 3.0
 
@@ -184,7 +201,7 @@ The design and its reasons are in `docs/superpowers/specs/2026-11-09-flatread-v1
 ## Install
 
 ```
-uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v3.1.0"
+uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v4.0.0"
 ```
 
 Python 3.14; polars, msgspec, and fastexcel for sheets.

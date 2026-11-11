@@ -22,7 +22,7 @@ class Bar(msgspec.Struct, frozen=True):
 
 class Bars(Json):
     row = Bar
-    records = "data"
+    records = "data[]"
     labels = {"sym": "sym", "px": "px"}
     min_rows = 0
 
@@ -44,7 +44,7 @@ def test_an_absent_records_list_is_an_error_page() -> None:
 
 def test_a_null_list_on_the_way_down_holds_no_records() -> None:
     class Nested(Bars):
-        records = "results[].bars"
+        records = "results[].bars[]"
 
     body = b'{"results": [{"bars": null}, {"bars": [{"sym": "A", "px": 1}]}, null]}'
     assert Nested.frame(body).rows() == [("A", 1.0)]
@@ -52,7 +52,7 @@ def test_a_null_list_on_the_way_down_holds_no_records() -> None:
 
 def test_a_null_list_body_is_no_records() -> None:
     class Listed(Bars):
-        records = ""
+        records = "[]"
 
     assert Listed.frame(b"null").height == 0
 

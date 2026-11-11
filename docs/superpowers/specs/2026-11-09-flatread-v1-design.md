@@ -177,8 +177,9 @@ its signature, not its URL, so an xls served as `.xlsx` reads (NY Fed GSCPI). Ho
 - a `date`/`datetime` field over date cells: loaded natively; over text cells, typed by `dates`; a column of numbers
   styled as dates (Atlanta's serials) declares `dates = {field: flatread.EXCEL_SERIAL}`.
 
-**`Json`**: `records` (a path: `"data"`, `"results[].bars[]"`; `[]` walks a list), `envelope` (paths to scalars
-copied onto every row), `next` (the path of the page cursor, read by
+**`Json`**: `records` (a path: `"data[]"`, `"results[].bars[]"`, `"bars{}[]"`; `[]` walks a list, `{}` a map's
+values, and a path ending in a key reads one object), labels as paths from the record (`"quote.bid"`, `"[0]"`,
+`"../meta.as_of"`, `"{}"` for a map key; 4.0 replaced `envelope` with `../`), `next` (the path of the page cursor, read by
 `Layout.page(body) -> (frame, cursor | None)`, see "Paging").
 
 Cut by the three-provider rule (each stays a hook in its one or two clients until a third needs it): thousands

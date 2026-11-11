@@ -17,7 +17,7 @@ class Bar(msgspec.Struct, frozen=True):
 
 class Bars(Json):
     row = Bar
-    records = "results[].bars"
+    records = "results[].bars[]"
     labels = {"S": "symbol", "t": "t", "c": "close", "v": "volume"}
     dates = {"t": "%Y-%m-%dT%H:%M:%SZ"}
 
@@ -40,7 +40,7 @@ def test_records_at_a_nested_path() -> None:
 
 def test_a_top_level_list() -> None:
     class Flat(Bars):
-        records = ""
+        records = "[]"
 
     assert Flat.frame(b'[{"S": "A", "t": "2026-11-09T14:30:00Z", "c": 1, "v": 2}]').height == 1
 
@@ -51,12 +51,11 @@ class Quote(msgspec.Struct, frozen=True):
     as_of: dt.date
 
 
-def test_envelope_values_fill_every_row() -> None:
+def test_a_label_stepping_out_to_the_body_fills_every_row() -> None:
     class Quotes(Json):
         row = Quote
-        records = "data"
-        labels = {"sym": "symbol", "px": "price"}
-        envelope = {"meta.as_of": "as_of"}
+        records = "data[]"
+        labels = {"sym": "symbol", "px": "price", "../meta.as_of": "as_of"}
 
     body = b'{"meta": {"as_of": "2026-11-09"}, "data": [{"sym": "A", "px": 1.5}, {"sym": "B", "px": 2}]}'
     assert Quotes.frame(body)["as_of"].to_list() == [dt.date(2026, 11, 9)] * 2
@@ -70,7 +69,7 @@ class Debt(msgspec.Struct, frozen=True):
 
 class TreasuryDebt(Json):
     row = Debt
-    records = "data"
+    records = "data[]"
     labels = {"record_date": "record_date", "debt_held": "amount", "src_line_nbr": "count"}
     missing = frozenset({"", "null"})
 

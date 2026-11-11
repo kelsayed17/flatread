@@ -107,7 +107,7 @@ class Bar(msgspec.Struct, frozen=True):
 
 class BarsJson(flatread.Json):
     row = Bar
-    records = "data"
+    records = "data[]"
     labels = {"s": "symbol", "c": "close", "v": "volume", "a": "amount"}
 
 
