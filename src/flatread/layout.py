@@ -116,7 +116,7 @@ class Layout:
             cls._plan = cls._compile(cls.row)
 
     @classmethod
-    def _truths(cls) -> tuple[tuple[str, bool], ...]:
+    def _cell_settings(cls) -> tuple[tuple[str, bool], ...]:
         """Check the settings of how a cell's text reads (booleans, patterns, time zone); return the booleans."""
         truths = tuple(cls.booleans.items())
         if {value for _, value in truths} != {True, False} or len({t.lower() for t, _ in truths}) < len(truths):
@@ -137,7 +137,7 @@ class Layout:
     @classmethod
     def _compile(cls, row: type[msgspec.Struct]) -> Plan:
         """Check the settings against *row* and return the plan they make."""
-        truths = cls._truths()
+        truths = cls._cell_settings()
         fields = fields_of(
             row,
             missing=frozenset(cls.missing),

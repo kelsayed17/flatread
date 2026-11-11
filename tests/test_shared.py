@@ -206,6 +206,17 @@ def test_epoch_seconds_read_in_a_csv() -> None:
         Seconds.frame(b"T\n1.5\n")
 
 
+@pytest.mark.parametrize("value", [1793599200000123456, 9_300_000_000_000_000, -(10**18)])
+def test_an_epoch_past_the_years_a_datetime_holds_is_a_cell_error(value: int) -> None:
+    class Stamps(Json):  # a nanosecond time read as milliseconds is year 137,123; a larger one overflows polars
+        row = Stamp
+        labels = {"t": "at"}
+        dates = {"at": EPOCH_MS}
+
+    with pytest.raises(CellError, match="record 1"):
+        Stamps.frame(f'[{{"t": {value}}}]'.encode())
+
+
 class OccDays(Json):
     row = Day
     labels = {"d": "day"}

@@ -79,8 +79,19 @@ YEAR_MONTH: Final = DateFormat("a month written 2026-09", r"^\d{4}-\d{2}$", _yea
 EXCEL_SERIAL: Final = DateFormat("an Excel day number", r"^\d+$", _excel_serial)
 
 
+#: The seconds since 1970 of years 1 and 10000: the range a Python datetime holds.
+_EPOCH_RANGE: Final = (-62_135_596_800, 253_402_300_800)
+
+
 def _epoch(unit: Literal["s", "ms"]) -> Callable[[pl.Expr], pl.Expr]:
-    return lambda text: pl.from_epoch(text.str.to_integer(strict=False), time_unit=unit).cast(pl.Datetime("us"))
+    scale = 1000 if unit == "ms" else 1
+
+    def read(text: pl.Expr) -> pl.Expr:
+        number = text.str.to_integer(strict=False)
+        held = number.is_between(_EPOCH_RANGE[0] * scale, _EPOCH_RANGE[1] * scale, closed="left")
+        return pl.from_epoch(pl.when(held).then(number), time_unit=unit).cast(pl.Datetime("us"))  # no overflow
+
+    return read
 
 
 #: Whole milliseconds since 1970-01-01 UTC, as a JSON number or text (OCC, Yahoo).
