@@ -79,10 +79,12 @@ class Csv(Layout):
     encoding: ClassVar[str] = "utf-8"
     preamble: ClassVar[Line | None] = None
     trailer: ClassVar[Line | None] = None
+    #: Read a row short of the header's width as ending in empty cells (Cboe, Atlanta Fed); a long row still raises.
+    pad_short_rows: ClassVar[bool] = False
 
     _SETTINGS: ClassVar[frozenset[str]] = Layout._SETTINGS | {  # noqa: SLF001  # a base extends its parent's
         "separator", "quoted", "header", "skip_lines", "header_line", "trailing_separator", "final_line_ending",
-        "encoding", "preamble", "trailer",
+        "encoding", "preamble", "trailer", "pad_short_rows",
     }  # fmt: skip
 
     @classmethod
@@ -269,6 +271,8 @@ class Csv(Layout):
                     msg = f"line {start} is blank, inside the table: a row of {len(names)} fields"
                     raise RaggedRowError(msg)
                 record = read or [""]  # a one-column row whose only value is empty
+                if cls.pad_short_rows and len(record) < len(names):  # the fast path refused it: polars pads silently
+                    record += [""] * (len(names) - len(record))
                 if len(record) != len(names):
                     wide, want = len(record) - cls.trailing_separator, len(names) - cls.trailing_separator
                     msg = f"line {start} has {wide} fields, not the header's {want}"

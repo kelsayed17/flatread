@@ -26,6 +26,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
 __all__ = [
+    "EPOCH_MS",
+    "EPOCH_S",
     "EXCEL_SERIAL",
     "QUARTER",
     "YEAR_MONTH",
@@ -46,6 +48,9 @@ class DateFormat:
     pattern: str
     #: The cell's text (matching *pattern*) to its date; null where it is no real date.
     to_date: Callable[[pl.Expr], pl.Expr]
+    #: Whether *to_date* returns an instant, a naive UTC datetime, read in the layout's ``time_zone``: a date field
+    #: takes the day it is midnight of, a datetime field the time.
+    instant: bool = False
 
 
 def _quarter(text: pl.Expr) -> pl.Expr:
@@ -72,6 +77,19 @@ QUARTER: Final = DateFormat("a quarter written 2024Q1", r"^\d{4}:?Q[1-4]$", _qua
 YEAR_MONTH: Final = DateFormat("a month written 2026-09", r"^\d{4}-\d{2}$", _year_month)
 #: Excel's day number, whole days after 1899-12-30, as a sheet's number cell styled as a date holds it.
 EXCEL_SERIAL: Final = DateFormat("an Excel day number", r"^\d+$", _excel_serial)
+
+
+def _epoch(unit: Literal["s", "ms"]) -> Callable[[pl.Expr], pl.Expr]:
+    return lambda text: pl.from_epoch(text.str.to_integer(strict=False), time_unit=unit).cast(pl.Datetime("us"))
+
+
+#: Whole milliseconds since 1970-01-01 UTC, as a JSON number or text (OCC, Yahoo).
+EPOCH_MS: Final = DateFormat("milliseconds since 1970", r"^-?\d+$", _epoch("ms"), instant=True)
+#: Whole seconds since 1970-01-01 UTC.
+EPOCH_S: Final = DateFormat("seconds since 1970", r"^-?\d+$", _epoch("s"), instant=True)
+
+#: The texts a bool field reads by default, compared in lower case.
+TRUTHS: Final = (("true", True), ("false", False))
 
 #: The default of a mapping setting: read-only, so no call can change another's.
 _EMPTY: Final[Mapping[str, Any]] = MappingProxyType({})
@@ -121,15 +139,28 @@ class Field:
     formats: tuple[Format, ...]
     nonfinite: bool
     strip: bool
+    #: A bool field's texts, each with its value; a cell matches one in any case.
+    truths: tuple[tuple[str, bool], ...] = TRUTHS
+    #: A regex the cell's text matches whole, before it is read.
+    pattern: str | None = None
+    #: The zone a datetime field is read in and carries; ``None`` for naive datetimes (an offset read as UTC).
+    zone: str | None = None
 
     @property
     def expected(self) -> str:
         """What a cell of the field must be, for an error."""
+        return self._expected + (f", matching the pattern {self.pattern!r}" if self.pattern is not None else "")
+
+    @property
+    def _expected(self) -> str:
         if isinstance(self.kind, tuple):
             return f"one of {list(self.kind)!r}"
         if self.kind in _WHEN:
             shapes = [f.name if isinstance(f, DateFormat) else f for f in self.formats]
-            return f"a {_WHEN[self.kind][1]} written {' or '.join(shapes)}"
+            zone = f" in {self.zone}" if self.zone is not None else ""
+            return f"a {_WHEN[self.kind][1]} written {' or '.join(shapes)}{zone}"
+        if self.kind is bool and self.truths != TRUTHS:
+            return "one of " + " or ".join(repr(text) for text, _ in self.truths)
         return _EXPECTED[self.kind]
 
 
@@ -167,11 +198,14 @@ def fields_of(  # noqa: PLR0913  # the struct, then each setting a field's readi
     missing_by_field: Mapping[str, frozenset[str]] = _EMPTY,
     dates: Mapping[str, Format | tuple[Format, ...]] = _EMPTY,
     nonfinite: bool = False,
-    strip: bool = False,
+    strip: bool | frozenset[str] = False,
+    truths: tuple[tuple[str, bool], ...] = TRUTHS,
+    patterns: Mapping[str, str] = _EMPTY,
+    zone: str | None = None,
 ) -> tuple[Field, ...]:
     """Compile *row*'s fields in order; a type no cell reads into raises :class:`TypeError`."""
     by_field, formats_of = missing_by_field, dates
-    for name in (*by_field, *formats_of):
+    for name in (*by_field, *formats_of, *patterns, *(() if isinstance(strip, bool) else strip)):
         if name not in row.__struct_fields__:
             msg = f"{row.__name__} has no field {name!r}"
             raise TypeError(msg)
@@ -191,6 +225,9 @@ def fields_of(  # noqa: PLR0913  # the struct, then each setting a field's readi
         if given is not None and kind not in _WHEN:
             msg = f"{row.__name__}.{field.name} has a date format but is not a date"
             raise TypeError(msg)
+        if kind is dt.time and any(isinstance(f, DateFormat) and f.instant for f in formats):
+            msg = f"{row.__name__}.{field.name} is a time of day, which no instant is"
+            raise TypeError(msg)
         if not formats and isinstance(kind, type) and kind in _WHEN:
             formats = _WHEN[kind][0]
         fields.append(
@@ -201,7 +238,10 @@ def fields_of(  # noqa: PLR0913  # the struct, then each setting a field's readi
                 missing | by_field.get(field.name, frozenset()),
                 formats,
                 nonfinite,
-                strip,
+                strip if isinstance(strip, bool) else field.name in strip,
+                truths,
+                patterns.get(field.name),
+                zone,
             )
         )
     return tuple(fields)
@@ -216,11 +256,27 @@ def _no_trailing_zeros(text: pl.Expr) -> pl.Expr:
     return text.str.replace(r"(\.\d*?)0*$", "${1}").str.replace(r"\.$", "")
 
 
+def _instant(utc: pl.Expr, field: Field) -> pl.Expr:
+    """Return a naive UTC datetime as *field* reads it: in its zone, or the day it is midnight of there."""
+    local = utc.dt.replace_time_zone("UTC").dt.convert_time_zone(field.zone or "UTC")
+    if field.kind is dt.date:
+        return pl.when(local.dt.time() == dt.time()).then(local.dt.date())
+    return local if field.zone is not None else utc
+
+
+def _local(parsed: pl.Expr, field: Field) -> pl.Expr:
+    """Return a wall-clock datetime in *field*'s zone; null where the zone skips or repeats that time."""
+    if field.zone is None or field.kind is not dt.datetime:
+        return parsed
+    return parsed.dt.replace_time_zone(field.zone, ambiguous="null", non_existent="null")
+
+
 def _date_read(text: pl.Expr, field: Field) -> pl.Expr:
     reads = []
     for fmt in field.formats:
         if isinstance(fmt, DateFormat):
-            reads.append(pl.when(text.str.contains(fmt.pattern)).then(fmt.to_date(text)))
+            read = _instant(fmt.to_date(text), field) if fmt.instant else _local(fmt.to_date(text), field)
+            reads.append(pl.when(text.str.contains(fmt.pattern)).then(read))
             continue
         if field.kind is dt.date:
             parsed = text.str.to_date(fmt, strict=False)
@@ -229,14 +285,14 @@ def _date_read(text: pl.Expr, field: Field) -> pl.Expr:
         else:
             parsed = text.str.to_datetime(fmt, strict=False, time_unit="us")
         if "%z" in fmt or "%:z" in fmt:  # an offset reads as its UTC time; the written offset cannot be written back
-            reads.append(parsed.dt.convert_time_zone("UTC").dt.replace_time_zone(None))
+            reads.append(_instant(parsed.dt.convert_time_zone("UTC").dt.replace_time_zone(None), field))
             continue
         written, cell = parsed.dt.strftime(fmt), text
         if any(name in fmt for name in ("%b", "%B", "%a", "%A", "%p")):  # SEP, Sep and sep are one month
             written, cell = written.str.to_lowercase(), cell.str.to_lowercase()
         if "%.f" in fmt:  # a fraction reads with however many digits it has: 00.0, 00.000000 and 00 are one time
             written, cell = _no_trailing_zeros(written), _no_trailing_zeros(cell)
-        reads.append(pl.when(written == cell).then(parsed))
+        reads.append(pl.when(written == cell).then(_local(parsed, field)))
     return pl.coalesce(reads) if len(reads) > 1 else reads[0]
 
 
@@ -261,7 +317,7 @@ def _text_read(text: pl.Expr, field: Field, scale: int) -> pl.Expr:  # noqa: PLR
         return pl.when(exact).then(number)
     if kind is bool:
         return text.str.to_lowercase().replace_strict(
-            {"true": True, "false": False}, default=None, return_dtype=pl.Boolean
+            {t.lower(): v for t, v in field.truths}, default=None, return_dtype=pl.Boolean
         )
     return _date_read(text, field)
 
@@ -282,12 +338,13 @@ def _native_read(  # noqa: PLR0911  # one return per native kind
     if field.kind is dt.date and isinstance(dtype, pl.Datetime):  # a sheet's date cell: a midnight datetime
         midnight = column.dt.time() == dt.time()
         return pl.when(midnight).then(column.dt.date()), column.is_not_null() & ~midnight
-    natives: dict[object, pl.DataType] = {bool: pl.Boolean(), dt.date: pl.Date()}
+    natives: dict[object, pl.DataType] = {bool: pl.Boolean(), dt.date: pl.Date()}  # a sheet's TRUE is a bool
     native = natives.get(field.kind)
     if native is not None and dtype == native:
         return column, pl.lit(value=False)
     if field.kind is dt.datetime and isinstance(dtype, pl.Datetime):
-        return column.cast(pl.Datetime("us")), pl.lit(value=False)
+        value = _local(column.cast(pl.Datetime("us")), field)
+        return value, column.is_not_null() & value.is_null()
     return None  # read as its text: a number into a str, Decimal or serial date, or a type it is not
 
 
@@ -307,7 +364,7 @@ def type_frame(text: pl.DataFrame, fields: Sequence[Field]) -> tuple[pl.DataFram
     bads: list[pl.Expr] = []
     for field in fields:
         column, dtype = pl.col(field.name), text.schema[field.name]
-        native = None if dtype == pl.String else _native_read(column, dtype, field)
+        native = None if dtype == pl.String or field.pattern is not None else _native_read(column, dtype, field)
         if native is not None:
             value, bad = native
             missing = column.is_null()
@@ -320,6 +377,8 @@ def type_frame(text: pl.DataFrame, fields: Sequence[Field]) -> tuple[pl.DataFram
                 scale = _decimal_scale(text.select(cell).to_series())
             missing = cell.is_null() | cell.is_in(list(field.missing))
             value = _text_read(cell, field, scale)
+            if field.pattern is not None:
+                value = pl.when(cell.str.contains(rf"\A(?:{field.pattern})\z")).then(value)
             bad = ~missing & value.is_null()
             value = pl.when(~missing).then(value)
         if not field.nullable:

@@ -7,6 +7,7 @@ does no set-up work. ``frame`` and ``rows`` are classmethods, so they pass strai
 """
 
 import re
+import zoneinfo
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from types import MappingProxyType
@@ -16,7 +17,7 @@ import polars as pl
 
 from flatread import core
 from flatread.archives import Member, read_member
-from flatread.cells import Format, fields_of
+from flatread.cells import TRUTHS, Format, fields_of
 from flatread.core import Erratum, Long, Plan, Text
 from flatread.errors import EmptyBodyError, ReadError
 
@@ -34,6 +35,7 @@ _REFUSAL_WINDOW: Final = 64 * 1024
 _NO_TOKENS: Final[Mapping[str, AbstractSet[str]]] = MappingProxyType[str, AbstractSet[str]]({})
 _NO_DATES: Final[Mapping[str, Format | tuple[Format, ...]]] = MappingProxyType[str, Format | tuple[Format, ...]]({})
 _NO_REFUSALS: Final[Mapping[bytes, type[ReadError]]] = MappingProxyType[bytes, type[ReadError]]({})
+_NO_PATTERNS: Final[Mapping[str, str]] = MappingProxyType[str, str]({})
 
 
 def _pairs(labels: Labels) -> tuple[tuple[str, str | None], ...]:
@@ -66,8 +68,14 @@ class Layout:
     missing: ClassVar[AbstractSet[str]] = frozenset({""})
     #: Extra missing tokens for one field.
     missing_by_field: ClassVar[Mapping[str, AbstractSet[str]]] = _NO_TOKENS
-    #: Take whitespace off both ends of every text cell first.
-    strip: ClassVar[bool] = False
+    #: Take whitespace off both ends of every text cell first, or of the named fields' cells.
+    strip: ClassVar[bool | AbstractSet[str]] = False
+    #: The texts a bool field reads, each to its value, compared in any case.
+    booleans: ClassVar[Mapping[str, bool]] = MappingProxyType(dict(TRUTHS))
+    #: Field to a regex its text cells match whole, before they are read.
+    patterns: ClassVar[Mapping[str, str]] = _NO_PATTERNS
+    #: The IANA zone the provider writes its times in: datetime fields carry it, an instant reads in it.
+    time_zone: ClassVar[str | None] = None
     #: Field to ``strftime`` format, a named format, or a tuple of them.
     dates: ClassVar[Mapping[str, Format | tuple[Format, ...]]] = _NO_DATES
     #: Whether a float field admits NaN and infinities.
@@ -91,8 +99,8 @@ class Layout:
 
     #: The setting names a class may set; a format base adds its own.
     _SETTINGS: ClassVar[frozenset[str]] = frozenset({
-        "row", "labels", "variants", "missing", "missing_by_field", "strip", "dates", "nonfinite", "long",
-        "headings", "errata", "refusals", "min_rows", "key", "where", "member",
+        "row", "labels", "variants", "missing", "missing_by_field", "strip", "booleans", "patterns", "time_zone",
+        "dates", "nonfinite", "long", "headings", "errata", "refusals", "min_rows", "key", "where", "member",
     })  # fmt: skip
     _plan: ClassVar[Plan]
 
@@ -108,15 +116,38 @@ class Layout:
             cls._plan = cls._compile(cls.row)
 
     @classmethod
+    def _truths(cls) -> tuple[tuple[str, bool], ...]:
+        """Check the settings of how a cell's text reads (booleans, patterns, time zone); return the booleans."""
+        truths = tuple(cls.booleans.items())
+        if {value for _, value in truths} != {True, False} or len({t.lower() for t, _ in truths}) < len(truths):
+            msg = (
+                f"{cls.__name__}: booleans {dict(cls.booleans)!r} must name true and false, each text once in any case"
+            )
+            raise TypeError(msg)
+        for field, pattern in cls.patterns.items():
+            _compiles(pattern, f"{cls.__name__}.patterns[{field!r}]")
+        if cls.time_zone is not None:
+            try:
+                zoneinfo.ZoneInfo(cls.time_zone)
+            except (zoneinfo.ZoneInfoNotFoundError, ValueError) as exc:
+                msg = f"{cls.__name__}: no time zone {cls.time_zone!r}"
+                raise TypeError(msg) from exc
+        return truths
+
+    @classmethod
     def _compile(cls, row: type[msgspec.Struct]) -> Plan:
         """Check the settings against *row* and return the plan they make."""
+        truths = cls._truths()
         fields = fields_of(
             row,
             missing=frozenset(cls.missing),
             missing_by_field={k: frozenset(v) for k, v in cls.missing_by_field.items()},
             dates=cls.dates,
             nonfinite=cls.nonfinite,
-            strip=cls.strip,
+            strip=cls.strip if isinstance(cls.strip, bool) else frozenset(cls.strip),
+            truths=truths,
+            patterns=cls.patterns,
+            zone=cls.time_zone,
         )
         names = set(row.__struct_fields__)
         label_sets = tuple(_pairs(labels) for labels in (cls._labels(), *cls.variants))
