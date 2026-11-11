@@ -202,28 +202,27 @@ def test_json_settings_are_checked() -> None:
             labels = {"amt": "amount"}
             variants = ({"amount": "amount"},)
 
-    with pytest.raises(TypeError, match="no envelope"):
+    with pytest.raises(TypeError, match="both"):  # a body that is a list has no cursor
 
         class Bare(Json):
             row = Amount
-            labels = {"amt": "amount"}
-            envelope = {"as_of": "as_of"}
+            labels = {"amt": "amount", "d": "as_of"}
+            next = "next"
 
     class NoCursor(Json):
         row = Amount
-        records = "data"
+        records = "data[]"
         labels = {"amt": "amount", "d": "as_of"}
 
     with pytest.raises(TypeError, match="no next cursor"):
         NoCursor.page(b'{"data": []}')
 
 
-def test_a_json_number_keeps_its_decimal_digits_and_an_absent_envelope_is_none() -> None:
+def test_a_json_number_keeps_its_decimal_digits_and_an_absent_body_key_is_none() -> None:
     class Amounts(Json):
         row = Amount
-        records = "data"
-        labels = {"amt": "amount"}
-        envelope = {"meta.as_of": "as_of"}
+        records = "data[]"
+        labels = {"amt": "amount", "../meta.as_of": "as_of"}
 
     frame = Amounts.frame(b'{"data": [{"amt": 0.1000000000000000055511151231257827}]}')
     assert frame["amount"][0] == Decimal("0.1000000000000000055511151231257827")

@@ -37,7 +37,7 @@ def test_a_pipe_and_a_json_sample_scaffold() -> None:
     pipe = scaffold(b"Symbol|Shares\nAAPL|100\n", format="pipe", name="Holdings")
     assert run(pipe)["Holdings"].frame(b"Symbol|Shares\nAAPL|100\n").row(0) == ("AAPL", 100)  # ty: ignore[unresolved-attribute]
     body = b'{"data": [{"sym": "A", "px": 1.5, "n": 3}, {"sym": "B", "px": null, "n": 4}]}'
-    source = scaffold(body, format="json", name="Quotes", records="data")
+    source = scaffold(body, format="json", name="Quotes", records="data[]")
     assert run(source)["Quotes"].frame(body).rows() == [("A", 1.5, 3), ("B", None, 4)]  # ty: ignore[unresolved-attribute]
 
 

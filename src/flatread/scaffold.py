@@ -13,6 +13,8 @@ from typing import Any, Final, Literal
 import msgspec
 import polars as pl
 
+from flatread.records import _records_steps  # the one parse of a records path
+
 __all__ = ["field_names", "scaffold"]
 
 type Format = Literal["csv", "pipe", "tsv", "sheet", "json"]
@@ -74,10 +76,13 @@ def _text(body: bytes, fmt: Format, sheet: str | None, records: str | None) -> p
         reader = fastexcel.read_excel(body)
         return reader.load_sheet(sheet or 0, dtypes="string").to_polars()
     if fmt == "json":
-        value: Any = msgspec.json.decode(body)
-        for key in records.split(".") if records is not None and records != "" else []:
-            value = value[key.removesuffix("[]")]
-        rows: list[dict[str, Any]] = value
+        rows: list[Any] = [msgspec.json.decode(body)]
+        for kind, step in _records_steps("[]" if records is None else records, "the sample"):
+            if kind == "key":
+                rows = [row[step] for row in rows if row is not None]
+            else:
+                rows = [x for row in rows if row is not None for x in (row if step == "[]" else row.values())]
+        rows = [row for row in rows if isinstance(row, dict)]
         labels = list(dict.fromkeys(k for row in rows for k in row))
         return pl.DataFrame(
             {
@@ -135,5 +140,5 @@ def scaffold(
     if format == "sheet" and sheet is not None:
         lines.append(f"    sheet = {sheet!r}")
     if format == "json":
-        lines.append(f"    records = {records or ''!r}")
+        lines.append(f"    records = {'[]' if records is None else records!r}")
     return "\n".join(lines).replace("'", '"') + "\n"

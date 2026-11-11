@@ -72,7 +72,7 @@ class Note(msgspec.Struct, frozen=True):
 
 class Notes(Json):
     row = Note
-    records = "data"
+    records = "data[]"
     labels = {"code": "code", "amount": "amount"}
     missing = frozenset({"", "null"})  # text mode: every value a string, as Treasury writes them
     min_rows = 0

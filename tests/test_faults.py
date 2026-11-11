@@ -120,7 +120,7 @@ class Amount(msgspec.Struct, frozen=True):
 
 class Paged(Json):
     row = Amount
-    records = "data"
+    records = "data[]"
     labels = {"n": "n"}
     next = "next"
     min_rows = 0
