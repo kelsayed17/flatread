@@ -8,7 +8,9 @@ The decode is **native** where it can be: a number field decodes as a JSON numbe
 writes its numbers as strings with its own missing token (Treasury: every value a string, ``"null"`` for none) is read
 in **text** mode instead: each field decodes as its JSON scalar and is typed from its text by the shared core. A key
 the layout does not name is ignored: a JSON record names its values, so an added key cannot shift the others, as an
-added column in a CSV does. A missing key is an error unless its field is ``| None``.
+added column in a CSV does. A missing key is an error unless its field is ``| None``, since a provider may leave
+out a key that has no value (Socrata, Cboe, SEC, Yahoo). A records list that is absent is an error page; a ``null``
+one holds no records, and ``min_rows`` judges a table of none.
 """
 
 import codecs
@@ -20,6 +22,7 @@ import msgspec
 import polars as pl
 
 from flatread import core
+from flatread.cells import TRUTHS, DateFormat
 from flatread.core import Plan, Text, column_names
 from flatread.errors import UnknownLayoutError
 from flatread.layout import Layout
@@ -81,7 +84,7 @@ class Json(Layout):
         )
         envelope = [path.split(".") for path in (*cls.envelope, *((cls.next,) if cls.next is not None else ()))]
         body: object = (
-            list[record] if not cls.records else _level(cls.__name__, 0, envelope, _path(cls.records), record)  # ty: ignore[invalid-type-form]
+            list[record] | None if not cls.records else _level(cls.__name__, 0, envelope, _path(cls.records), record)  # ty: ignore[invalid-type-form]
         )
         cls._decoder = msgspec.json.Decoder(body, strict=False)  # a number written as a string ("1.25") reads too
         return plan
@@ -91,7 +94,9 @@ class Json(Layout):
     @classmethod
     def _decode_type(cls, field: Field) -> object:
         """Return the type a field's JSON value decodes as: its own where native, else a string typed by the core."""
-        if cls._native and field.kind in _NATIVE:
+        if any(isinstance(f, DateFormat) and f.instant for f in field.formats):
+            return _INT64 | str | None  # an epoch written as a number or as text
+        if cls._native and field.kind in _NATIVE and (field.kind is not bool or field.truths == TRUTHS):
             return _NATIVE[field.kind] | None  # ty: ignore[unsupported-operator]
         return _Text
 
@@ -118,12 +123,12 @@ class Json(Layout):
     def _records(cls, decoded: Any) -> list[Any]:  # noqa: ANN401  # the struct flatread built for this layout
         """Return every record down the records path, in order."""
         if not cls.records:
-            return decoded
+            return decoded or []
         level = [decoded]
         *head, (last, _) = _path(cls.records)
         for key, walks in head:
             children = [_get(node, key) for node in level]
-            level = [x for c in children if c is not None for x in (c if walks else [c])]
+            level = [x for c in children if c is not None for x in (c if walks else [c]) if x is not None]
         return [record for node in level if (found := _get(node, last)) is not None for record in found]
 
     @classmethod
@@ -135,7 +140,7 @@ class Json(Layout):
         columns = []
         for name, (_, f), column in zip(column_names([lb for lb, _ in cls._pairs]), cls._pairs, values, strict=True):
             kind = fields[f].kind
-            if cls._native and kind in _COLUMN:
+            if kind in _COLUMN and cls._decode_type(fields[f]) is not _Text:
                 columns.append(pl.Series(name, column, dtype=_COLUMN[kind]))
             elif cls._native and kind is Decimal:  # a Decimal's exact digits, typed by the core
                 columns.append(pl.Series(name, [None if v is None else str(v) for v in column], dtype=pl.String))
@@ -191,10 +196,10 @@ def _level(name: str, depth: int, envelope: list[list[str]], records: list[tuple
             keys[key] = (_level(name, depth + 1, paths, [], record), False)
     if records:
         if len(records) == 1:
-            keys[head] = (list[record], True)  # ty: ignore[invalid-type-form]
-        else:  # the records path is required and not null: a body without it is an error page, not an empty one
+            keys[head] = (list[record] | None, True)  # ty: ignore[invalid-type-form]
+        else:  # the records path is required, but null: a body without it is an error page, a null one has none
             inner = _level(name, depth + 1, below.get(head, []), records[1:], record)
-            keys[head] = (list[inner] if walks else inner, True)  # ty: ignore[invalid-type-form]
+            keys[head] = (list[inner | None] | None if walks else inner | None, True)  # ty: ignore[invalid-type-form]
     return _struct(f"{name}Level{depth}", keys)
 
 

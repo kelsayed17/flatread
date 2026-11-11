@@ -78,11 +78,6 @@ class Notes(Json):
     min_rows = 0
 
 
-def test_a_null_records_list_raises() -> None:
-    with pytest.raises(UnknownLayoutError, match="data"):
-        Notes.frame(b'{"data": null}')
-
-
 @pytest.mark.parametrize("record", [b'{"code": true, "amount": "1"}', b'{"code": "A", "amount": 1.5}'])
 def test_text_mode_refuses_a_value_that_is_not_a_string(record: bytes) -> None:
     with pytest.raises(UnknownLayoutError, match="str"):

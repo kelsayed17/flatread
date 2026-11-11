@@ -8,14 +8,15 @@ naming its line, its label and its text.
 * :class:`Csv`, :class:`Pipe`, :class:`Tsv`: delimited text; :class:`Line` a preamble's or trailer's line.
 * :class:`Sheet` and :class:`Sheets`: Excel sheets (the ``excel`` extra).
 * :class:`Json`: records in a JSON body; :class:`FixedWidth`: fixed-width text.
-* :class:`Long`, :class:`Erratum`; the date formats :data:`QUARTER`, :data:`YEAR_MONTH`, :data:`EXCEL_SERIAL`.
+* :class:`Long`, :class:`Erratum`; the date formats :data:`QUARTER`, :data:`YEAR_MONTH`, :data:`EXCEL_SERIAL`,
+  :data:`EPOCH_MS`, :data:`EPOCH_S`.
 * :func:`report`, :func:`diff`; :func:`unzip`. The errors are in :mod:`flatread.errors`.
 """
 
 from typing import TYPE_CHECKING
 
 from flatread.archives import unzip
-from flatread.cells import EXCEL_SERIAL, QUARTER, YEAR_MONTH
+from flatread.cells import EPOCH_MS, EPOCH_S, EXCEL_SERIAL, QUARTER, YEAR_MONTH
 from flatread.check import diff, report
 from flatread.core import Erratum, Long
 from flatread.delimited import Csv, Line, Pipe, Tsv
@@ -27,6 +28,8 @@ if TYPE_CHECKING:
     from flatread.sheets import Sheet, Sheets
 
 __all__ = [
+    "EPOCH_MS",
+    "EPOCH_S",
     "EXCEL_SERIAL",
     "QUARTER",
     "YEAR_MONTH",

@@ -1,6 +1,6 @@
 [project]
 name = "flatread"
-version = "3.0.0"
+version = "3.1.0"
 description = "Declare a provider's table once as a class; read its body on one native polars path, exactly, or fail loudly."
 readme = "README.md"
 license = "MIT"

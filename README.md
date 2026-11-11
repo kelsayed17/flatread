@@ -63,7 +63,7 @@ In prism-clients each dataset's constants are then `body_reader(FmhpiStates.fram
 |---|---|---|
 | `Csv`, `Pipe`, `Tsv` | delimited text | one `pl.read_csv` of the whole body, every cell text. A sentinel field on every line makes a short row show instead of being padded. A body where a quoted field spans lines (or that holds a `\x01` byte) reads through the stdlib `csv` module instead. Blank lines before the first row and after the last are framing; one between two rows raises (in a one-column table it is an empty cell). |
 | `Sheet` | a sheet of an xlsx or xls (the `excel` extra) | one fastexcel load, each column's type inferred from every cell, strictly. A column mixing kinds falls back to a text load plus a typed load; an erratum or a `cells` hook sees the typed cells as text. Floats keep every digit. An xlsx error cell (`#N/A`) in the table raises; in an xls it reads as empty, since fastexcel does not report it. A filled cell right of the header's last label raises. |
-| `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively, a number written as a string (`"1.25"`) included, and a text field must be a JSON string; a provider writing every value as a string with its own `"null"` reads in text mode, where any other JSON value raises. The records path must be present and a list. `Json.page(body)` also returns the cursor at `next`. A UTF-8 byte-order mark is allowed. |
+| `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively, a number written as a string (`"1.25"`) included, and a text field must be a JSON string; a provider writing every value as a string with its own `"null"` reads in text mode, where any other JSON value raises. The records path must be present (an absent one is an error page); a `null` list holds no records. A key a record leaves out reads as null, where its field is `\| None`. `Json.page(body)` also returns the cursor at `next`. A UTF-8 byte-order mark is allowed. |
 | `FixedWidth` | fixed-width records | `str.slice` per column at the provider's 1-based positions; a line shorter than the last column raises. |
 
 Any layout can read a zip member: `member = "x.csv"`, a regex, or a callable.
@@ -82,8 +82,11 @@ a provider's defaults and is never read.
 | `variants` | `()` | other whole label maps, tried in order (a header that changed on a date); any label set may leave a `\| None` field out, which then reads as null |
 | `missing` | `{""}` | tokens for no value; a field that is not `\| None` refuses them |
 | `missing_by_field` | `{}` | extra tokens for one field |
-| `strip` | `False` | take whitespace off every text cell first |
-| `dates` | `{}` | field → `strftime` format, a tuple of them, or `flatread.QUARTER` / `YEAR_MONTH` / `EXCEL_SERIAL`; checked by writing the value back. A date, datetime or time with none reads ISO. A month or day name reads in any case (`SEP`, `Sep`), `%.f` takes any number of fraction digits, and an offset (`%z`) reads as its UTC time |
+| `strip` | `False` | take whitespace off every text cell first; a set of fields strips only theirs |
+| `booleans` | `{"true": True, "false": False}` | a bool field's texts, matched in any case: `{"Y": True, "N": False}` |
+| `patterns` | `{}` | field → a regex its text must match whole before it is read (a CUSIP, a ticker) |
+| `time_zone` | `None` | the IANA zone the provider writes its times in: datetime fields carry it, a wall-clock time the zone skips or repeats is a cell error, an offset or epoch converts to it, and an epoch date is the day it is midnight of there |
+| `dates` | `{}` | field → `strftime` format, a tuple of them, or `flatread.QUARTER` / `YEAR_MONTH` / `EXCEL_SERIAL` / `EPOCH_MS` / `EPOCH_S` (a JSON number or text); checked by writing the value back. A date, datetime or time with none reads ISO. A month or day name reads in any case (`SEP`, `Sep`), `%.f` takes any number of fraction digits, and an offset (`%z`) reads as its UTC time (in `time_zone` when set) |
 | `nonfinite` | `False` | admit NaN and infinities in float fields |
 | `long` | `None` | `Long(value=, names=, name=None, drop_missing=False)`: melt every column `labels` does not name into `value`; each label must match the regex `names` whole, its named groups fill those fields, and `name` takes the whole label; a missing melted cell is the value field's missing value (an error unless it is `\| None`), or no row with `drop_missing=True` |
 | `headings` | `None` | the field a group heading above the header fills, for a long table |
@@ -95,7 +98,8 @@ a provider's defaults and is never read.
 | `member` | `None` | the zip member this table is |
 
 `Csv`: `separator`, `quoted`, `header`, `skip_lines`, `header_line` (a regex the header line matches), `trailing_separator`,
-`final_line_ending` (`True` required, `False` refused, `None` either), `encoding`, `preamble` and `trailer` (each a
+`final_line_ending` (`True` required, `False` refused, `None` either), `encoding`, `pad_short_rows` (a short row ends in
+empty cells; a long one still raises), `preamble` and `trailer` (each a
 `Line(pattern, carry={group: field}, count=group)`; a carried value is typed even when the file has no rows).
 `Sheet`: `sheet`, `header_row`, `columns` (`"A:G"`), `end` (`"blank_row"` or `"last_row"`), `footer` (a regex for
 notes after the table), `every_sheet` (`Sheets(name)`: every matching sheet into one table). `Json`: `records`
@@ -138,6 +142,12 @@ Every error is a `flatread.errors.ReadError`, a `ValueError`: `EmptyBodyError`, 
 `CellError` for one cell, with `.where`, `.label`, `.text`), `RaggedRowError`, `TruncatedFileError`,
 `ControlTotalError`, `CheckError`, `ErratumGoneError`, `NotPublishedError`, `CorruptArchiveError`, `EncodingError`.
 
+## From 3.0
+
+3.1 adds settings and changes one rule: a `null` JSON records list now holds no records, where 3.0 raised;
+`min_rows` (1 by default) still refuses a table of none. New: `booleans`, `patterns`, `time_zone`, `strip` by field,
+`pad_short_rows`, and the `EPOCH_MS` / `EPOCH_S` date formats.
+
 ## From 2.0
 
 3.0 makes two cases strict that 2.0 let through:
@@ -174,7 +184,7 @@ The design and its reasons are in `docs/superpowers/specs/2026-11-09-flatread-v1
 ## Install
 
 ```
-uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v3.0.0"
+uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v3.1.0"
 ```
 
 Python 3.14; polars, msgspec, and fastexcel for sheets.
