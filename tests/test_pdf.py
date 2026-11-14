@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Annotated
 import msgspec
 import pytest
 
+from flatread.errors import LayoutError, ReadError
 from flatread.fields import Format
 from flatread.pdf import LaidOutPdf, PdfFile, PdfLine, text_layer
 from tests.support.pdf import document, pdf
@@ -53,7 +54,7 @@ def test_the_lines_are_each_page_s_in_drawn_order_with_their_positions() -> None
 
 
 def test_a_cell_that_is_not_its_type_raises() -> None:
-    with pytest.raises(ValueError, match=r"'shares' cell 'many' is not a whole number: row 1"):
+    with pytest.raises(ReadError, match=r"'shares' cell 'many' is not a whole number: row 1"):
         _TRADES.frame(pdf(["ACME many 01/15/2024"]))
 
 
@@ -63,7 +64,7 @@ def test_a_record_of_another_width_raises() -> None:
         def _records(self, lines: Sequence[PdfLine]) -> list[list[str | None]]:
             return [[line.text] for line in lines]
 
-    with pytest.raises(ValueError, match=r"^record 1 has 1 cells, not 4$"):
+    with pytest.raises(LayoutError, match=r"^record 1 has 1 cells, not 4$"):
         _Short(_Trade).frame(pdf(["ACME"]))
 
 
@@ -77,7 +78,7 @@ def test_a_pdf_of_no_records_raises_unless_the_format_reads_none() -> None:
     class _MaybeEmpty(_Empty):
         _rows_required = False
 
-    with pytest.raises(ValueError, match="the body is a header and no rows"):
+    with pytest.raises(ReadError, match="the body is a header and no rows"):
         _Empty(_Trade).frame(pdf(["a title"]))
     assert _MaybeEmpty(_Trade).rows(pdf(["a title"])) == []
 
@@ -93,9 +94,9 @@ def test_a_pdf_of_no_records_raises_unless_the_format_reads_none() -> None:
     ids=["empty", "not-a-pdf", "cut", "no-text-layer"],
 )
 def test_a_body_with_no_readable_text_layer_raises(body: bytes, error: str) -> None:
-    with pytest.raises(ValueError, match=error):
+    with pytest.raises(ReadError, match=error):
         text_layer(body)
-    with pytest.raises(ValueError, match=error):
+    with pytest.raises(ReadError, match=error):
         _TRADES.frame(body)
 
 

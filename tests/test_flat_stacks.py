@@ -15,7 +15,7 @@ import msgspec
 import pytest
 
 from flatread.archives import Transcoded, ZippedFile
-from flatread.core import Carried, Thousands, _Column
+from flatread.core import Carried, Column, Thousands
 from flatread.delimited import (
     CsvFile,
     HeadersCsv,
@@ -25,6 +25,7 @@ from flatread.delimited import (
     SectionedCsv,
     SpilledCsv,
 )
+from flatread.errors import LayoutError, ReadError
 from flatread.fields import Format, Label, Span
 from flatread.fixed import FixedWidthFile
 from flatread.found import FoundCsv
@@ -81,12 +82,12 @@ class TestALongDatedSheet:
 
     def test_a_cell_beside_the_notes_is_a_row_the_table_lost(self) -> None:
         body = workbook({"S": [["Date", "East"], [_D1, 1], ["Notes"], ["late", 2]]})
-        with pytest.raises(ValueError, match=r"'S' sheet's row 4 holds a cell under its table"):
+        with pytest.raises(ReadError, match=r"'S' sheet's row 4 holds a cell under its table"):
             _REGIONAL.rows(body)
 
     def test_dates_with_no_value_yet_are_an_empty_answer_but_a_bare_header_is_refused(self) -> None:
         assert _REGIONAL.rows(workbook({"S": [["Date", "East"], [_D1, None]]})) == []
-        with pytest.raises(ValueError, match="the body is a header and no rows"):
+        with pytest.raises(ReadError, match="the body is a header and no rows"):
             _REGIONAL.rows(workbook({"S": [["Date", "East"], ["Notes"]]}))
 
 
@@ -136,11 +137,11 @@ class TestAZippedLongPreambleCsv:
         ]
 
     def test_the_line_ending_check_is_the_members_not_the_zips(self) -> None:
-        with pytest.raises(ValueError, match="always ends its last line with a line ending: it was cut"):
+        with pytest.raises(ReadError, match="always ends its last line with a line ending: it was cut"):
             _ZippedLong(_Series).rows(_zip(**{"data.csv": _WIDE.removesuffix(b"\n")}))
 
     def test_a_member_with_no_header_below_its_preamble_raises(self) -> None:
-        with pytest.raises(ValueError, match="no line opens with the header's first label 'Series Description'"):
+        with pytest.raises(ReadError, match="no line opens with the header's first label 'Series Description'"):
             _ZippedLong(_Series).rows(_zip(**{"data.csv": b"title\nA,B\n"}))
 
 
@@ -188,7 +189,7 @@ class _Amount(msgspec.Struct, frozen=True, gc=False):
 class _Amounts(Thousands[_Amount], LongReport[_Amount]):
     """A block of years over each holder's amounts, grouped in thousands, read long."""
 
-    _key = "year"
+    _key_field = "year"
     _line = re.compile(r"(?P<holder>[A-Z][a-z]+) +(?P<value>[-0-9., ]+?) *")
     _framing = (re.compile(r"HOLDER +(?P<year>\S.*?) *"),)
 
@@ -209,7 +210,7 @@ class TestAThousandsLongReport:
         ]
 
     def test_a_cell_grouped_otherwise_raises_naming_its_row(self) -> None:
-        with pytest.raises(ValueError, match=r"the 'value' cell '12,00' is not a number grouped in thousands: row 2"):
+        with pytest.raises(ReadError, match=r"the 'value' cell '12,00' is not a number grouped in thousands: row 2"):
             _Amounts(_Amount).rows(_AMOUNTS.replace(b"  12\n", b"  12,00\n"))
 
 
@@ -255,7 +256,7 @@ class TestACarriedBesideSheet:
 
     def test_a_first_row_without_its_group_is_refused_as_an_empty_cell(self) -> None:
         body = workbook({"S": [[None, "Asset Class", "Product", "Level"], [None, None, "2Y", 1]]})
-        with pytest.raises(ValueError, match=r"\['asset_class'\] columns have an empty cell.*row 2"):
+        with pytest.raises(ReadError, match=r"\['Asset Class'\] columns have an empty cell.*row 2"):
             _Factors(_Factor, sheet="S").rows(body)
 
 
@@ -283,7 +284,7 @@ class _Wpsr(LongFile[_Stub], Thousands[_Stub], Transcoded[_Stub], SectionedCsv[_
     _keys = re.compile(r"(?!STUB_)\s*(?P<heading>.*?)\s*", re.DOTALL)
 
     @typing.override
-    def _clean(self, cells: pl.Series, column: _Column) -> pl.Series:
+    def _clean(self, cells: pl.Series, column: Column) -> pl.Series:
         return super()._clean(cells.str.strip_chars(), column)
 
 
@@ -311,9 +312,9 @@ class TestAWpsrStack:
         assert _wpsr(1).rows(_WPSR) == [_Stub("Total", 1, "Year", 5.0)]
 
     def test_the_body_is_decoded_before_its_tables_are_found(self) -> None:
-        with pytest.raises(ValueError, match="the body is not cp1252"):
+        with pytest.raises(ReadError, match="the body is not cp1252"):
             _wpsr(0).rows(_WPSR.replace(b"7", b"\x81"))
-        with pytest.raises(ValueError, match=r"the body has 1 tables"):
+        with pytest.raises(ReadError, match=r"the body has 1 tables"):
             _wpsr(0).rows(_WPSR.split(b'"STUB_1","Year"')[0])
 
 
@@ -327,12 +328,12 @@ class _Row(msgspec.Struct, frozen=True, gc=False):
 
 
 class _Headed(HeadersCsv[_Row]):
-    _headers = (("NAME", "VALUE", "NOTE"),)
+    """Published under its struct's whole header alone, the default."""
 
 
 class TestACsvsRefusals:
     def test_a_body_opening_with_a_blank_line_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="the body opens with a blank line, not its header"):
+        with pytest.raises(ReadError, match="the body opens with a blank line, not its header"):
             CsvFile(_Row).rows(b"\nNAME,VALUE,NOTE\na,1,x\n")
 
     @pytest.mark.xfail(
@@ -345,7 +346,7 @@ class TestACsvsRefusals:
         assert reader(_Row, null_values=("n,a",)).rows(b'NAME,VALUE,NOTE\na,"n,a",x\n') == [_Row("a", None, "x")]
 
     def test_a_quoted_cell_that_never_closes_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="a quoted cell does not close: unexpected end of data"):
+        with pytest.raises(ReadError, match="a quoted cell does not close: unexpected end of data"):
             CsvFile(_Row).rows(b'NAME,VALUE,NOTE\na,1,"x\n')
 
     def test_a_spilled_body_holding_every_carrier_is_refused(self) -> None:
@@ -353,7 +354,7 @@ class TestACsvsRefusals:
             _quote_char = None
             _spilled = "note"
 
-        with pytest.raises(ValueError, match="holds every character this reader carries the separator in"):
+        with pytest.raises(ReadError, match="holds every character this reader carries the separator in"):
             Spilled(_Row).rows(b"NAME,VALUE,NOTE\na,1,\x1f\x1e\x1d\x1c\n")
 
 
@@ -366,7 +367,7 @@ class TestAFixedWidthFilesRefusals:
         class Headless(FixedWidthFile[_Code]):
             _header = False
 
-        with pytest.raises(ValueError, match="the body is not UTF-8"):
+        with pytest.raises(ReadError, match="the body is not UTF-8"):
             Headless(_Code).rows(b"ab\xff\n")
 
     def test_a_format_whose_table_states_other_fields_is_a_bug(self) -> None:
@@ -377,7 +378,7 @@ class TestAFixedWidthFilesRefusals:
             def _table(self, lines: pl.Series) -> tuple[pl.Series, dict[str, str]]:
                 return lines, {"as_of": "x"}
 
-        with pytest.raises(ValueError, match=r"the format states \['as_of'\], not the fields \[\]"):
+        with pytest.raises(LayoutError, match=r"the format states \['as_of'\], not the fields \[\]"):
             Stating(_Code).rows(b"abc\n")
 
 
@@ -387,7 +388,7 @@ class TestAFoundTablesLayout:
             year: Annotated[int, Label("year")]
             kind: Annotated[str, Label("type", alternatives=("year",))]
 
-        with pytest.raises(ValueError, match="two fields of Twice share a label"):
+        with pytest.raises(LayoutError, match="two fields of Twice share a label"):
             FoundCsv(Twice, key="year")
 
 

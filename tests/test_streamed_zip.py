@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, override
 import pytest
 
 from flatread.archives import StreamedZip
+from flatread.errors import ReadError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -30,13 +31,33 @@ class _Unseekable(io.BytesIO):
     def seekable(self) -> bool:
         return False
 
+    @override
+    def tell(self) -> int:
+        raise io.UnsupportedOperation  # zipfile asks tell(), not seekable(), whether it may seek back
+
+    @override
+    def seek(self, offset: int, whence: int = 0) -> int:
+        raise io.UnsupportedOperation
+
 
 def _zip(*members: tuple[str, bytes, int], described: bool = False) -> bytes:
+    """Zip *members*; *described*, into a stream zipfile cannot seek back in, so each has a data descriptor after it.
+
+    A deflated member is streamed (``open(..., "w")``) so its header states no sizes, only its descriptor does.
+    """
     out = _Unseekable() if described else io.BytesIO()
     with zipfile.ZipFile(out, "w") as archive:
         for name, data, method in members:
-            archive.writestr(name, data, compress_type=method)
-    return out.getvalue()
+            if described and method == _D:  # streamed: its header states no sizes
+                info = zipfile.ZipInfo(name)
+                info.compress_type = _D
+                with archive.open(info, "w") as member:
+                    member.write(data)
+            else:
+                archive.writestr(name, data, compress_type=method)
+    body = out.getvalue()
+    assert not described or b"PK\x07\x08" in body  # the helper wrote the descriptors its tests read
+    return body
 
 
 async def _chunks(body: bytes, size: int) -> AsyncIterator[bytes]:
@@ -53,13 +74,23 @@ _TEXT = b"a,b\n1,2\n" * 50
 _D, _S = zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED
 
 
-@pytest.mark.parametrize("described", [False, True], ids=["sized", "described"])
-@pytest.mark.parametrize("method", [_D, _S], ids=["deflated", "stored"])
+@pytest.mark.parametrize(
+    ("method", "described"),
+    [(_D, False), (_S, False), (_D, True)],
+    ids=["deflated", "stored", "deflated with descriptors"],
+)
 async def test_the_member_is_found_past_the_members_before_it(method: int, *, described: bool) -> None:
+    skipped = _D if described else _S  # a stored member streamed has no size before its data: see below
     body = _zip(
-        ("a.txt", b"skip" * 99, _S), ("b.txt", b"skip" * 99, _D), ("dir/x.csv", _TEXT, method), described=described
+        ("a.txt", b"skip" * 99, skipped), ("b.txt", b"skip" * 99, _D), ("dir/x.csv", _TEXT, method), described=described
     )
     assert await _read(body) == _TEXT
+
+
+async def test_a_stored_member_with_a_descriptor_is_refused() -> None:
+    """Its size is only in the descriptor after its data, which a forward read cannot find the end of."""
+    with pytest.raises(ReadError, match=r"^the zip's 'a\.txt' is compressed by method 0, which is not read$"):
+        await _read(_zip(("a.txt", b"skip", _S), ("x.csv", _TEXT, _D), described=True))
 
 
 async def test_a_descriptor_without_its_signature_reads() -> None:
@@ -123,5 +154,5 @@ def _damaged(body: bytes, at: int, value: bytes) -> bytes:
     ],
 )
 async def test_a_zip_that_is_not_the_member_raises(body: bytes, zip_: StreamedZip | None, says: str) -> None:
-    with pytest.raises(ValueError, match=says):
+    with pytest.raises(ReadError, match=says):
         await _read(body, zip_)
