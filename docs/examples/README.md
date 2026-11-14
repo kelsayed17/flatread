@@ -121,11 +121,11 @@ Date,VIX Put/Call Ratio,VIX Put Volume,VIX Call Volume,Total VIX Options Volume
 2/27/2006,0.01,71,6996,7067
 ```
 
-### `NamedCsv._required_labels`
+### `NamedCsv._required_fields`
 
-[`named_csv-carried.csv`](named_csv-carried.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[sfos_202601].yaml`, interaction 0. Read by [`NamedCsv._required_labels`](../../src/flatread/delimited.py), in federal_reserve `_Sfos`.
+[`named_csv-carried.csv`](named_csv-carried.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[sfos_202601].yaml`, interaction 0. Read by [`NamedCsv._required_fields`](../../src/flatread/delimited.py), in federal_reserve `_Sfos`.
 
-The January 2026 survey's header is only the seven carried labels; `agg_desc_2`, `agg_desc_3`, `dom` and `fore` are missing, so they read as null.
+The January 2026 survey's header is only the seven columns every header names; `agg_desc_2`, `agg_desc_3`, `dom` and `fore` are missing, so they read as null.
 
 ```
 survey_date,question_no,question_desc,response_option,agg_type,agg_desc_1,all

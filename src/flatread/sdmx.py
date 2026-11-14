@@ -104,9 +104,8 @@ class SdmxCsv[RowT: msgspec.Struct](HeadersCsv[RowT]):
         if _OBS_VALUE.lower() not in row.__struct_fields__:
             msg = f"{row.__name__} has no obs_value field, which every SDMX-CSV holds"
             raise LayoutError(msg)
-        labels = tuple(name.upper() for name in row.__struct_fields__)
         # Without ACTION, where the struct ends with it: a file writes it only at times.
-        self._headers = {labels, labels[:-1]} if row.__struct_fields__[-1] == _ACTION else {labels}
+        self._headers_lacking = ((), (_ACTION,)) if row.__struct_fields__[-1] == _ACTION else ((),)
         super().__init__(row, final_line_ending=True)
 
     @typing.override

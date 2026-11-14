@@ -328,7 +328,7 @@ class _Row(msgspec.Struct, frozen=True, gc=False):
 
 
 class _Headed(HeadersCsv[_Row]):
-    _headers = (("NAME", "VALUE", "NOTE"),)
+    """Published under its struct's whole header alone, the default."""
 
 
 class TestACsvsRefusals:

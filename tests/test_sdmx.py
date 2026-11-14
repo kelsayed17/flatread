@@ -62,7 +62,7 @@ def test_an_obs_value_sdmx_does_not_write_raises(value: bytes) -> None:
     ("body", "message"),
     [
         (_HEADER + b"\r\nK,D,1,1.5,A", r"cut"),
-        (b"KEY,FREQ,TIME_PERIOD,OBS_VALUE\r\nK,D,1,1.5\r\n", r"is none of the 2 the _Flow file has had"),
+        (b"KEY,FREQ,TIME_PERIOD,OBS_VALUE\r\nK,D,1,1.5\r\n", r"is none of the _Flow file's"),
     ],
 )
 def test_a_cut_body_or_another_header_raises(body: bytes, message: str) -> None:

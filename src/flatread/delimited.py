@@ -10,12 +10,13 @@
   ``final_line_ending``. A format whose file writes no header (OCC's day's directory) sets ``_header`` false: every
   line is a row, its cells the fields by position, which need no ``Label``.
 * :class:`HeadersCsv`, a file published under more than one header (EIA's BALANCE files, ECB's ``ACTION``): a body's
-  header must be one of ``_headers``, and a field it lacks reads as null.
+  header must be one of ``_headers_lacking``, each the struct's labels without some fields', which read as null.
 * :class:`TrailerCsv`, a file whose last line is a trailer (FINRA's record count, Nasdaq's time stamp): it must match
   ``_trailer``, a ``count`` group must be the rows read, and a group named for a field is that field on every row
   (the Reg SHO lists' ``generated_at``).
 * :class:`NamedCsv`, a file whose header names its columns, any of its struct's labels in any order (SEC's data sets,
-  whose quarters carry more columns or fewer): a field it lacks reads as null. A ``Label``'s *alternatives* are other
+  whose quarters carry more columns or fewer): a field it lacks reads as null, but for one that holds a value on every
+  row (or is one of ``_required_fields``), whose column every header names. A ``Label``'s *alternatives* are other
   words a year's header writes it in.
 * :class:`TitledCsv`, a file whose header sits below title lines (Nasdaq's title and issue count, IBKR's ``#BOF``):
   each must match its regex in ``_titles``, and a ``count`` group must be the rows read.
@@ -321,14 +322,19 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
 
 
 class HeadersCsv[RowT: msgspec.Struct](CsvFile[RowT]):
-    """A clean file published under more than one header: a field a body's header lacks reads as null.
+    """A clean file published under more than one header, each the struct's labels in order, some left out.
 
-    A format subclasses it and names its headers, :attr:`_headers`, each a run of its struct's labels; one whose headers
-    are not a short list overrides :meth:`_check_header` instead (Treasury's rates: ``Date``, then that year's columns).
+    A format names every header the file has been published with in :attr:`_headers_lacking`, each by the fields it
+    lacks: ``((), ("shares",))`` is the struct's whole header and the one without ``shares``'s column. A body's header
+    must be one of them, and a field it lacks reads as null, so each such field admits ``None`` (or has a default). A
+    column the format reads but no field holds (:attr:`File._unread`, :attr:`File._blank_columns`) may stand anywhere
+    in any of them. A format whose headers follow a rule rather than a list overrides :meth:`_check_header` instead
+    (Treasury's rates: ``Date``, then that year's columns); a file whose header may name its columns in any order is a
+    :class:`NamedCsv`.
     """
 
-    #: The headers the file has been published with; a format's subclass (or its constructor, ECB's) sets them.
-    _headers: Collection[tuple[str, ...]] = ()
+    #: The headers the file has been published with, each by the fields it lacks; ``()`` is the struct's whole header.
+    _headers_lacking: Collection[Collection[str]] = ((),)
 
     def __init__(
         self,
@@ -338,16 +344,41 @@ class HeadersCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         final_line_ending: bool | None = None,
         separator: str = ",",
     ) -> None:
-        """Lay out a file of *row* (see :class:`CsvFile`); refuse a header naming a label no field has."""
+        """Lay out a file of *row* (see :class:`CsvFile`), published under each header of :attr:`_headers_lacking`.
+
+        Raises :class:`~flatread.errors.LayoutError` for a lacked field that is none of *row*'s columns, or one that
+        holds a value on every row, which a header without its column could never give it.
+        """
         super().__init__(row, null_values=null_values, final_line_ending=final_line_ending, separator=separator)
-        if stray := {label for header in self._headers for label in header} - self._names.keys():
-            msg = f"the headers name {sorted(stray)}, which no field of {row.__name__} labels"
+        lacked = {field for lacking in self._headers_lacking for field in lacking}
+        if stray := lacked - {column.field for column in self._columns}:
+            msg = f"the headers lack {sorted(stray)}, which are no fields of {row.__name__} read from a column"
             raise LayoutError(msg)
+        if held := lacked & set(self._required):
+            msg = f"a header lacking {sorted(held)} could never be read: each holds a value on every row"
+            raise LayoutError(msg)
+        if not self._headers_lacking:
+            msg = f"the {row.__name__} file is published under no header: _headers_lacking is empty"
+            raise LayoutError(msg)
+
+    def _published_headers(self) -> list[tuple[str, ...]]:
+        """Return each header of :attr:`_headers_lacking` as its labels, in the struct's order.
+
+        Built when a body is read: a piece composed with this one may take a field out of the table after it is laid
+        out (a trailer's stated field, :class:`TrailerCsv`).
+        """
+        read = [
+            (column.field, column.label)
+            for name, column in zip(self._names, self._columns, strict=False)
+            if name in self._schema
+        ]
+        return [tuple(label for field, label in read if field not in lacking) for lacking in self._headers_lacking]
 
     def _check_header(self, header: list[str]) -> None:
         """Refuse a *header* that is none of the file's: a column it lacks reads as null, so any column could go."""
-        if tuple(header) not in self._headers:
-            msg = f"the header {header!r} is none of the {len(self._headers)} the {self._row.__name__} file has had"
+        unread = {*self._unread, *self._blank_columns}
+        if tuple(label for label in header if label not in unread) not in (headers := self._published_headers()):
+            msg = f"the header {header!r} is none of the {self._row.__name__} file's {[list(h) for h in headers]}"
             raise ReadError(msg)
 
     @typing.override
@@ -383,15 +414,18 @@ class HeadersCsv[RowT: msgspec.Struct](CsvFile[RowT]):
 class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     """A clean file whose header names its columns: any of its struct's labels, in any order, each once.
 
-    A field the header lacks reads as null, and a label it writes that no field has raises. A field's ``Label`` may
-    name *alternatives*, other words a header writes it in (``Label("file_number", alternatives=("file_no",))``). A
-    format subclasses it and names :attr:`_required_labels`, the labels every header names, and a format whose headers
-    write its labels another way folds each header cell with :meth:`_heading` (SEC's, in any case).
+    A label it writes that no field has raises. Every header names the column of each field that holds a value on
+    every row (one that admits no ``None`` and has no default); a field that may be empty may be left out of the
+    header too, and then reads as null, unless the format names it in :attr:`_required_fields`: its column is in every
+    header, though its cells may be empty. A field's ``Label`` may name *alternatives*, other words a header writes it
+    in (``Label("file_number", alternatives=("file_no",))``), and a format whose headers write its labels another way
+    folds each header cell with :meth:`_heading` (SEC's, in any case).
     """
 
     _by_name = True
-    #: The labels every header names, each a field's own label; a format's subclass (or its constructor) sets them.
-    _required_labels: Collection[str] = ()
+    #: The fields that may be empty whose column every header still names; a field that holds a value on every row
+    #: needs no listing. A format's subclass (or its constructor) sets them.
+    _required_fields: Collection[str] = ()
 
     def __init__(
         self,
@@ -401,16 +435,18 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         final_line_ending: bool | None = None,
         separator: str = ",",
     ) -> None:
-        """Lay out a file of *row* (see :class:`CsvFile`); refuse a label two fields share or a carried one none has."""
+        """Lay out a file of *row* (see :class:`CsvFile`); refuse a label two fields share or a stray required field."""
         super().__init__(row, null_values=null_values, final_line_ending=final_line_ending, separator=separator)
         words = [(word, column.label) for column in self._columns for word in (column.label, *column.aliases)]
         self._labeled = dict(words)
         if len(self._labeled) != len(words):
             msg = f"two fields of {row.__name__} share a label: {sorted(word for word, _ in words)}"
             raise LayoutError(msg)
-        if stray := set(self._required_labels) - self._names.keys():
-            msg = f"the required labels {sorted(stray)} are no field of {row.__name__}'s labels"
+        if stray := set(self._required_fields) - {column.field for column in self._columns}:
+            msg = f"the required fields {sorted(stray)} are no fields of {row.__name__} read from a column"
             raise LayoutError(msg)
+        required = {*self._required, *self._required_fields} - {self._numbered}
+        self._required_columns = [column.label for column in self._columns if column.field in required]
 
     def _heading(self, cell: str) -> str:
         """Return the label a header *cell* writes: the cell, unless a format folds its headers' wording."""
@@ -433,7 +469,9 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         if len(set(named.values())) != len(header):
             msg = f"the header {header!r} names a column twice"
             raise ReadError(msg)
-        if missing := [label for label in self._required_labels if label not in named.values()]:
+        # A field a piece states (a trailer's) is no column of the header: it is out of the schema by now.
+        required = [label for label in self._required_columns if label in self._schema]
+        if missing := [label for label in required if label not in named.values()]:
             msg = f"the header {header!r} lacks {missing}, which every one names"
             raise ReadError(msg)
         self._check(body)

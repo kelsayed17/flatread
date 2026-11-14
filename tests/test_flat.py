@@ -335,7 +335,7 @@ class TestACsvFile:
 
 
 class _Published(HeadersCsv[_Row]):
-    _headers = (("NAME", "VALUE"), ("NOTE", "NAME"), ("VALUE", "NOTE"))
+    _headers_lacking = ((), ("note",), ("value",))
 
 
 class TestTheReadCsvOptions:
@@ -351,7 +351,8 @@ class TestTheReadCsvOptions:
     def test_a_column_a_published_header_leaves_out_reads_as_nulls(self) -> None:
         flat = _Published(_Row)
         assert flat.rows(b"NAME,VALUE\na,1.5\n") == [_Row("a", 1.5, None)]
-        assert flat.frame(b"NOTE,NAME\nx,a\n").columns == ["name", "value", "note"]
+        assert flat.frame(b"NAME,NOTE\na,x\n").rows() == [("a", None, "x")]
+        assert flat.rows(b"NAME,VALUE,NOTE\na,1.5,x\n") == [_Row("a", 1.5, "x")]
 
     @pytest.mark.parametrize(
         ("body", "message"),
@@ -367,21 +368,40 @@ class TestTheReadCsvOptions:
         with pytest.raises(ReadError, match=message):
             _Published(_Row).rows(body)
 
-    def test_a_header_the_file_was_never_published_with_raises(self) -> None:
-        flat = _Published(_Row)
-        with pytest.raises(ReadError, match=r"the header \['NAME', 'NOTE'\] is none of the 3 the _Row file has had"):
-            flat.rows(b"NAME,NOTE\na,x\n")
+    @pytest.mark.parametrize(
+        "body",
+        [b"NAME\na\n", b"VALUE,NAME\n1.5,a\n", b"NAME,NOTE,VALUE\na,x,1.5\n"],
+        ids=["two columns lacking", "reordered", "reordered whole"],
+    )
+    def test_a_header_the_file_was_never_published_with_raises(self, body: bytes) -> None:
+        published = r"\[\['NAME', 'VALUE', 'NOTE'\], \['NAME', 'VALUE'\], \['NAME', 'NOTE'\]\]$"
+        with pytest.raises(ReadError, match=r"^the header \[.*\] is none of the _Row file's " + published):
+            _Published(_Row).rows(body)
 
-    def test_a_required_column_a_published_header_leaves_out_raises(self) -> None:
-        flat = _Published(_Row)
-        with pytest.raises(ReadError, match=r"the \['name'\] columns have an empty cell, a short row or no column"):
-            flat.rows(b"VALUE,NOTE\n1.5,x\n")
+    def test_the_whole_header_is_read_only_where_it_was_published(self) -> None:
+        class Older(HeadersCsv[_Row]):
+            _headers_lacking = (("note",),)
 
-    def test_a_header_naming_a_label_no_field_has_is_a_layout_bug(self) -> None:
+        assert Older(_Row).rows(b"NAME,VALUE\na,1.5\n") == [_Row("a", 1.5, None)]
+        with pytest.raises(ReadError, match=r"is none of the _Row file's \[\['NAME', 'VALUE'\]\]$"):
+            Older(_Row).rows(b"NAME,VALUE,NOTE\na,1.5,x\n")
+
+    @pytest.mark.parametrize(
+        ("lacking", "message"),
+        [
+            ((("rate",),), r"^the headers lack \['rate'\], which are no fields of _Row read from a column$"),
+            ((("name",),), r"^a header lacking \['name'\] could never be read: each holds a value on every row$"),
+            ((), r"^the _Row file is published under no header: _headers_lacking is empty$"),
+        ],
+        ids=["no such field", "a field that holds a value on every row", "no header"],
+    )
+    def test_a_header_that_could_not_be_read_is_a_layout_bug(
+        self, lacking: tuple[tuple[str, ...], ...], message: str
+    ) -> None:
         class Misheaded(HeadersCsv[_Row]):
-            _headers = (("NAME", "RATE"),)
+            _headers_lacking = lacking
 
-        with pytest.raises(LayoutError, match=r"the headers name \['RATE'\], which no field of _Row labels"):
+        with pytest.raises(LayoutError, match=message):
             Misheaded(_Row)
 
     def test_a_column_the_file_leaves_out_raises_by_default(self) -> None:
@@ -396,7 +416,7 @@ class _Renamed(msgspec.Struct, frozen=True, gc=False):
 
 
 class _Named(NamedCsv[_Renamed]):
-    _required_labels = ("NAME",)
+    """A header naming ``name``'s column, a value on every row, and any of the others."""
 
 
 class _Folded(_Named):
@@ -434,7 +454,7 @@ class TestANamedCsv:
             "an unknown label",
             "a label and its alternative",
             "a label twice",
-            "no carried label",
+            "no column of a field every row holds",
             "a long row",
             "a short row",
             "a header not UTF-8",
@@ -450,12 +470,22 @@ class TestANamedCsv:
             note: Annotated[str, Label("NOTE")]
 
         class Stray(NamedCsv[_Renamed]):
-            _required_labels = ("RATE",)
+            _required_fields = ("rate",)
 
         with pytest.raises(LayoutError, match=r"^two fields of Shared share a label"):
             NamedCsv(Shared)
-        with pytest.raises(LayoutError, match=r"^the required labels \['RATE'\] are no field of _Renamed's labels$"):
+        with pytest.raises(LayoutError, match=r"^the required fields \['rate'\] are no fields of _Renamed read from"):
             Stray(_Renamed)
+
+    def test_a_required_field_s_column_is_in_every_header_though_its_cells_may_be_empty(self) -> None:
+        class Valued(NamedCsv[_Renamed]):
+            _required_fields = ("value",)
+
+        assert Valued(_Renamed).rows(b"NAME,VALUE\na,\n") == [_Renamed("a", None, None)]
+        with pytest.raises(
+            ReadError, match=r"^the header \['NAME', 'NOTE'\] lacks \['VALUE'\], which every one names$"
+        ):
+            Valued(_Renamed).rows(b"NAME,NOTE\na,x\n")
 
     def test_a_reader_that_does_not_read_a_header_by_name_refuses_alternatives(self) -> None:
         with pytest.raises(LayoutError, match=r"^the field 'name' names Label alternatives, which only a header read"):
@@ -719,7 +749,7 @@ class _StampedRows(TrailerCsv[_Generated]):
 
 
 class _Both(_Counted, HeadersCsv[_Row]):
-    _headers = (("NAME", "VALUE", "NOTE"), ("NAME", "VALUE"))
+    _headers_lacking = ((), ("note",))
 
 
 class TestATrailerCsv:
@@ -790,7 +820,7 @@ class TestATrailerCsv:
 
     def test_it_composes_with_headers(self) -> None:
         assert _Both(_Row).rows(b"NAME,VALUE\na,1.5\n1\n") == [_Row("a", 1.5, None)]
-        with pytest.raises(ReadError, match="the header \\['VALUE', 'NOTE'\\] is none of the 2"):
+        with pytest.raises(ReadError, match="the header \\['VALUE', 'NOTE'\\] is none of the _Row file's"):
             _Both(_Row).rows(b"VALUE,NOTE\n1.5,x\n1\n")
 
 

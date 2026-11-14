@@ -76,7 +76,7 @@ class Volume(msgspec.Struct, frozen=True):
 class VolumeFile(TrailerCsv[Volume], HeadersCsv[Volume]):
     """A pipe file under one of two headers, closed by a line counting its rows."""
 
-    _headers = (("Symbol", "Volume"), ("Symbol", "Volume", "Shares"))
+    _headers_lacking = ((), ("shares",))  # the whole header, and the older one without Shares
     _trailer = re.compile(r"Rows: (?P<count>\d+)")
 
 
@@ -136,7 +136,11 @@ Catch `ReadError` to handle bad data, and let a `LayoutError` fail loudly.
 - A CSV's mistyped cell, Flag or date error names the header's label and the row, not polars' message or the field.
 - `GridFile`, `TitledGrid`, `FilledHeader`, `BlankEnded` and `BesideGrid` moved from `flatread.core` to
   `flatread.grids`, and `FoundSheet` from `flatread.found` to `flatread.sheets` (so `flatread.found` needs no extra).
-- Renamed switches: `NamedCsv._carried` → `_required_labels`; `ReportFile._header` → `_header_lines`,
+- `HeadersCsv._headers`, each header's labels written out again, is `_headers_lacking`: each published header by the
+  fields it lacks (`((), ("shares",))`), so a label is written once, in the struct. A lacked field must admit `None`.
+- `NamedCsv._carried` is gone: a header must name the column of every field that holds a value on every row, which
+  the struct says; `_required_fields` names any other field whose column every header names.
+- Renamed switches: `ReportFile._header` → `_header_lines`,
   `ReportFile._end` → `_last_line`; `LongReport._key` → `_key_field`; `HtmlFile._table` → `_table_selector`;
   `HtmlRecords._record`, `_heading`, `_stated` → `_record_selector`, `_heading_selector`, `_heading_pattern`;
   `FoundTable._section`, `_stated` → `_section_prefix`, `_section_field`; `FoundTable._nulls` → the `null_values=`
