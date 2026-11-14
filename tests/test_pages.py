@@ -39,6 +39,12 @@ from flatread.pages import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+# libxml2 2.14 rewrote its HTML tokenizer; lxml's Windows wheels still bundle 2.11, which keeps a CDATA section's text
+# and nests one level deeper before its limit. These cases state 2.14's parse.
+_LIBXML_BEFORE_2_14 = pytest.mark.xfail(
+    etree.LIBXML_VERSION < (2, 14), reason="libxml2 before 2.14 parses this HTML otherwise", strict=True
+)
+
 
 class TestParseHtml:
     @pytest.mark.parametrize(
@@ -133,7 +139,7 @@ class TestCellText:
             # Comments and CDATA are dropped but split no run: Scrapling's default parse removes them first, which
             # merges the text around them into one run ("12 34"); ``keep_comments=True`` keeps bs4's "1234".
             ("<td>12<!-- c --> 34</td>", "1234"),
-            ("<td>12<![CDATA[ ]]> 34</td>", "1234"),
+            pytest.param("<td>12<![CDATA[ ]]> 34</td>", "1234", marks=_LIBXML_BEFORE_2_14),
         ],
     )
     def test_matches_bs4_get_text_strip(self, markup: str, expected: str) -> None:
@@ -450,6 +456,7 @@ class TestDepthLimit:
     200-deep control shows the limit, not a broken parse, is what removes the text.
     """
 
+    @_LIBXML_BEFORE_2_14
     def test_text_past_the_limit_is_cut(self) -> None:
         doc = parse_html("<html><body>" + "<div>" * 300 + "deep" + "</div>" * 300 + "</body></html>")
         assert doc is not None

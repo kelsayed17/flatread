@@ -34,7 +34,7 @@ class Rate(msgspec.Struct):
 RATES = CsvFile(Rate, final_line_ending=True)
 
 RATES.rows(b"Date,Rate\n01/02/2026,4.33\n")  # [Rate(day=datetime.date(2026, 1, 2), rate=4.33)]
-RATES.rows(b"Date,Rate\n01/02/2026,4.33")    # ValueError: ... always ends its last line with a line ending: it was cut
+RATES.rows(b"Date,Rate\n01/02/2026,4.33")  # ValueError: ... always ends its last line with a line ending: it was cut
 ```
 
 ## Readers
@@ -58,6 +58,10 @@ consumer installs no extra and loads no HTML, PDF or workbook library (the impor
 | `flatread.sdmx` | SDMX-CSV and SDMX-ML: `SdmxCsv`, `SdmxStructure`, `SdmxSeries`, `SdmxObservations` | `xml` |
 | `flatread.pages` | HTML tables and records: `HtmlFile`, `HtmlRecords` | `html` |
 | `flatread.pdf` | a PDF's text layer: `PdfFile`, `LaidOutPdf` | `pdf` |
+
+`flatread.pages` reads through libxml2's HTML parser, so a page reads as the libxml2 inside lxml parses it. lxml's
+Windows wheels bundle libxml2 2.11, which keeps the text of a CDATA section in a cell and nests one level deeper
+before its 256-level limit. Elsewhere lxml bundles 2.14.
 
 [`docs/examples/README.md`](docs/examples/README.md) shows every reader and switch on a short excerpt of a real file
 that needs it.
