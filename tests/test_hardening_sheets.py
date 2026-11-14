@@ -4,17 +4,20 @@ import datetime as dt
 import io
 import re
 import struct
+import typing
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
 import fastexcel
 import msgspec
+import polars as pl
 import pytest
 from xlrd import compdoc
 
 from flatread import sheets
 from flatread.archives import ZippedFile, ZippedOrBare
+from flatread.core import Column  # noqa: TC001 (a hook's annotations, read at runtime)
 from flatread.errors import ReadError
 from flatread.fields import Cell as CellAt
 from flatread.fields import Label
@@ -696,3 +699,23 @@ def test_a_zip_that_is_no_xlsx_is_refused_before_a_load(parts: dict[str, bytes])
         ReadError, match=r"^the body is a zip but no \.xlsx workbook \(an \.xlsb or \.ods is not read\)"
     ):
         SheetFile(_Count, sheet="S").rows(out.getvalue())
+
+
+class _Starred(SheetFile[_Count]):
+    """A format whose own _value reads a count written as text with a footnote star (``-1,249,056*``)."""
+
+    _number_text = ("count",)
+
+    @typing.override
+    def _value(self, column: Column, text: pl.Series, typed: pl.Series) -> pl.Series:
+        if column.field != "count":
+            return super()._value(column, text, typed)
+        digits = text.str.strip_suffix("*").str.replace_all(",", "")
+        return super()._value(column, digits, typed.fill_null(digits.cast(pl.Float64, strict=False)))
+
+
+def test_a_format_names_the_number_fields_its_own_value_reads_from_text() -> None:
+    body = workbook({"S": [["Name", "Count"], ["a", 1], ["b", "-1,249,056*"]]})
+    assert _Starred(_Count, sheet="S").rows(body) == [_Count("a", 1), _Count("b", -1249056)]
+    with pytest.raises(ReadError, match=r"^the 'Count' cell '-1,249,056\*' is not a whole number: row 3$"):
+        SheetFile(_Count, sheet="S").rows(body)

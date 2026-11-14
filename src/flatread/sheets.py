@@ -54,7 +54,7 @@ import re
 import struct
 import typing
 import zipfile
-from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 from typing import Final, Literal
 
 import fastexcel
@@ -530,9 +530,11 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     #: its cells top to bottom, the unit separator (U+001F) between, read as written (stripped; a blank cell is empty),
     #: and a reader that lays out the key columns (:class:`LongFile`) takes them from it.
     _above: typing.ClassVar[int] = 0
-    #: Whether a number field reads a text cell written as a number too (:class:`NumberTextSheet` sets it); otherwise
-    #: such a cell (``2``) raises, a load more telling it from a number cell.
-    _number_text: typing.ClassVar[bool] = False
+    #: The number fields whose cells are read from their text, not checked as number cells: ``True``, every one
+    #: (:class:`NumberTextSheet`), or the fields a format's own :meth:`_value` reads from text on purpose (a figure
+    #: written ``-1,249,056*``, a number cell under a date style). Any other number field's cell that is no number cell
+    #: (text written as one, ``2``) raises, a load more telling it from a number cell.
+    _number_text: typing.ClassVar[bool | Collection[str]] = False
 
     def __init__(self, row: type[RowT], *, sheet: str, header_row: int = 1, null_values: Sequence[str] = ()) -> None:
         """Lay out a table of *row* on the sheet named *sheet*, under its header in sheet row *header_row* (Excel's).
@@ -908,6 +910,11 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         self._refuse_number_text(reader, grid, frame, text, columns)
         self._refuse_leap_day(reader, frame, columns)
 
+    def _number_cells(self, column: Column) -> bool:
+        """Return whether *column*'s cells must be number cells: a number field's, unless :attr:`_number_text` names it."""
+        text = self._number_text
+        return _reads_numbers(column) and text is not True and column.field not in (text or ())
+
     def _refuse_number_text(
         self,
         reader: fastexcel.ExcelReader,
@@ -924,13 +931,13 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         *grid* the sheet's text; *columns*, each column and its sheet column (``A`` is 0). A format whose numbers are
         written as text (:attr:`_number_text`) loads nothing.
         """
-        numbers = [(column, at) for column, at in columns if _reads_numbers(column)]
+        numbers = [(column, at) for column, at in columns if self._number_cells(column)]
         cells = [
             (column, column.cell)
             for column in self._columns
-            if column.cell is not None and _reads_numbers(column) and str(column.cell[1]) in grid.columns
+            if column.cell is not None and self._number_cells(column) and str(column.cell[1]) in grid.columns
         ]
-        if self._number_text or not (numbers or cells):
+        if not (numbers or cells):
             return
         top = min([self._header_row, *(row - 1 for _, (row, _) in cells)])
         ats = sorted({*(at for _, at in numbers), *(at for _, (_, at) in cells)})
