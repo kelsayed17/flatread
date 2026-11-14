@@ -317,7 +317,8 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
                 and not (
                     floats
                     and parsed.select(pl.any_horizontal((pl.col(floats) == 0).any())).item()
-                    and (b"e-" in body or b"E-" in body)
+                    and b"-" in body
+                    and pl.select(pl.lit(body).bin.contains(b"e-") | pl.lit(body).bin.contains(b"E-")).item()
                 )
             ):
                 return parsed

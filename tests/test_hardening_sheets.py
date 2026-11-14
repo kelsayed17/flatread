@@ -606,7 +606,9 @@ def test_only_a_sheet_loaded_is_bounded(far: str, monkeypatch: pytest.MonkeyPatc
     assert sheet_grid(body, "S")["0"][0] == "x"
     spans: list[str] = []
     span = sheets._xlsx_span
-    monkeypatch.setattr(sheets, "_xlsx_span", lambda archive, name: spans.append(name) or span(archive, name))
+    monkeypatch.setattr(
+        sheets, "_xlsx_span", lambda archive, name, text: spans.append(name) or span(archive, name, text)
+    )
     with pytest.raises(ReadError, match="spans 1000000 rows by 10 columns"):
         sheet_grid(body, far)
     assert spans == ["xl/worksheets/sheet2.xml"]
@@ -622,7 +624,9 @@ def test_a_sheet_loaded_by_its_index_bounds_every_sheet(monkeypatch: pytest.Monk
 def test_a_sheet_loaded_again_is_bounded_once(monkeypatch: pytest.MonkeyPatch) -> None:
     spans: list[str] = []
     span = sheets._xlsx_span
-    monkeypatch.setattr(sheets, "_xlsx_span", lambda archive, name: spans.append(name) or span(archive, name))
+    monkeypatch.setattr(
+        sheets, "_xlsx_span", lambda archive, name, text: spans.append(name) or span(archive, name, text)
+    )
     reader = sheets._workbook(_beside_a_far_sheet("Far"))
     for _ in range(2):
         reader.load_sheet("S", header_row=None)

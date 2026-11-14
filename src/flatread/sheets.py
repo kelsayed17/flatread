@@ -55,7 +55,7 @@ import re
 import struct
 import typing
 import zipfile
-from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterable, Iterator, Mapping, Sequence
 from typing import Final, Literal
 
 import fastexcel
@@ -392,19 +392,22 @@ def _xlsx_sheets(body: bytes) -> dict[str, list[str]]:
     return sheets
 
 
-def _check_xlsx_span(body: bytes, parts: Collection[str]) -> set[str]:
+def _check_xlsx_span(body: bytes, parts: Collection[str], kept: dict[str, list[str]]) -> set[str]:
     """Refuse an ``.xlsx`` *body* one of whose sheet *parts* spans past :data:`_SPAN_MAX` cells or its columns.
 
     A sheet's span runs from A1 to its last cell's row and column: a cell's own reference, or, written without one, its
     place (the next column in its row, its row's ``r`` or the row after the last). A part whose every cell opens on a
     short reference is bounded by one pass of polars' regex engine (:data:`_QUICK_SPANS`, about 1 ms a MB with its
     inflating); one with longer references has them read; one written otherwise is read tag by tag. A part in another
-    encoding than UTF-8 calamine refuses to load. Return the parts each of whose cells opens on its own reference.
+    encoding than UTF-8 calamine refuses to load. Return the parts each of whose cells opens on its own reference; a
+    part of one chunk (:data:`_CHUNK`) is inflated once, and its text *kept* for a later scan, by its name.
     """
     referenced = set()
     with _unzipped(body) as archive:
         for part in parts:
-            rows, columns, placed = _xlsx_span(archive, part)
+            if archive.getinfo(part).file_size <= _CHUNK:
+                kept[part] = [archive.read(part).decode("utf-8", "replace")]
+            rows, columns, placed = _xlsx_span(archive, part, kept.get(part))
             _refuse_span(rows, columns)
             if not placed:
                 referenced.add(part)
@@ -416,8 +419,8 @@ def _attributes(tag: bytes) -> list[tuple[bytes, bytes]]:
     return [(match[1], match[2] if match[2] is not None else match[3]) for match in _ATTRIBUTE.finditer(tag)]
 
 
-def _xlsx_span(archive: zipfile.ZipFile, name: str) -> tuple[int, int, bool]:
-    """Return the rows and columns sheet part *name* spans, from A1 to its last cell (:func:`_check_xlsx_span`).
+def _xlsx_span(archive: zipfile.ZipFile, name: str, text: list[str] | None) -> tuple[int, int, bool]:
+    """Return the rows and columns sheet part *name*, or its *text* where kept, spans, from A1 to its last cell.
 
     And whether its cells were placed tag by tag, there being one that does not open on its own reference.
 
@@ -426,31 +429,36 @@ def _xlsx_span(archive: zipfile.ZipFile, name: str) -> tuple[int, int, bool]:
     (:func:`_placed_span`).
     """
     for unplaced, (rows, columns) in _QUICK_SPANS:
-        if not _found(archive, name, unplaced):
+        if not _found(_texts(archive, name, text), unplaced):
             return rows, columns, False
-    if _found(archive, name, _UNREFERENCED):
+    if _found(_texts(archive, name, text), _UNREFERENCED):
         return *_placed_span(archive, name), True
     rows = columns = 0
-    with archive.open(name) as part:
-        for chunk in _chunks(part):
-            text = pl.Series([chunk.decode("utf-8", "replace")])
-            parts = text.str.extract_all(_REFERENCE).explode().str.extract_groups(_REFERENCE)
-            # The largest of each, as text: a longer number (its leading zeros dropped), or name, is the larger.
-            widest = (
-                parts.struct.field("2").str.strip_chars_start("0").str.pad_start(24, "0").max(),
-                parts.struct.field("1").str.to_uppercase().str.pad_start(24, "@").max(),
-            )
-            rows = max(rows, int(str(widest[0] or 0)))
-            columns = max(columns, _column_number(str(widest[1] or "").lstrip("@").encode()))
+    for chunk in _texts(archive, name, text):
+        parts = pl.Series([chunk]).str.extract_all(_REFERENCE).explode().str.extract_groups(_REFERENCE)
+        # The largest of each, as text: a longer number (its leading zeros dropped), or name, is the larger.
+        widest = (
+            parts.struct.field("2").str.strip_chars_start("0").str.pad_start(24, "0").max(),
+            parts.struct.field("1").str.to_uppercase().str.pad_start(24, "@").max(),
+        )
+        rows = max(rows, int(str(widest[0] or 0)))
+        columns = max(columns, _column_number(str(widest[1] or "").lstrip("@").encode()))
     return rows, columns, False
 
 
-def _found(archive: zipfile.ZipFile, name: str, pattern: str) -> bool:
-    """Return whether regex *pattern* is found in sheet part *name*, chunk by chunk, its first find ending the scan."""
+def _found(texts: Iterable[str], pattern: str) -> bool:
+    """Return whether regex *pattern* is found in a part's *texts*, chunk by chunk, its first find ending the scan."""
+    return any(pl.Series([text]).str.contains(pattern).item() for text in texts)
+
+
+def _texts(archive: zipfile.ZipFile, name: str, text: list[str] | None) -> Iterator[str]:
+    """Yield sheet part *name*'s text, *text* where kept, else inflated chunk by chunk (:func:`_chunks`)."""
+    if text is not None:
+        yield from text
+        return
     with archive.open(name) as part:
-        return any(
-            pl.Series([chunk.decode("utf-8", "replace")]).str.contains(pattern).item() for chunk in _chunks(part)
-        )
+        for chunk in _chunks(part):
+            yield chunk.decode("utf-8", "replace")
 
 
 def _chunks(part: typing.IO[bytes]) -> Iterator[bytes]:
@@ -518,6 +526,7 @@ class _BoundedXlsx(fastexcel.ExcelReader):
         # This open's own: the parts not yet bounded, and those bounded whose every cell opens on its reference.
         self._unbounded = {part for parts in sheets.values() for part in parts}
         self._referenced: set[str] = set()
+        self._kept: dict[str, list[str]] = {}  # a small part's text, inflated once for its scans
 
     @typing.override
     def load_sheet(self, idx_or_name: int | str, **options: typing.Any) -> typing.Any:
@@ -526,7 +535,7 @@ class _BoundedXlsx(fastexcel.ExcelReader):
         else:  # a sheet by its index, or by a name the workbook lists not as written: bound every one
             parts = [part for listed in self._parts.values() for part in listed]
         if unbounded := [part for part in parts if part in self._unbounded]:
-            self._referenced |= _check_xlsx_span(self._body, unbounded)
+            self._referenced |= _check_xlsx_span(self._body, unbounded, self._kept)
             self._unbounded.difference_update(unbounded)
         return super().load_sheet(idx_or_name, **options)
 
@@ -547,10 +556,12 @@ class _BoundedXlsx(fastexcel.ExcelReader):
             r"""(?:(?:[^>"']|"[^"]*"|'[^']*')*["'\s])?t\s*=\s*["'](?:[^n"']|n[^"']|["'])"""
         )
         found = []
-        with _unzipped(self._body) as archive, archive.open(parts[0]) as part:
-            for chunk in _chunks(part):
-                cells = pl.col("part").str.extract_all(unnumbered).explode().drop_nulls().str.extract_groups(unnumbered)
-                found.append(pl.DataFrame({"part": [chunk.decode("utf-8", "replace")]}).select(cells))
+        cells = pl.col("part").str.extract_all(unnumbered).explode().drop_nulls().str.extract_groups(unnumbered)
+        with _unzipped(self._body) as archive:
+            found.extend(
+                pl.DataFrame({"part": [text]}).select(cells)
+                for text in _texts(archive, parts[0], self._kept.get(parts[0]))
+            )
         return pl.concat(found).select(
             pl.col("part")
             .struct.field("1")
