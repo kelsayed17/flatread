@@ -1,19 +1,22 @@
 """One benchmark per read path, on synthetic bodies, for CodSpeed: ``pytest benchmarks/test_speed.py --codspeed``.
 
-The bodies are made here, at import, so only the read is measured. ``bench.py`` times the same paths against
-prism-clients' hand-written readers on recorded bodies; those stay out of this public repository, so CodSpeed guards
-the paths from one change to the next instead. Sizes are small: CodSpeed's simulation runs every instruction.
+The bodies are made here, at import, so only the read is measured. CodSpeed guards the paths from one change to the
+next. Sizes are small: CodSpeed's simulation runs every instruction.
 """
 
 import datetime as dt
-from decimal import Decimal
-from typing import TYPE_CHECKING
+import re
+from typing import TYPE_CHECKING, Annotated
 
 import msgspec
 import pytest
 
-import flatread
-from tests.xlsx import workbook
+from flatread.delimited import CsvFile
+from flatread.fields import Format, Label, Span
+from flatread.fixed import FixedWidthFile
+from flatread.layout import LongFile
+from flatread.sheets import SheetFile
+from tests.support.xlsx import workbook
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -22,23 +25,14 @@ if TYPE_CHECKING:
 
 
 class Hpi(msgspec.Struct, frozen=True):
-    year: int
-    month: int
-    geo_name: str
-    geo_code: int | None
-    index_nsa: float
+    year: Annotated[int, Label("Year")]
+    month: Annotated[int, Label("Month")]
+    geo_name: Annotated[str, Label("GEO_Name")]
+    geo_code: Annotated[int | None, Label("GEO_Code")]
+    index_nsa: Annotated[float, Label("Index_NSA")]
 
 
-class HpiCsv(flatread.Csv):
-    row = Hpi
-    labels = {
-        "Year": "year",
-        "Month": "month",
-        "GEO_Name": "geo_name",
-        "GEO_Code": "geo_code",
-        "Index_NSA": "index_nsa",
-    }
-    missing = frozenset({"", "."})
+HPI = CsvFile(Hpi, null_values=["."])
 
 
 def _hpi(i: int) -> bytes:
@@ -53,16 +47,16 @@ _QUOTED = b"Year,Month,GEO_Name,GEO_Code,Index_NSA\n" + b"".join(
 
 
 class Tenor(msgspec.Struct, frozen=True):
-    day: dt.date
+    day: Annotated[dt.date, Label("DATE"), Format("%Y-%m-%d")]
     tenor: str
     value: float
 
 
-class TenorsCsv(flatread.Csv):
-    row = Tenor
-    labels = {"DATE": "day"}
-    long = flatread.Long(name="tenor", value="value", names=r"Y\d{2}")
+class _TenorsCsv(LongFile[Tenor], CsvFile[Tenor]):
+    _keys = re.compile(r"Y\d{2}")
 
+
+TENORS = _TenorsCsv(Tenor)
 
 _WIDE = (
     b"DATE,"
@@ -78,77 +72,44 @@ _WIDE = (
 
 
 class Rate(msgspec.Struct, frozen=True):
-    name: str
-    rate: float | None
-    count: int
+    name: Annotated[str, Label("Name")]
+    rate: Annotated[float | None, Label("Rate")]
+    count: Annotated[int, Label("Count")]
 
 
-class RateSheet(flatread.Sheet):
-    row = Rate
-    labels = {"Name": "name", "Rate": "rate", "Count": "count"}
-
-
-class RateSheetMixed(RateSheet):
-    missing = frozenset({"", "."})  # a token in a number column: the two-load fallback
-
+RATES = SheetFile(Rate, sheet="S")
+RATES_WITH_TOKENS = SheetFile(Rate, sheet="S", null_values=["."])  # a token in a number column
 
 _SHEET = workbook({"S": [["Name", "Rate", "Count"], *([f"n{i}", i / 7, i] for i in range(10_000))]})
-_SHEET_MIXED = workbook({
+_SHEET_TOKENS = workbook({
     "S": [["Name", "Rate", "Count"], *([f"n{i}", "." if i % 9 == 0 else i / 7, i] for i in range(10_000))]
 })  # fmt: skip
 
 
-class Bar(msgspec.Struct, frozen=True):
-    symbol: str
-    close: float
-    volume: int
-    amount: Decimal | None
-
-
-class BarsJson(flatread.Json):
-    row = Bar
-    records = "data[]"
-    labels = {"s": "symbol", "c": "close", "v": "volume", "a": "amount"}
-
-
-class BarsText(BarsJson):
-    missing = frozenset({"", "null"})  # every value a string, as Treasury writes them: text mode
-
-
-_JSON = msgspec.json.encode({"data": [{"s": f"S{i % 500}", "c": i / 3, "v": i, "a": i / 8} for i in range(30_000)]})
-_JSON_TEXT = msgspec.json.encode({
-    "data": [{"s": f"S{i % 500}", "c": f"{i / 3:.6f}", "v": str(i), "a": "null" if i % 5 == 0 else f"{i / 8}"}
-             for i in range(30_000)]
-})  # fmt: skip
-
-
 class Station(msgspec.Struct, frozen=True):
-    station: str
-    year: int
-    value: float | None
+    station: Annotated[str, Span(0, 11)]
+    year: Annotated[int, Span(11, 15)]
+    value: Annotated[float | None, Span(15, 23)]
 
 
-class StationsFixed(flatread.FixedWidth):
-    row = Station
-    columns = {"station": (1, 11), "year": (12, 15), "value": (16, 23)}
-    missing_by_field = {"value": frozenset({" -9999.0"})}
-    strip = True
+class _StationsFixed(FixedWidthFile[Station]):
+    _header = False
 
+
+STATIONS = _StationsFixed(Station)
 
 _FIXED = b"".join(
-    f"USC{i % 10_000:08}{1900 + i % 120}{-9999.0 if i % 11 == 0 else i / 10:8.1f}\n".encode() for i in range(50_000)
+    f"USC{i % 10_000:08}{1900 + i % 120}{'' if i % 11 == 0 else f'{i / 10:.1f}':>8}\n".encode() for i in range(50_000)
 )
 
 CASES: dict[str, tuple[Callable[[bytes], object], bytes]] = {
-    "csv": (HpiCsv.frame, _CSV),
-    "csv_quoted_fallback": (HpiCsv.frame, _QUOTED),
-    "csv_long": (TenorsCsv.frame, _WIDE),
-    "sheet": (RateSheet.frame, _SHEET),
-    "sheet_fallback": (RateSheetMixed.frame, _SHEET_MIXED),
-    "json_native": (BarsJson.frame, _JSON),
-    "json_text": (BarsText.frame, _JSON_TEXT),
-    "fixed_width": (StationsFixed.frame, _FIXED),
-    "csv_rows": (HpiCsv.rows, _CSV),
+    "csv": (HPI.frame, _CSV),
+    "csv_quoted": (HPI.frame, _QUOTED),
+    "csv_long": (TENORS.frame, _WIDE),
+    "sheet": (RATES.frame, _SHEET),
+    "sheet_tokens": (RATES_WITH_TOKENS.frame, _SHEET_TOKENS),
+    "fixed_width": (STATIONS.frame, _FIXED),
+    "csv_rows": (HPI.rows, _CSV),
 }
 
 

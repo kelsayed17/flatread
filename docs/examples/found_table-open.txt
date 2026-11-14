@@ -1,0 +1,7 @@
+# members: 2012-2-1 Exempt Reporting Adviser Public Report.xlsx
+# sheet: IA_SEC_-_FIRM_ROSTER_FOIA_DOWNL
+# columns: A | B | C | D | E | F | G | H | I | J | K | L
+1: SEC Region | Organization CRD# | SEC# | Firm Type | Primary Business Name | Legal Name | Main Office Street Address 1 | Main Office Street Address 2 | Main Office City | Main Office State | Main Office Country | Main Office Postal Code
+2: HQ | 155299 | 802-73114 | ERA | THE CATALYST CAPITAL GROUP INC. | THE CATALYST CAPITAL GROUP INC. | 77 KING STREET WEST, ROYAL TRUST TOWER, SUITE 4320 |  | TORONTO |  | ONTARIO, CANADA | M5K 1J3
+3: HQ | 156645 | 802-73060 | ERA | ELSWORTHY CAPITAL LLP | ELSWORTHY CAPITAL LLP | 40 NEW BOND STREET |  | LONDON |  | UNITED KINGDOM | W1S 2RX
+4: HQ | 159108 | 802-73118 | ERA | AZINI CAPITAL | AZINI CAPITAL PARTNERS LLP | 29 FARM STREET | LONDON | LONDON |  | UNITED KINGDOM | W1J 5RL

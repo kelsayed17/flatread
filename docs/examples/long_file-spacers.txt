@@ -1,0 +1,9 @@
+# sheet: weekly_net_changes
+# columns: A | B | C | D | E | F | G | H | I | J
+6: Weekly Net Changes (Bcf) AS OF NOVEMBER 5, 2026 |  |  |  |  |  |  |  |  |
+7:  |  | East Region | Midwest Region | Mountain Region | Pacific Region | South Central Region | Salt | NonSalt | Total Lower 48
+8: 2010-01-01 00:00:00 |  |  |  |  |  |  |  |  |
+9: 2010-01-08 00:00:00 |  | -66 | -80 | -10 | -11 | -99 | -36 | -63 | -267
+10: 2010-01-15 00:00:00 |  | -61 | -70 | -9 | -11 | -93 | -32 | -61 | -243
+11: 2010-01-22 00:00:00 |  | -26 | -40 | -5 | -11 | -4 | 11 | -15 | -86
+12: 2010-01-29 00:00:00 |  | -34 | -49 | -7 | -14 | -10 | 6 | -16 | -115

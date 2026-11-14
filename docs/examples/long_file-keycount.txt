@@ -1,0 +1,5 @@
+# members: common_stock_data_table.csv, corporate_bonds_data_table.csv, fund_shares_data_table.csv, gov_bonds_data_table.csv, Nationality readme(2025).txt, preferred_and_other_equity_data_table.csv, total_bonds_data_table.csv, total_equity_and_bonds_data_table.csv, total_equity_data_table.csv
+# member: gov_bonds_data_table.csv
+cntry_code,cntry_name,market_value_residence_2003,market_value_nationality_2003,mv_difference_nat_vs_res_2003,market_value_residence_2004,market_value_nationality_2004,mv_difference_nat_vs_res_2004,...,market_value_residence_2024,market_value_nationality_2024,mv_difference_nat_vs_res_2024
+10189,AUSTRIA,2070,2070,0,2029,2029,0,...,5018,5018,0
+10251,BELGIUM,2866,2866,0,2566,2566,0,...,6485,6485,0

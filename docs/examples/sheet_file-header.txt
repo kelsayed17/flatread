@@ -1,0 +1,10 @@
+# sheet: Sheet1
+# columns: A | B | C
+1:  |  |
+2: 'GDPZ@USNA' | 'GDPZ_USNA' |
+3: 'CZ@USNA' | 'CZ_USNA' | 'CZ_USNA'
+4: 'FNSZ@USNA' | 'FNSZ_USNA' | 'FNSZ_USNA'
+5: 'FNEZ@USNA' | 'FNEZ_USNA' | 'FNEZ_USNA'
+6: 'FNPZ@USNA' | 'FNPZ_USNA' | 'FNPZ_USNA'
+19: 'PTXNETH@USNA' | 'PTXNETH_USNA' | 'PTXNETH_USNA'
+20: 'PTGH@USNA' | 'PTGH_USNA' | 'PTGH_USNA'

@@ -1,0 +1,18 @@
+# members: 2018Travel.txt, 2018Travel.xml
+<?xml version="1.0" encoding="utf-8"?>
+<GiftTravel>
+  <Travel>
+    <DocID>500019230</DocID>
+    <FilerName>Lindley Kratovil Sherer</FilerName>
+    <MemberName>Stefanik, Elise M.</MemberName>
+    <State>NY</State>
+    <District>21</District>
+    <Year>2018</Year>
+    <Destination>Cambridge, MD</Destination>
+    <FilingType>Amendment</FilingType>
+    <DepartureDate>3/8/2018</DepartureDate>
+    <ReturnDate>3/9/2018</ReturnDate>
+    <TravelSponsor>Congressional Institute</TravelSponsor>
+  </Travel>
+  ...
+</GiftTravel>

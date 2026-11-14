@@ -1,207 +1,89 @@
 # flatread
 
-Declare a provider's table once, as a class, and read its body on one native polars path, exactly, or fail loudly.
+Read a provider's published files into typed rows, exactly, or fail loudly.
 
-Exchanges, regulators and statistics agencies publish data as CSV and pipe files, Excel workbooks, JSON APIs, zips
-and fixed-width text. Their files carry preambles and trailers, row counts, "no file" pages served with a 200, tokens
-like `.` or `ND` for a missing value, and headers that change without notice. flatread reads each one strictly: every
-cell is its value, one of its column's missing tokens, or an error naming its line, its label and its text. Nothing is
-silently `None`, no short row is padded, no digit is rounded.
+Exchanges, regulators and statistics agencies publish data as CSV and pipe files, Excel workbooks, fixed-width text,
+print reports, XML, HTML pages, PDFs and SDMX messages, often inside a zip or in a legacy encoding. Their files carry
+preambles and trailers, titled tables, carried-down cells, thousands separators, tokens like `.` or `ND` for a missing
+value, and headers that change without notice. flatread reads each one strictly: every cell is its value, one of its
+column's missing tokens, or an error naming where it is. Nothing is silently `None`, no short row is padded, no digit is
+rounded.
 
-A table is a **layout**: a class with a plain msgspec row struct and only the settings where the provider differs.
-A provider's defaults are a class too, and its tables inherit them. `Layout.frame(body)` returns a polars DataFrame of
-the struct's snake_case fields, and `Layout.rows(body)` a list of the struct. Both are classmethods, so they pass
-straight to an HTTP client's body reader.
+A file is a **reader**: a msgspec row struct whose fields name their columns (`Label`, and `Format` for a date or
+time), given to the reader class for the file's shape. A shape's switches are class attributes, so a provider's quirk
+is a subclass that sets one. `reader.frame(body)` returns a polars DataFrame of the struct's fields, and
+`reader.rows(body)` a list of the struct, so either passes straight to an HTTP client's body reader.
 
 ## Example
 
 ```python
 import datetime as dt
+from typing import Annotated
 
 import msgspec
-import polars as pl
 
-import flatread
-
-
-class HpiRow(msgspec.Struct, frozen=True):
-    year: int
-    month: int
-    geo_type: str
-    geo_name: str
-    geo_code: int | None
-    index_nsa: float
-    index_sa: float
+from flatread.delimited import CsvFile
+from flatread.fields import Format, Label
 
 
-class FreddieMac(flatread.Csv):  # the provider's defaults
-    missing = frozenset({"", "."})
+class Rate(msgspec.Struct):
+    day: Annotated[dt.date, Label("Date"), Format("%m/%d/%Y")]
+    rate: Annotated[float, Label("Rate")]
 
 
-class Fmhpi(FreddieMac):  # one table
-    row = HpiRow
-    labels = {
-        "Year": "year", "Month": "month", "GEO_Type": "geo_type", "GEO_Name": "geo_name",
-        "GEO_Code": "geo_code", "Index_NSA": "index_nsa", "Index_SA": "index_sa",
-    }  # fmt: skip
+RATES = CsvFile(Rate, final_line_ending=True)
 
-
-class FmhpiStates(Fmhpi):  # one body, several tables
-    where = pl.col("geo_type") == "State"
-
-
-frame = FmhpiStates.frame(body)  # 16.5 MB, 272,619 rows: one pl.read_csv, one typing pass
-rows = FmhpiStates.rows(body)  # list[HpiRow]
+RATES.rows(b"Date,Rate\n01/02/2026,4.33\n")  # [Rate(day=datetime.date(2026, 1, 2), rate=4.33)]
+RATES.rows(b"Date,Rate\n01/02/2026,4.33")  # ValueError: ... always ends its last line with a line ending: it was cut
 ```
 
-In prism-clients each dataset's constants are then `body_reader(FmhpiStates.frame)` and
-`body_reader(FmhpiStates.rows)`.
+## Readers
 
-## Formats
+A module per format family. Each imports only the modules below it, and only its own family's parsers, so a CSV-only
+consumer installs no extra and loads no HTML, PDF or workbook library (the import-linter contracts in
+`pyproject.toml`).
 
-| Base | Reads | How |
+| Module | Reads | Extra |
 |---|---|---|
-| `Csv`, `Pipe`, `Tsv` | delimited text | one `pl.read_csv` of the whole body, every cell text. A sentinel field on every line makes a short row show instead of being padded. A body where a quoted field spans lines (or that holds a `\x01` byte) reads through the stdlib `csv` module instead. Blank lines before the first row and after the last are framing; one between two rows raises (in a one-column table it is an empty cell). |
-| `Sheet` | a sheet of an xlsx or xls (the `excel` extra) | one fastexcel load, each column's type inferred from every cell, strictly. A column mixing kinds falls back to a text load plus a typed load; an erratum or a `cells` hook sees the typed cells as text. Floats keep every digit. An xlsx error cell (`#N/A`) in the table raises; in an xls it reads as empty, since fastexcel does not report it. A filled cell right of the header's last label raises. |
-| `Json` | records at a path in a JSON body | one `msgspec.json.decode` into structs built from the layout. Numbers decode natively, a number written as a string (`"1.25"`) included, and a text field must be a JSON string; a provider writing every value as a string with its own `"null"` reads in text mode, where any other JSON value raises. A key on the records path must be present (an absent one is an error page); a `null` anywhere on it holds no records. A key a record leaves out reads as null, where its field is `\| None`; an array record must be as long as the last position its labels name. `Json.page(body)` also returns the cursor at `next`. A UTF-8 byte-order mark is allowed. |
-| `FixedWidth` | fixed-width records | `str.slice` per column at the provider's 1-based positions; a line shorter than the last column raises. |
+| `flatread.fields` | a row field's markers: `Label`, `Format`, `Flag`, `Cell`, `Joined`, `Span`, `Shape`, `Link` | |
+| `flatread.core` | `File`, the base every reader composes on; `TextFile`, `GridFile`, `Reshaped`, `Carried`, `Thousands` | |
+| `flatread.delimited` | CSV and delimited text: `CsvFile`, `CsvText`, `HeadersCsv`, `NamedCsv`, `PaddedCsv`, `PreambleCsv`, `SectionedCsv`, `SpilledCsv`, `ThousandsCsv`, `TitledCsv`, `TrailerCsv` | |
+| `flatread.fixed` | fixed-width text: `FixedWidthFile` | |
+| `flatread.layout` | a wide table read long: `LongFile` | |
+| `flatread.archives` | a file in a zip or a legacy encoding: `ZippedFile`, `ZippedFiles`, `ZippedOrBare`, `StreamedZip`, `Transcoded` | |
+| `flatread.reports` | a table laid out for print: `ReportFile`, `LongReport` | |
+| `flatread.sheets` | xlsx and xls workbooks: `SheetFile`, `SheetsFile`, `SheetText`, and a class per sheet shape | `excel` |
+| `flatread.found` | a table whose header is found by its labels: `FoundCsv`, `FoundSheet`, `FoundTable` | `excel` |
+| `flatread.markup` | XML: `XmlFile`, `NestedXml` | `xml` |
+| `flatread.sdmx` | SDMX-CSV and SDMX-ML: `SdmxCsv`, `SdmxStructure`, `SdmxSeries`, `SdmxObservations` | `xml` |
+| `flatread.pages` | HTML tables and records: `HtmlFile`, `HtmlRecords` | `html` |
+| `flatread.pdf` | a PDF's text layer: `PdfFile`, `LaidOutPdf` | `pdf` |
 
-Any layout can read a zip member: `member = "x.csv"`, a regex, or a callable.
+`flatread.pages` reads through libxml2's HTML parser, so a page reads as the libxml2 inside lxml parses it. lxml's
+Windows wheels bundle libxml2 2.11, which keeps the text of a CDATA section in a cell and nests one level deeper
+before its 256-level limit. Elsewhere lxml bundles 2.14.
 
-## Settings
-
-Every setting is a class attribute. A subclass overrides it whole: a `missing` set replaces its parent's, so include
-`""` when you mean it. Building a class checks every setting against the row struct (an unknown setting, a label
-naming no field, a field nothing fills, a regex polars cannot compile) and compiles the read. A class without `row` is
-a provider's defaults and is never read.
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `row` | — | the msgspec struct; its fields, in order, are the frame's columns. `str`, `int`, `float`, `Decimal`, `bool` (`true`/`false`), `date`, `datetime`, `time`, `Literal[...]`, any `\| None` |
-| `labels` | — | provider label → field, in the file's order; `None` checks a column present and drops it; ordered `(label, field)` pairs when a label repeats |
-| `variants` | `()` | other whole label maps, tried in order (a header that changed on a date); any label set may leave a `\| None` field out, which then reads as null |
-| `missing` | `{""}` | tokens for no value; a field that is not `\| None` refuses them |
-| `missing_by_field` | `{}` | extra tokens for one field |
-| `strip` | `False` | take whitespace off every text cell first; a set of fields strips only theirs |
-| `booleans` | `{"true": True, "false": False}` | a bool field's texts, matched in any case: `{"Y": True, "N": False}` |
-| `patterns` | `{}` | field → a regex its text must match whole before it is read (a CUSIP, a ticker) |
-| `time_zone` | `None` | the IANA zone the provider writes its times in: datetime fields carry it, a wall-clock time the zone skips or repeats is a cell error, an offset or epoch converts to it, and an epoch date is the day it is midnight of there |
-| `dates` | `{}` | field → `strftime` format, a tuple of them, or `flatread.QUARTER` / `YEAR_MONTH` / `EXCEL_SERIAL` / `EPOCH_MS` / `EPOCH_S` (a JSON number or text); checked by writing the value back. A date, datetime or time with none reads ISO. A month or day name reads in any case (`SEP`, `Sep`), `%.f` takes any number of fraction digits, and an offset (`%z`) reads as its UTC time (in `time_zone` when set) |
-| `nonfinite` | `False` | admit NaN and infinities in float fields |
-| `long` | `None` | `Long(value=, names=, name=None, drop_missing=False)`: melt every column `labels` does not name into `value`; each label must match the regex `names` whole, its named groups fill those fields, and `name` takes the whole label; a missing melted cell is the value field's missing value (an error unless it is `\| None`), or no row with `drop_missing=True` |
-| `headings` | `None` | the field a group heading above the header fills, for a long table |
-| `errata` | `()` | `Erratum(label, wrote, means, why, where={...})`: a provider mistake fixed before typing; raises `ErratumGoneError` once the provider fixes it |
-| `refusals` | `{}` | body text → error, for a "no file" answer in a 200 (`b""` is an empty body) |
-| `min_rows` | `1` | fewer rows raise `EmptyBodyError`; `0` lets a file hold no rows. An empty body always raises: a file with no rows still has its header |
-| `key` | `()` | fields that identify a row: checked unique, and compared by `diff` |
-| `where` | `None` | a polars filter of the typed frame |
-| `member` | `None` | the zip member this table is |
-
-`Csv`: `separator`, `quoted`, `header`, `skip_lines`, `header_line` (a regex the header line matches), `trailing_separator`,
-`final_line_ending` (`True` required, `False` refused, `None` either), `encoding`, `pad_short_rows` (a short row ends in
-empty cells; a long one still raises), `preamble` and `trailer` (each a
-`Line(pattern, carry={group: field}, count=group)`; a carried value is typed even when the file has no rows).
-`Sheet`: `sheet`, `header_row`, `columns` (`"A:G"`), `end` (`"blank_row"` or `"last_row"`), `footer` (a regex for
-notes after the table), `every_sheet` (`Sheets(name)`: every matching sheet into one table). `Json`: `records`, the path to the records, where `[]` walks a list's items and `{}` a map's values: a path
-ending in a walk reads each item (`"data[]"`, `"results[].bars[]"`, `"[]"` for a list body, `"bars{}[]"` for lists
-keyed by symbol), one ending in a key the one object there (`"entity.stats"`, `""` for the body). A label is a path
-from its record: `"bid"`, `"quote.bid"`, `"[0]"` in an array record; `"../x"` steps out to the item the walk before
-read, up to the body (`"../meta.as_of"`); `"{}"` is the key a map walk read the item by (`"../{}"` the parent's).
-`next` is the cursor's path from the body. `FixedWidth`: `columns`
-(`{field: (first, last)}`), `record`, `skip`, `final_line_ending`.
-
-A provider quirk outside these settings is a hook, written in plain polars, run only where a class overrides it:
-
-```python
-class Hooked(FreddieMac):
-    @classmethod
-    @override
-    def cells(cls, frame: pl.DataFrame) -> pl.DataFrame:  # text cells under the labels, before typing
-        return frame.with_columns(pl.col("Rate").str.replace(",", "."))
-
-    @classmethod
-    @override
-    def check(cls, frame: pl.DataFrame) -> None:  # the typed frame, before `where`; raise CheckError
-        ...
-```
-
-A format of its own (a PDF table, side-by-side blocks) overrides `read_text(body) -> flatread.core.Text`, and the
-shared core (labels, errata, typing, long, checks) still runs on what it returns. `Layout.from_text(frame)` reads a
-frame of text cells as a body would be: a seam for tests.
-
-ruff's `RUF012` flags every `labels = {...}` as a mutable class attribute; flatread only reads settings, so a
-package of layouts ignores it (`per-file-ignores = {"*/decoders.py" = ["RUF012"]}`).
-
-## Utilities
-
-- `flatread.report(Layout, body)`: every fault in a body, rather than the first: bad cells per column with the
-  first three, the errata gone, or the structural fault that stops the read.
-- `flatread.diff(Layout, old, new)`: two recordings compared by `key`: rows added, removed, and each changed value.
-- `python -m flatread scaffold PATH --format csv|pipe|tsv|sheet|json [--sheet ...] [--records ...]`: print a row
-  struct and a layout read off a sample, to edit.
+[`docs/examples/README.md`](docs/examples/README.md) shows every reader and switch on a short excerpt of a real file
+that needs it.
 
 ## Errors
 
-Every error is a `flatread.errors.ReadError`, a `ValueError`: `EmptyBodyError`, `UnknownLayoutError` (and
-`CellError` for one cell, with `.where`, `.label`, `.text`), `RaggedRowError`, `TruncatedFileError`,
-`ControlTotalError`, `CheckError`, `ErratumGoneError`, `NotPublishedError`, `CorruptArchiveError`, `EncodingError`.
+A body of the wrong shape raises a `ValueError`. `flatread.errors` names three kinds, each a `ReadError` (itself a
+`ValueError`): `EmptyBodyError`, `UnknownLayoutError` and `RaggedRowError`.
 
-## From 3.1
+## From 4.0
 
-4.0 gives JSON one path grammar, which breaks every `Json` layout:
-- **`records`:** a list is walked with `[]` at its end too: `"data"` is now `"data[]"`, `"results[].bars"` is
-  `"results[].bars[]"`, and a list body is `"[]"`. A path ending in a key (`"entity.stats"`, or `""`) now reads the one
-  object there.
-- **`envelope`** is gone: a label steps out to it, `envelope = {"meta.as_of": "as_of"}` becoming
-  `labels = {..., "../meta.as_of": "as_of"}`.
-- **A label naming no field** (`"x": None`) now checks its key is there, as it does in every other format.
-
-New: nested keys (`"quote.bid"`), array records (`"[0]"`), items above a record (`"../x"`), and map walks with their
-keys (`"{}"`).
-
-## From 3.0
-
-3.1 adds settings and changes one rule: a `null` JSON records list now holds no records, where 3.0 raised;
-`min_rows` (1 by default) still refuses a table of none. New: `booleans`, `patterns`, `time_zone`, `strip` by field,
-`pad_short_rows`, and the `EPOCH_MS` / `EPOCH_S` date formats.
-
-## From 2.0
-
-3.0 makes two cases strict that 2.0 let through:
-- **Long tables:** a missing melted cell no longer drops silently. Set `Long(..., drop_missing=True)` for the old behavior.
-- **Blank lines:** a blank line between two rows raises `RaggedRowError`.
-
-Two things are looser: a JSON number written as a string reads natively, and `strip` no longer moves a JSON layout to text mode.
-
-## From 1.0
-
-2.0 breaks three things 1.0 allowed:
-- **An empty body:** it raises `EmptyBodyError` even with `min_rows = 0`, which now only lets a file hold no rows.
-- **`final_line_ending = False`:** it now refuses a final line ending. `None` is the old "either".
-- **JSON text:** a text-read field must be a JSON string, and the records path must be a list, not null.
-
-## From 0.4
-
-v1 replaces 0.4 outright, with no aliases.
-
-| 0.4 | v1 |
-|---|---|
-| `Column(...)` in `Annotated` on struct fields | `labels`, `missing`, `dates`, ... on the layout; the struct is plain |
-| `delimited.read_csv`, `read_header` | `Csv` / `Pipe` / `Tsv` layouts |
-| `delimited.stream_csv`, `archives.stream_zip`, `stream_unzip` | gone: one buffered read per body |
-| `archives.unzip`, `unzip_member` | `flatread.unzip`, and the `member` setting |
-| `workbooks.read_sheet*`, `read_every_sheet*` | `Sheet` layouts, `every_sheet` |
-| `frames.frame_schema`, `frame_rows`, `typed_rows`, `typed_file` | `Layout.frame`, `Layout.rows` |
-| `text.*` | internal; the `encoding` setting |
-| `pdf.read_text` | gone |
-| `errors.or_not_published` | `refusals` and `NotPublishedError` |
-
-The design and its reasons are in `docs/superpowers/specs/2026-11-09-flatread-v1-design.md`.
+5.0 replaces flatread's code with the readers prism-clients built in `prism.clients._readers`, which read every
+provider prism-clients serves. 4.0's `Layout` classes, `flatread.cells`, `flatread.records`, `flatread.check`,
+`flatread.scaffold` and the `python -m flatread` scaffolder are gone, as are the error classes no reader raises
+(`CellError`, `CheckError`, `ControlTotalError`, `CorruptArchiveError`, `EncodingError`, `ErratumGoneError`,
+`NotPublishedError`, `TruncatedFileError`). A reader that imported `prism.clients._readers.X` imports `flatread.X`.
 
 ## Install
 
 ```
-uv add "flatread[excel] @ git+https://github.com/kelsayed17/flatread@v4.0.0"
+uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v5.0.0"
 ```
 
-Python 3.14; polars, msgspec, and fastexcel for sheets.
+Python 3.14; polars and msgspec, plus each extra's parsers: `excel` fastexcel and xlrd, `xml` lxml, `html` lxml and
+Scrapling, `pdf` pdfminer.six.

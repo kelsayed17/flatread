@@ -1,0 +1,10 @@
+# sheet: Data_raw_forinteractive
+# columns: A | B | C | D | E | F | G | H | I | J | K | L | M | N | O | P | Q | R | S
+4:  |  |  |  |  |  |  |  |  |  | 'Percent of the Selected Population' |  |  |  |  |  |  |  |
+5: 'year' | 'quarter' | 'breakdown' | 'Gender' | 'Age' | 'Race\Ethnicity' | 'Education' | 'Total' | 'Demographics' | 'Behavioral/cyclical' | 'Disability/illness' | 'In school' | 'Other' | 'Retirement' | 'Family responsibilities' | 'Shadow labor force' |  | 'string' | 'year.qtr'
+6: 1998 | 1 | 'Contributions to Change in Total' | 'All' | '16-24' | 'All' | 'All' | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  | '1998.1' | 1998.1
+7: 1998 | 1 | 'Contributions to Change in Total' | 'All' | '16-24' | 'Hispanic' | 'All' | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |  | '1998.1' | 1998.1
+45400: 2022 | 1 | 'Contributions to Change in Demographics' | 'Women' | 'All' | 'Black NH' | 'HS or some college' | -0.5089 | -0.0662 | -0.4427 | 0.208 | -0.2014 | -0.0147 | 0.0072 | -0.039 | -0.0261 |  | '2022.1' | 2022.1
+45401: 2022 | 1 | 'Contributions to Change in Demographics' | 'Women' | 'All' | 'Hispanic' | 'Associate or higher' | 0.9138 | 0.01 | 0.9038 | 0.0029 | 0.0335 | -0.0015 | -0.049 | 0.0343 | -0.0103 |  | '2022.1' | 2022.1
+45402:  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  | '.' | ''
+45403:  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  | '.' | ''

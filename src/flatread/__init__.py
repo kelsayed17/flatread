@@ -1,60 +1,20 @@
-"""flatread: declare a provider's table once, as a class, and read its body on one native polars path, or fail loudly.
+"""The shared file readers, a module per format family: a provider reads every file it serves through them.
 
-A layout is a class: a provider's defaults in one class, each table in a class under it, each setting only where it
-differs. ``Layout.frame(body)`` and ``Layout.rows(body)`` read a body into a polars DataFrame or a list of the row
-struct, both of the struct's snake_case fields. Every cell is its value, one of its missing tokens, or an error
-naming its line, its label and its text.
+Each module imports only the ones below it (``pyproject.toml``'s layers contract), so a provider loads the parsers of
+its own formats alone: a CSV-only provider never imports scrapling, pdfminer, lxml, fastexcel or xlrd.
 
-* :class:`Csv`, :class:`Pipe`, :class:`Tsv`: delimited text; :class:`Line` a preamble's or trailer's line.
-* :class:`Sheet` and :class:`Sheets`: Excel sheets (the ``excel`` extra).
-* :class:`Json`: records in a JSON body; :class:`FixedWidth`: fixed-width text.
-* :class:`Long`, :class:`Erratum`; the date formats :data:`QUARTER`, :data:`YEAR_MONTH`, :data:`EXCEL_SERIAL`,
-  :data:`EPOCH_MS`, :data:`EPOCH_S`.
-* :func:`report`, :func:`diff`; :func:`unzip`. The errors are in :mod:`flatread.errors`.
+* :mod:`~flatread.fields`: a row struct field's markers (``Label``, ``Format``, ...), with no polars, so
+  a ``models.py`` names them cheaply;
+* :mod:`~flatread.core`: :class:`~flatread.core.File`, the base every reader composes on,
+  its cell typing, its text tables (``TextFile``, ``GridFile``) and ``Reshaped``, an inner reader's frame reshaped;
+* :mod:`~flatread.layout`: ``LongFile``, a wide table read long;
+* :mod:`~flatread.archives`: a file inside a zip, or written in a legacy encoding (or in the first of
+  several that decodes it);
+* :mod:`~flatread.delimited`, :mod:`~flatread.sheets`,
+  :mod:`~flatread.fixed` and :mod:`~flatread.markup`: CSV, workbook, fixed-width and XML
+  tables;
+* :mod:`~flatread.reports` and :mod:`~flatread.found`: a table laid out for a page, and
+  one whose header is found by its labels;
+* :mod:`~flatread.pages`, :mod:`~flatread.pdf` and :mod:`~flatread.sdmx`:
+  HTML pages, PDF text layers and SDMX messages.
 """
-
-from typing import TYPE_CHECKING
-
-from flatread.archives import unzip
-from flatread.cells import EPOCH_MS, EPOCH_S, EXCEL_SERIAL, QUARTER, YEAR_MONTH
-from flatread.check import diff, report
-from flatread.core import Erratum, Long
-from flatread.delimited import Csv, Line, Pipe, Tsv
-from flatread.fixed import FixedWidth
-from flatread.layout import Layout
-from flatread.records import Json
-
-if TYPE_CHECKING:
-    from flatread.sheets import Sheet, Sheets
-
-__all__ = [
-    "EPOCH_MS",
-    "EPOCH_S",
-    "EXCEL_SERIAL",
-    "QUARTER",
-    "YEAR_MONTH",
-    "Csv",
-    "Erratum",
-    "FixedWidth",
-    "Json",
-    "Layout",
-    "Line",
-    "Long",
-    "Pipe",
-    "Sheet",
-    "Sheets",
-    "Tsv",
-    "diff",
-    "report",
-    "unzip",
-]
-
-
-def __getattr__(name: str) -> object:
-    """Import the sheet bases on first use: they need the ``excel`` extra, which a core install has not."""
-    if name in {"Sheet", "Sheets"}:
-        from flatread import sheets  # noqa: PLC0415  # the excel extra, loaded only when asked for
-
-        return getattr(sheets, name)
-    msg = f"module 'flatread' has no attribute {name!r}"
-    raise AttributeError(msg)

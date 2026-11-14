@@ -1,0 +1,8 @@
+# sheet: chart2_headlineCPI_contr_YoY
+# columns: A | B | C | D | E | F | G | H | I
+1: 'date' | 'Total: Headline CPI, YoY' | 'Food and Energy' | 'Food' | 'Energy' | 'Core Goods' | 'Core Services ex. Shelter' | 'Shelter' | 'notes'
+2: 1999-01-01 00:00:00 | ' 1.67' | '-0.15' | ' 0.36' | '-0.50' | ' 0.29' | '0.60' | ' 0.92' | 'The "Total" column is in percent, all other columns in percentage points.'
+3: 1999-02-01 00:00:00 | ' 1.61' | '-0.01' | ' 0.38' | '-0.38' | ' 0.17' | '0.59' | ' 0.90' | 'Not seasonally adjusted.'
+4: 1999-03-01 00:00:00 | ' 1.73' | ' 0.14' | ' 0.35' | '-0.21' | ' 0.13' | '0.60' | ' 0.91' | 'Contributions might not add up to total inflation due to approximation errors.'
+333: 2026-08-01 00:00:00 | ' 3.40' | ' 1.41' | ' 0.36' | ' 1.04' | ' 0.13' | '0.75' | ' 1.08' | ''
+334: 2026-09-01 00:00:00 | '   NA' | ' 1.65' | ' 0.34' | ' 1.31' | ' 0.14' | '0.77' | ' 1.14' | ''

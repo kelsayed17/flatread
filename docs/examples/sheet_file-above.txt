@@ -1,0 +1,9 @@
+# sheet: Data 1
+# columns: A | B | C | D
+1: 'Back to Contents' | 'Data 1: Petroleum Stocks' |  |
+2: 'Sourcekey' | 'WCRSTUS1' | 'WCESTUS1' | 'WCSSTUS1'
+3: 'Date' | 'Weekly U.S. Ending Stocks of Crude Oil  (Thousand Barrels)' | 'Weekly U.S. Ending Stocks excluding SPR of Crude Oil  (Thousand Barrels)' | 'Weekly U.S. Ending Stocks of Crude Oil in SPR  (Thousand Barrels)'
+4: 1982-08-20 00:00:00 | 609219 | 338764 | 270455
+5: 1982-08-27 00:00:00 | 608741 | 336138 | 272603
+2303: 2026-10-23 00:00:00 | 693208 | 410625 | 282583
+2304: 2026-10-30 00:00:00 | 691944 | 409760 | 282184

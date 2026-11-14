@@ -1,0 +1,17 @@
+# sheet: 9a
+# columns: A | B | C | D | E
+1: 'Product' |  | 'Cleared**' | 'Uncleared' | 'TOTAL'
+2: 'Swap*' | 'Basis*' | 7273421 | 14872063 | 22145484
+3:  | 'FRA' | 44907371 | 17263736 | 62171107
+8:  | 'VNS' | 18859 | '' | 18859
+9:  | 'Zero Coupon' | 286007 | '' | 286007
+10: '' |  |  |  |
+11: 'With Optionality' | 'Callable Swap' | '' | 718890 | 718890
+12:  | 'Cap/Floor' | '' | 10005210 | 10005210
+15:  | 'Swaption' | '' | 29517077 | 29517077
+16: '' |  |  |  |
+17: 'Cross-Currency' | 'Exotic' | '' | 85521 | 85521
+18:  | 'Swap' | '' | 16401697 | 16401697
+19: '' |  |  |  |
+20: 'TOTAL' |  | 207531819 | 224988781 | 432520600
+21: 'Estimated gross notional amount outstanding, August 2 weekly snapshot, by product type and tenor (millions of USD), all participant types and currencies. Data are adjusted for double-counting of cleared trades to show a single exposure for each trade.' |  |  |  |

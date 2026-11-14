@@ -1,0 +1,20 @@
+# sheet: Forecasts By Quarter
+# columns: A | B | C | D | E
+1:  |  |  |  |
+2:  |  |  |  |
+3:  | 'NEW YORK FED  ECONOMIC RESEARCH' |  |  |
+4:  |  | 'https://www.newyorkfed.org/research' |  |
+5:  |  |  |  |
+6:  | 'New York Fed Staff Nowcast' |  |  |
+7:  | '2002-present' |  |  |
+8:  | 'View the Nowcasting Report.' |  |  |
+9:  |  |  |  |
+10:  | 'Forecasts for GDP growth in quarters 2016Q1 to present were made in real-time (denoted in blue shading).' |  |  |
+11:  | 'Forecasts for GDP growth in quarters 2002Q1 through 2015Q4 are historical reconstructions based on real-time data (denoted in red shading).' |  |  |
+12:  |  |  |  |
+13:  |  |  |  |
+14: 'Forecast Date' | '2002Q1' | '2002Q2' | '2002Q3' | '2002Q4'
+15: 2001-11-23 00:00:00 | -1.2 |  |  |
+16: 2001-11-30 00:00:00 | -1.24 |  |  |
+1045: 2021-08-20 00:00:00 |  |  |  |
+1046: 2021-08-27 00:00:00 |  |  |  |

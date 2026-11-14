@@ -1,0 +1,19 @@
+  
+                HEATING DEGREE DAY DATA WEEKLY SUMMARY
+                CLIMATE PREDICTION CENTER-NCEP-NWS-NOAA
+  
+            LAST DATE OF DATA COLLECTION PERIOD IS NOV  1, 2025
+            ACCUMULATIONS ARE FROM JUL  1, 2025 TO NOV  1, 2025
+             -999 = NORMAL LESS THAN 100 OR RATIO INCALCULABLE
+  
+ STATE CITY        CALL WEEK  WEEK WEEK    CUM   CUM   CUM   CUM   CUM
+                        TOTAL DEV  DEV     TOTAL DEV   DEV   DEV   DEV
+                              FROM FROM          FROM  FROM  FROM  FROM
+                              NORM L YR          NORM  L YR  NORM  L YR
+                                                             PRCT  PRCT
+  
+ AL BIRMINGHAM      BHM   75    25   75      98   -54    47   -36    92
+ AL HUNTSVILLE      HSV   82    21   82     123   -70    62   -36   102
+ AL MOBILE          MOB   43    19   43      45   -12    29  -999  -999
+ AL MONTGOMERY      MGM   68    33   68      88    -5    42  -999  -999
+ WY WORLAND         WRL  178    14   18     669  -115    72   -15    12

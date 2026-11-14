@@ -1,0 +1,13 @@
+p1 top 601.6: Name:@21.7 Hon.@99.0 Richard@122.9 W.@159.6 Allen@174.1
+p1 top 585.9: Status:@21.7 Member@99.0
+p1 top 570.1: State/District:@21.7 GA12@99.0
+p1 top 535.9: T@21.7
+p1 top 510.6: ID@25.3 Owner@65.1 Asset@104.1 Transaction@262.3 Date@326.8 Notification@381.6 Amount@446.1 Cap.@524.8
+p1 top 499.4: Type@262.3 Date@381.6 Gains@524.8 >@555.2
+p1 top 488.1: $200?@524.8
+p1 top 466.0: SP@64.9 Broadcom@103.9 Inc.@147.1 -@164.6 Common@170.2 Stock@209.0 P@262.2 08/12/2026@326.7 09/15/2026@381.4 $1,001@445.9 -@474.8 $15,000@480.4
+p1 top 455.5: (AVGO)@103.9 [ST]@138.1
+p1 top 437.9: F@103.8 S:@131.0 New@162.4
+p1 top 425.2: S@103.8 O:@153.9 R.W.@169.2 Allen@190.2 &@212.0 Associates,@220.2 Inc.@263.8 >@280.4 RWA&A@288.0 -@321.9 Securities@327.2
+p1 top 399.3: SP@64.9 Rollins,@103.9 Inc.@136.7 Common@154.2 Stock@193.0 (ROL)@217.1 S@262.2 08/12/2026@326.7 09/15/2026@381.4 $15,001@445.9 -@479.6
+p1 top 388.8: [ST]@103.9 $50,000@445.9

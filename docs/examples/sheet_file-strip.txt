@@ -1,0 +1,11 @@
+# sheet: 1
+# columns: A | B | C | D | E | F
+1:  | 2014-11-28 00:00:00 | 2014-12-05 00:00:00 | 2014-12-12 00:00:00 | 2014-12-19 00:00:00 | 2014-12-26 00:00:00
+2: 'Total Interest Rate*' | 340517887 | 341274579 | 338185540 | 320149856 | 311213412
+3: 'Cleared**' | 224156103 | 223000308 | 222682596 | 207042391 | 199141100
+4: 'Uncleared' | 116361784 | 118274271 | 115502944 | 113107465 | 112072312
+19: 'Uncleared' | 'N/A' | 'N/A' | 'N/A' | 'N/A' | 'N/A'
+20: 'TOTAL' | 400116976 | 401057877 | 397935701 | 379306948 | 370089649
+21:  |  |  |  |  |
+23: '* See Data Dictionary for asset class descriptions and Explanatory Notes for data sources.' |  |  |  |  |
+24: '** See Explanatory Notes for cleared and uncleared descriptions.' |  |  |  |  |

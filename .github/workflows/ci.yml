@@ -51,8 +51,8 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --locked
-      # Statements plus branches; the floor sits under the 97.58% measured on 2026-11-07. Raise it as coverage grows.
-      - run: uv run python -m pytest --cov --cov-report=term-missing --cov-fail-under=97
+      # Statements plus branches; the floor sits under the 99.46% measured on 2026-11-13. Raise it as coverage grows.
+      - run: uv run python -m pytest --cov --cov-report=term-missing --cov-fail-under=99
 
   benchmarks:
     name: Benchmarks (CodSpeed)
@@ -65,10 +65,10 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - run: uv sync --locked --python-preference only-system
       # A public repository uploads without a token; the CodSpeed GitHub app must be installed on it.
-      - uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
+      - uses: CodSpeedHQ/action@78102a468f96d8e0ccb92d0ec49425753fc42062 # v5.6.0
         with:
           mode: simulation
           run: uv run --no-sync python -m pytest benchmarks/test_speed.py --codspeed
@@ -97,10 +97,16 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv venv "$RUNNER_TEMP/core" && uv pip install --python "$RUNNER_TEMP/core/bin/python" .
-      # Every module but the excel extra's (sheets) imports on the core dependencies alone.
-      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread, flatread.check, flatread.scaffold"'
+      # The plain-text readers import on the core dependencies alone; each extra brings its own family's modules.
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.archives, flatread.delimited, flatread.fixed, flatread.layout, flatread.reports"'
       - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[excel]"
-      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.sheets"'
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.sheets, flatread.found"'
+      - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[xml]"
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.markup, flatread.sdmx"'
+      - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[html]"
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.pages"'
+      - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[pdf]"
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.pdf"'
 
   audit:
     name: Dependency vulnerability audit

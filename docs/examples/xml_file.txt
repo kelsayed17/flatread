@@ -1,0 +1,16 @@
+# members: PostEmployment.txt, PostEmployment.xml
+<?xml version="1.0" encoding="utf-8"?>
+<PostEmployment>
+  <Employee>
+    <EmployeeName>DARWELL, WENDY, D</EmployeeName>
+    <OfficeName>COMMITTEE ON APPROPRIATIONS</OfficeName>
+    <TerminationDate>11/30/2007</TerminationDate>
+    <LobbyingEligibilityDate>11/30/2008</LobbyingEligibilityDate>
+  </Employee>
+  <Employee>
+    <EmployeeName>DARWELL, WENDY, D</EmployeeName>
+    <OfficeName>HINCHEY, MAURICE D.</OfficeName>
+    <TerminationDate>12/01/2007</TerminationDate>
+    <LobbyingEligibilityDate>12/01/2008</LobbyingEligibilityDate>
+  </Employee>
+</PostEmployment>
