@@ -581,6 +581,48 @@ def test_a_sheet_spanning_under_the_cap_reads(sheet: str) -> None:
     assert sheet_grid(_parts(sheet))["0"][0] == "x"
 
 
+def _beside_a_far_sheet(far: str) -> bytes:
+    """Return an xlsx of a sheet ``S`` of one cell and a sheet *far* spanning past the cap."""
+    out = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(workbook({"S": [["x"]], far: [["x"]]}))) as archive,
+        zipfile.ZipFile(out, "w") as patched,
+    ):
+        for member in archive.namelist():
+            far_part = _data(_A1, '<row r="2"><c r="J1000000"><v>1</v></c></row>').encode()
+            patched.writestr(member, far_part if member == "xl/worksheets/sheet2.xml" else archive.read(member))
+    return out.getvalue()
+
+
+@pytest.mark.parametrize("far", ["Far", "A & B <C>"], ids=["plain", "its name escaped"])
+def test_only_a_sheet_loaded_is_bounded(far: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    body = _beside_a_far_sheet(far)
+    assert sheet_grid(body, "S")["0"][0] == "x"
+    spans: list[str] = []
+    span = sheets._xlsx_span
+    monkeypatch.setattr(sheets, "_xlsx_span", lambda archive, name: spans.append(name) or span(archive, name))
+    with pytest.raises(ReadError, match="spans 1000000 rows by 10 columns"):
+        sheet_grid(body, far)
+    assert spans == ["xl/worksheets/sheet2.xml"]
+
+
+def test_a_sheet_loaded_by_its_index_bounds_every_sheet(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _loads(monkeypatch)
+    with pytest.raises(ReadError, match="spans 1000000 rows by 10 columns"):
+        sheets._workbook(_beside_a_far_sheet("Far")).load_sheet(0)
+    assert calls == []
+
+
+def test_a_sheet_loaded_again_is_bounded_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    spans: list[str] = []
+    span = sheets._xlsx_span
+    monkeypatch.setattr(sheets, "_xlsx_span", lambda archive, name: spans.append(name) or span(archive, name))
+    reader = sheets._workbook(_beside_a_far_sheet("Far"))
+    for _ in range(2):
+        reader.load_sheet("S", header_row=None)
+    assert spans == ["xl/worksheets/sheet1.xml"]
+
+
 def test_a_zip_that_will_not_open_is_refused() -> None:
     with pytest.raises(ReadError, match="the body is a workbook's zip that will not open"):
         SheetFile(_Note, sheet="S").rows(b"PK\x03\x04 cut")

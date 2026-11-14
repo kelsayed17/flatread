@@ -17,8 +17,8 @@ load instead, which refuses a column mixing number cells and number text, and a 
 cells in as text, where the strict load reads a word for none (``NA``) as none too (``tests/test_sheet_loads.py`` pins
 the load counts). fastexcel's failure on a body, and a panic of calamine's (pyo3's ``PanicException``, no
 ``Exception``), are a ReadError, as is a sheet spanning more cells than calamine is let build as one dense grid
-(:data:`_SPAN_MAX`), refused before it loads: an ``.xlsx`` sheet's span is read from its cell references (a few ms a
-MB), an ``.xls`` sheet's from its records.
+(:data:`_SPAN_MAX`), refused before it loads: an ``.xlsx`` sheet's span is read from its cell references as it is
+first loaded (a few ms a MB), an ``.xls`` sheet's from its records as the workbook opens.
 
 **The switches** of :class:`SheetFile`: ``_header`` (false: no header row, fields by position), ``_gaps`` (an empty
 row inside the table is dropped) or ``_blank_rows`` (kept, a row of no values), ``_trim`` (a cell of only whitespace
@@ -252,18 +252,6 @@ def _refuse_span(rows: int, columns: int) -> None:
         raise ReadError(msg)
 
 
-def _check_span(body: bytes) -> None:
-    """Refuse a workbook *body* one of whose sheets spans past :data:`_SPAN_MAX` cells or its columns, before a load.
-
-    An ``.xlsx``'s sheets are bounded by :func:`_check_xlsx_span`; an ``.xls``'s by its BIFF records, walked (about
-    0.3 µs each, a quarter of a second for a million cells). A body that is neither is fastexcel's to read or refuse.
-    """
-    if body.startswith(b"PK"):
-        _check_xlsx_span(body)
-    elif body.startswith(_COMPOUND):
-        _check_xls_span(body)
-
-
 def _check_xls_span(body: bytes) -> None:
     """Refuse an Excel 97 or 95 workbook *body* one of whose sheets spans past :data:`_SPAN_MAX` or its columns.
 
@@ -331,23 +319,12 @@ def _column_number(letters: bytes) -> int:
     return number
 
 
-def _check_xlsx_span(body: bytes) -> None:
-    """Refuse an ``.xlsx`` *body* one of whose sheets spans past :data:`_SPAN_MAX` cells or its columns.
-
-    Each sheet the workbook lists is found as calamine finds it: its ``r:id`` in ``xl/workbook.xml``, that
-    relationship's ``Target`` in ``xl/_rels/workbook.xml.rels`` (under ``xl/``, or from the root where it opens with
-    ``/``), in any case, its entities read or not.
-    Its span runs from A1 to its last cell's row and column: a cell's own reference, or, written without one, its
-    place (the next column in its row, its row's ``r`` or the row after the last). A part is counted in one pass
-    (:data:`_SPAN_COUNTS`, about 2 ms a MB with its inflating), and its references read where one passes column Z or row
-    99,999; one written otherwise is read tag by tag. A part in another encoding than UTF-8 calamine refuses to load.
-    A zip that will not open, or that holds no ``xl/workbook.xml`` and its rels (an ``.xlsb``, an ``.ods``), raises
-    ReadError.
-    """
+@contextlib.contextmanager
+def _unzipped(body: bytes) -> Generator[zipfile.ZipFile]:
+    """Open an ``.xlsx`` *body*'s zip, raising ReadError for one that will not open or whose member will not inflate."""
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
-            for name in _xlsx_sheets(archive):
-                _refuse_span(*_xlsx_span(archive, name))
+            yield archive
     except ReadError:  # a ValueError, as zipfile's own errors are
         raise
     except _UNZIP_ERRORS as e:
@@ -355,28 +332,55 @@ def _check_xlsx_span(body: bytes) -> None:
         raise ReadError(msg) from e
 
 
-def _xlsx_sheets(archive: zipfile.ZipFile) -> list[str]:
-    """Return the members of *archive* that hold the sheets its workbook lists, as calamine finds them (any case)."""
-    names = {name.lower(): name for name in archive.namelist()}
-    book, links = names.get("xl/workbook.xml"), names.get("xl/_rels/workbook.xml.rels")
-    if book is None or links is None:
-        # calamine also reads an .xlsb and an .ods from a zip, whose sheets this bounds not: neither is read
-        msg = "the body is a zip but no .xlsx workbook (an .xlsb or .ods is not read): it has no xl/workbook.xml"
-        raise ReadError(msg)
-    ids = {
-        value
-        for tag in _SHEET_TAG.finditer(_inflated(archive, book))
-        for name, value in _attributes(tag[1])
-        if name.rpartition(b":")[2] == b"id"
-    }
-    sheets = []
-    for tag in _RELATIONSHIP_TAG.finditer(_inflated(archive, links)):
-        attributes = dict(_attributes(tag[1]))
-        if attributes.get(b"Id") in ids and (target := attributes.get(b"Target")) is not None:
-            written = target.decode("utf-8", "replace")
-            paths = [path[1:] if path.startswith("/") else f"xl/{path}" for path in {written, html.unescape(written)}]
-            sheets.extend(names[path.lower()] for path in paths if path.lower() in names)
+def _xlsx_sheets(body: bytes) -> dict[str, list[str]]:
+    """Return the members of an ``.xlsx`` *body* that hold each sheet its workbook lists, by the sheet's name.
+
+    A sheet is found as calamine finds it: its ``r:id`` in ``xl/workbook.xml``, that relationship's ``Target`` in
+    ``xl/_rels/workbook.xml.rels`` (under ``xl/``, or from the root where it opens with ``/``), in any case, its
+    entities read or not. A zip that will not open, or that holds no ``xl/workbook.xml`` and its rels (an ``.xlsb``, an
+    ``.ods``), raises ReadError.
+    """
+    with _unzipped(body) as archive:
+        names = {name.lower(): name for name in archive.namelist()}
+        book, links = names.get("xl/workbook.xml"), names.get("xl/_rels/workbook.xml.rels")
+        if book is None or links is None:
+            # calamine also reads an .xlsb and an .ods from a zip, whose sheets this bounds not: neither is read
+            msg = "the body is a zip but no .xlsx workbook (an .xlsb or .ods is not read): it has no xl/workbook.xml"
+            raise ReadError(msg)
+        ids: dict[bytes, str] = {}
+        for tag in _SHEET_TAG.finditer(_inflated(archive, book)):
+            attributes = _attributes(tag[1])
+            sheet = next((value for name, value in attributes if name == b"name"), b"")
+            ids.update(
+                (value, html.unescape(sheet.decode("utf-8", "replace")))
+                for name, value in attributes
+                if name.rpartition(b":")[2] == b"id"
+            )
+        sheets: dict[str, list[str]] = {}
+        for tag in _RELATIONSHIP_TAG.finditer(_inflated(archive, links)):
+            attributes = dict(_attributes(tag[1]))
+            if (sheet := ids.get(attributes.get(b"Id", b""))) is not None and (
+                target := attributes.get(b"Target")
+            ) is not None:
+                written = target.decode("utf-8", "replace")
+                paths = {
+                    path[1:] if path.startswith("/") else f"xl/{path}" for path in {written, html.unescape(written)}
+                }
+                sheets.setdefault(sheet, []).extend(names[path.lower()] for path in paths if path.lower() in names)
     return sheets
+
+
+def _check_xlsx_span(body: bytes, parts: Collection[str]) -> None:
+    """Refuse an ``.xlsx`` *body* one of whose sheet *parts* spans past :data:`_SPAN_MAX` cells or its columns.
+
+    A sheet's span runs from A1 to its last cell's row and column: a cell's own reference, or, written without one, its
+    place (the next column in its row, its row's ``r`` or the row after the last). A part is counted in one pass
+    (:data:`_SPAN_COUNTS`, about 2 ms a MB with its inflating), and its references read where one passes column Z or row
+    99,999; one written otherwise is read tag by tag. A part in another encoding than UTF-8 calamine refuses to load.
+    """
+    with _unzipped(body) as archive:
+        for part in parts:
+            _refuse_span(*_xlsx_span(archive, part))
 
 
 def _attributes(tag: bytes) -> list[tuple[bytes, bytes]]:
@@ -461,11 +465,38 @@ def _placed_span(archive: zipfile.ZipFile, name: str) -> tuple[int, int]:
 def _workbook(body: bytes) -> fastexcel.ExcelReader:
     """Return the workbook *body*, open, or raise ReadError for a body that is no workbook or spans too far.
 
-    An Excel 97 or 95 workbook's sheet whose span calamine would build past :data:`_SPAN_MAX` cells is refused first.
+    A sheet calamine would build past :data:`_SPAN_MAX` cells is refused before it is built: calamine builds an Excel
+    97 or 95 workbook's every sheet as it opens it, so each is bounded first, by its BIFF records (about 0.3 µs each, a
+    quarter of a second for a million cells); an ``.xlsx``'s sheet as it is first loaded (:class:`_BoundedXlsx`), since
+    a read loads one sheet or a few of the workbook's dozens. A body that is neither is fastexcel's to read or refuse.
     """
-    _check_span(body)
+    if body.startswith(_COMPOUND):
+        _check_xls_span(body)
+    sheets = _xlsx_sheets(body) if body.startswith(b"PK") else None
     with _loading("the body is not a workbook"):
-        return fastexcel.read_excel(body)
+        opened = fastexcel.read_excel(body)
+    return opened if sheets is None else _BoundedXlsx(opened, body, sheets)
+
+
+class _BoundedXlsx(fastexcel.ExcelReader):
+    """An ``.xlsx`` open in fastexcel, each sheet bounded (:func:`_check_xlsx_span`) before it is first loaded."""
+
+    def __init__(self, opened: fastexcel.ExcelReader, body: bytes, sheets: dict[str, list[str]]) -> None:
+        super().__init__(opened._reader)  # noqa: SLF001 - fastexcel's open workbook, as read_excel wraps it
+        self._body = body
+        self._unbounded = sheets  # each sheet's parts not yet bounded, this open's own
+
+    @typing.override
+    def load_sheet(self, idx_or_name: int | str, **options: typing.Any) -> typing.Any:
+        sheets = self._unbounded
+        if isinstance(idx_or_name, str) and idx_or_name in sheets:
+            parts, sheets[idx_or_name] = sheets[idx_or_name], []
+        else:  # a sheet by its index, or by a name the workbook lists not as written: bound every one
+            parts = [part for listed in sheets.values() for part in listed]
+            self._unbounded = {sheet: [] for sheet in sheets}
+        if parts:
+            _check_xlsx_span(self._body, parts)
+        return super().load_sheet(idx_or_name, **options)
 
 
 def _of_kind(column: Column, cells: pl.Series) -> bool:
