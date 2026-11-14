@@ -75,7 +75,7 @@ class Transcoded[RowT: msgspec.Struct](File[RowT]):
     def _check_switches(self) -> None:
         super()._check_switches()
         encodings = getattr(self, "_encodings", None)
-        if isinstance(encodings, (str, bytes)) or not encodings:
+        if encodings is None or isinstance(encodings, (str, bytes)) or len(encodings) == 0:
             msg = f"the {type(self).__name__} format names no _encodings, the codecs its body may be written in"
             raise LayoutError(msg)
         for encoding in encodings:
