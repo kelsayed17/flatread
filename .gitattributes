@@ -1,3 +1,5 @@
 # The recorded files' bytes are pinned by SHA-256 (tests/test_real_files.py): git never converts their line endings.
-tests/fixtures/** binary
-tests/fixtures/README.md text
+tests/fixtures/*.pdf binary
+tests/fixtures/*.xls binary
+tests/fixtures/*.xlsx binary
+tests/fixtures/*.zip binary
