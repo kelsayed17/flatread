@@ -15,7 +15,7 @@ their own column. Both type the cells as :class:`~flatread.core.TextFile` does.
 **The parser.** Scrapling runs over lxml, and only this module loads it.
 
 **The errors** are :mod:`flatread.errors`'s: a table whose header names a column twice, or that holds another table,
-raises :class:`~flatread.errors.UnknownLayoutError`, and a row with more or fewer cells than its header
+raises :class:`~flatread.errors.ReadError`, and a row with more or fewer cells than its header
 :class:`~flatread.errors.RaggedRowError` naming the row (:func:`table_frame`).
 
 Scrapling parses with libxml2's lenient HTML parser (through lxml), which recovers from the malformed markup these
@@ -83,7 +83,7 @@ from scrapling.core.translator import HTMLTranslator
 from scrapling.parser import Selector
 
 from flatread.core import TextFile, _Column
-from flatread.errors import RaggedRowError, UnknownLayoutError
+from flatread.errors import EmptyBodyError, RaggedRowError, ReadError
 from flatread.fields import Link
 
 __all__ = [
@@ -129,7 +129,7 @@ def parse_html(markup: str | bytes) -> Element | None:
     A ``bytes`` page that declares no encoding, neither a byte-order mark nor a ``charset`` anywhere in it (libxml2
     honors a ``<meta charset>`` past the WHATWG prescan's first 1024 bytes, after a long ``<style>`` or ``<script>``),
     is UTF-8, which every provider read serves: libxml2 would fall back to Latin-1 and read UTF-8 text as mojibake.
-    Bytes that are not UTF-8 then raise :class:`~flatread.errors.UnknownLayoutError` naming the first. A declared
+    Bytes that are not UTF-8 then raise :class:`~flatread.errors.ReadError` naming the first. A declared
     charset is honored as declared.
     """
     if not markup.strip():
@@ -180,7 +180,7 @@ def _declared_or_utf8(body: bytes) -> str | None:
         body.decode("utf-8")
     except UnicodeDecodeError as exc:
         msg = f"the page declares no charset and byte {exc.start} is not UTF-8"
-        raise UnknownLayoutError(msg) from None
+        raise ReadError(msg) from None
     return "utf-8"
 
 
@@ -217,7 +217,7 @@ def cells(row: Element) -> list[Element]:
 def rows(table: Element) -> list[Element]:
     """Every ``<tr>`` under *table*, in document order. Callers slice ``[1:]`` to skip the header row.
 
-    A table that holds another ``<table>`` raises :class:`~flatread.errors.UnknownLayoutError`, naming the table's
+    A table that holds another ``<table>`` raises :class:`~flatread.errors.ReadError`, naming the table's
     header: the inner table's rows would read as the outer one's, and the outer cell's text would run the inner table's
     cells together. No recorded page nests one (measured 2026-11-06 over every page fixture: one level deep in all).
     """
@@ -225,7 +225,7 @@ def rows(table: Element) -> list[Element]:
     if table.xpath(".//table"):
         header = [cell_text(c) for c in cells(found[0])] if found else []
         msg = f"the table under header {header!r} holds another table"
-        raise UnknownLayoutError(msg)
+        raise ReadError(msg)
     return found
 
 
@@ -253,7 +253,7 @@ def table_cells(table: Element, columns: list[str]) -> tuple[list[list[Element]]
 
     * a row with more or fewer cells than *columns* raises :class:`~flatread.errors.RaggedRowError`, naming the row:
       the extra cells have no column to land under, and a short row's cells cannot be placed;
-    * a table that holds another table raises :class:`~flatread.errors.UnknownLayoutError` (:func:`rows`).
+    * a table that holds another table raises :class:`~flatread.errors.ReadError` (:func:`rows`).
     """
     read: list[list[Element]] = []
     numbers: list[int] = []
@@ -274,7 +274,7 @@ def table_frame(table: Element, columns: list[str]) -> tuple[pl.DataFrame, pl.Se
     """Read *table*'s rows after the first into a String frame under *columns*: :func:`table_cells`' cells' text.
 
     Returns the frame, each cell's text verbatim (:func:`cell_text`), and each row's place, as :func:`table_cells`
-    numbers it, with its errors. A column name that repeats raises :class:`~flatread.errors.UnknownLayoutError`:
+    numbers it, with its errors. A column name that repeats raises :class:`~flatread.errors.ReadError`:
     keyed by name, the later column would overwrite the earlier one. Checked before any row, so a header-only table is
     refused too.
     """
@@ -290,7 +290,7 @@ def _check_unrepeated(header: list[str], repeated: Collection[str]) -> None:
     """Refuse a *header* naming any of the labels in *repeated* more than once."""
     if twice := sorted(name for name, count in Counter(header).items() if count > 1 and name in repeated):
         msg = f"the table's header {header!r} names {twice!r} more than once"
-        raise UnknownLayoutError(msg)
+        raise ReadError(msg)
 
 
 def anchor(cell: Element) -> Element:
@@ -300,7 +300,7 @@ def anchor(cell: Element) -> Element:
     found = list(cell.css("a"))
     if len(found) != 1:
         msg = f"holds {len(found)} links, not one: {cell_text(cell)!r}"
-        raise ValueError(msg)
+        raise ReadError(msg)
     return found[0]
 
 
@@ -349,7 +349,7 @@ class _HtmlText[RowT: msgspec.Struct](TextFile[RowT]):
         except ValueError as e:
             label = self._under[column.field]
             msg = f"{where}: its {f'{label!r} ' if label else ''}cell {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
 
 
 class Grid(typing.NamedTuple):
@@ -390,7 +390,7 @@ class HtmlFile[RowT: msgspec.Struct](_HtmlText[RowT]):
         """Return *table* as its header's labels and its rows' cells: its first row the header, the rest its rows."""
         if (header := table_header(table)) is None:
             msg = "the table has no row"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return Grid(header, *table_cells(table, header), stated={})
 
     @typing.override
@@ -398,13 +398,13 @@ class HtmlFile[RowT: msgspec.Struct](_HtmlText[RowT]):
         doc = parse_html(body)
         if doc is None:
             msg = "the body is empty"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         tables = self._tables(doc)
         if not tables and not self._rows_required:
             return pl.DataFrame(schema=dict.fromkeys(self._labels, pl.String))
         if len(tables) != 1:
             msg = f"the page holds {len(tables)} of the file's tables, not one"
-            raise ValueError(msg)
+            raise ReadError(msg)
         header, read, numbers, stated = self._grid(tables[0])
         reading = {label: [c for c in self._columns if self._under[c.field] == label] for label in header}
         # A label written twice is as many fields, by place; one no field reads, or read by fewer, would collide.
@@ -471,7 +471,7 @@ class HtmlRecords[RowT: msgspec.Struct](_HtmlText[RowT]):
         for (heading, match), count, then in zip(stating, after, [*after[1:], 0][: len(after)], strict=True):
             if count <= then:
                 msg = f"the headings {[cell_text(heading)]!r} head no record"
-                raise ValueError(msg)
+                raise ReadError(msg)
             headed[found - count : found - then] = [dict(match.groupdict(default=None))] * (count - then)
         return headed
 
@@ -480,18 +480,18 @@ class HtmlRecords[RowT: msgspec.Struct](_HtmlText[RowT]):
         doc = parse_html(body)
         if doc is None:
             msg = "the body is empty"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         found = self._records(doc)
         headed = zip(found, self._headed(doc, len(found)), strict=True) if found else ()
         records = [(record, stated) for record, stated in headed if self._is_record(record)]
         if not records and self._rows_required:
             msg = "the page holds none of the file's records"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         read: list[list[str | None]] = []
         for number, (record, stated) in enumerate(records, 1):
             if stated is None:
                 msg = f"record {number} sits under no heading matching {self._stated.pattern!r}"
-                raise ValueError(msg)
+                raise ReadError(msg)
             values: list[str | None] = []
             for column in self._columns:
                 if column.field in self._stated.groupindex and self._heading is not None:
@@ -504,7 +504,7 @@ class HtmlRecords[RowT: msgspec.Struct](_HtmlText[RowT]):
                     continue
                 if len(found) != 1:
                     msg = f"record {number} holds {len(found)} elements {under!r} finds, not one"
-                    raise ValueError(msg)
+                    raise ReadError(msg)
                 values.append(self._read_cell(found[0], column, f"record {number}"))
             read.append(values)
         return pl.DataFrame(read, schema=dict.fromkeys(self._labels, pl.String), orient="row")

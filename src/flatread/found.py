@@ -15,6 +15,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import TextFile, _Column, _decoded
+from flatread.errors import LayoutError, ReadError
 from flatread.sheets import text_sheet
 
 __all__ = ["FoundCsv", "FoundSheet", "FoundTable"]
@@ -63,7 +64,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         self._words = dict(words)
         if len(self._words) != len(words):
             msg = f"two fields of {row.__name__} share a label: {sorted(word for word, _ in words)}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
 
     @typing.override
     def _label(self, name: str) -> str | None:
@@ -94,7 +95,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         at = next((n for n, line in enumerate(lines) if self._key_words & {self._heading(c) for c in line}), None)
         if at is None:
             msg = f"the file has no header naming {self._key_field}: it is not a {self._row.__name__} file"
-            raise ValueError(msg)
+            raise ReadError(msg)
         header = lines[at]
         names = [
             (cell.strip() if self._open else self._words.get(self._heading(cell))) if cell.strip() else None
@@ -102,10 +103,10 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         ]
         if unknown := [cell for cell, name in zip(header, names, strict=True) if cell.strip() and name is None]:
             msg = f"the header names columns {self._row.__name__} does not declare: {unknown}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         if len(named := [name for name in names if name is not None]) != len(set(named)):
             msg = f"the header names one field twice: {header}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         records: list[dict[str, str | None]] = []
         section: str | None = None
         for number, line in enumerate(lines[at + 1 :], start=at + 2):
@@ -120,7 +121,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
                 under = under[1:]
             if any(cell.strip() for cell in [*line[len(header) :], *([] if self._open else under)]):
                 msg = f"line {number} holds a value under no label: {line}"
-                raise ValueError(msg)
+                raise ReadError(msg)
             record: dict[str, str | None] = {
                 name: cell for name, cell in zip(names, line, strict=False) if name is not None
             }
@@ -151,5 +152,5 @@ class FoundSheet[RowT: msgspec.Struct](FoundTable[RowT]):
             sheet = text_sheet(reader, reader.sheet_names[0])
         except fastexcel.FastExcelError as e:
             msg = f"the body is not a workbook: {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
         return [[cell or "" for cell in line] for line in sheet.iter_rows()]

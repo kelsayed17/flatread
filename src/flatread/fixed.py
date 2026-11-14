@@ -19,6 +19,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import _MOMENTS, File, _first, _lines, _typed
+from flatread.errors import EmptyBodyError, LayoutError, ReadError
 
 __all__ = ["FixedWidthFile"]
 
@@ -45,22 +46,22 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         super().__init__(row)
         if stray := self._stated - set(self._fields):
             msg = f"the format states {sorted(stray)}, which are no fields of {row.__name__}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         spanned = [column for column in self._columns if column.field not in self._stated]
         for column in self._columns:
             if (column.span is None) != (column.field in self._stated):
                 msg = f"the field {column.field!r} needs a Span, its column's place, and a stated field takes none"
-                raise ValueError(msg)
+                raise LayoutError(msg)
             if column.scalar in _MOMENTS and column.written is None:
                 msg = f"the field {column.field!r} needs the Format its file writes it in"
-                raise ValueError(msg)
+                raise LayoutError(msg)
         self._spans = [column.span for column in spanned if column.span is not None]
         ends = [0, *(span.end for span in self._spans)]
         if not self._spans or any(
             span.start < end or span.end <= span.start for span, end in zip(self._spans, ends[:-1], strict=True)
         ):
             msg = f"the spans {self._spans} are not one or more, in order, each after the last, none empty"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         self._spanned = spanned
         self._width = self._spans[-1].end
         # The places between columns, which hold only spaces.
@@ -82,15 +83,15 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
     def _read(self, body: bytes) -> pl.DataFrame:
         if not body or body.isspace():
             msg = "the body is empty"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         if self._final_line_ending is not None and body.endswith((b"\n", b"\r")) != self._final_line_ending:
             written = "always ends its last line" if self._final_line_ending else "never ends its last line"
             msg = f"the body's end is not the file's, which {written} with a line ending: it was cut"
-            raise ValueError(msg)
+            raise ReadError(msg)
         lines, stated = self._table(_lines(body))
         if stated.keys() != self._stated:
             msg = f"the format states {sorted(stated)}, not the fields {sorted(self._stated)}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         header = int(self._header)
         line = pl.col("line")
         bad = pl.any_horizontal(
@@ -101,7 +102,7 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         if (at := _first(lines.to_frame("line").select(bad).to_series(), 1 - header)) is not None:
             where = "the header" if at < 1 else f"row {at}"
             msg = f"{where} {lines[at - 1 + header]!r} is not {self._width} characters, spaces between its columns"
-            raise ValueError(msg)
+            raise ReadError(msg)
         labels = [column.label for column in self._spanned]
         cells = lines.to_frame("line").select(
             line.str.slice(span.start, span.end - span.start).str.strip_chars(" ").alias(label)
@@ -110,7 +111,7 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         if header:
             if cells.is_empty() or list(cells.row(0)) != labels:
                 msg = f"the header {lines[0] if len(lines) else None!r} is not the labels {labels} in their places"
-                raise ValueError(msg)
+                raise ReadError(msg)
             cells = cells.slice(1)
         named = {column.field: column.label for column in self._columns}
         cells = cells.with_columns(pl.lit(text, pl.String).alias(named[field]) for field, text in stated.items())

@@ -20,6 +20,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import TextFile, _decoded, _first, _lines
+from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
 
 __all__ = ["LongReport", "ReportFile"]
 
@@ -70,10 +71,10 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
         cells, stated = set(self._line.groupindex), {name for kind in self._kinds for name in kind.groupindex}
         if stray := (cells | stated) - set(self._fields):
             msg = f"the format's groups {sorted(stray)} name no field of {row.__name__}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         if both := cells & stated:
             msg = f"the fields {sorted(both)} are both a row's cells and stated by its framing"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         # The fields the report writes, in order: a format adds any other in its _cells.
         self._written = [name for name in self._fields if name in cells | stated]
         self._null_values = list(null_values)
@@ -87,17 +88,17 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
     def _cells(self, body: bytes) -> pl.DataFrame:
         if not body.strip():
             msg = "the body is empty"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         if self._final_line_ending is not None and body.endswith((b"\n", b"\r")) != self._final_line_ending:
             written = "always ends its last line" if self._final_line_ending else "never ends its last line"
             msg = f"the body's end is not the report's, which {written} with a line ending: it was cut"
-            raise ValueError(msg)
+            raise ReadError(msg)
         lines, first = self._split(body)
         if self._end is not None:
             last = next((line for line in reversed(lines) if line.strip()), "")
             if self._end.fullmatch(last) is None:
                 msg = f"the report ends with {last[:200]!r}, not {self._end.pattern!r}: it was cut"
-                raise ValueError(msg)
+                raise ReadError(msg)
         stated: dict[str, str | None] = {}
         records: list[dict[str, str | None]] = []
         read: list[tuple[int, re.Match[str]]] = []  # every line that is not blank, its number and its kind's match
@@ -109,12 +110,12 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
                 framed = next((match for kind in self._kinds if (match := kind.fullmatch(line))), None)
                 if framed is None:
                     msg = f"line {number} {line[:200]!r} is neither a row nor a line framing the table"
-                    raise ValueError(msg)
+                    raise ReadError(msg)
                 stated |= {name: text for name, text in framed.groupdict().items() if text is not None}
                 read.append((number, framed))
         if not records and self._rows_required:
             msg = "the report holds no rows"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         self._check_lines(read)
         named = {column.field: column.label for column in self._columns}
         cells = pl.DataFrame(
@@ -141,7 +142,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
         )
         if (first := next(found, None)) is None:
             msg = f"the body holds no run of the header's lines {[kind.pattern for kind in self._header]}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return lines, first
 
     def _check_lines(self, read: Sequence[tuple[int, re.Match[str]]]) -> None:
@@ -158,7 +159,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             for at in range(len(above) - size + 1)
         ):
             msg = f"the lines above the first row hold no column header {[kind.pattern for kind in self._header]}"
-            raise ValueError(msg)
+            raise ReadError(msg)
 
 
 class LongReport[RowT: msgspec.Struct](ReportFile[RowT]):
@@ -194,7 +195,7 @@ class LongReport[RowT: msgspec.Struct](ReportFile[RowT]):
         if (row := _first(counted[key.label] != counted[first.label])) is not None:
             wanted = counted[key.label][row - 1]
             msg = f"row {row} holds {counted[first.label][row - 1]} values, not {wanted}: {width} for each key above it"
-            raise ValueError(msg)
+            raise RaggedRowError(msg)
         values = pl.col(first.label)
         found = found.with_columns(
             *(values.list.gather_every(width, offset).alias(column.label) for offset, column in enumerate(rest, 1)),

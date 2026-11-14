@@ -1,24 +1,31 @@
-"""The errors a read raises for a body of the wrong shape.
+"""The two things that go wrong: a body that is not its file, and a reader declared wrong.
 
-Every one is a :class:`ReadError`, which is a :class:`ValueError`: a body of the wrong shape is a bad value, as
-:mod:`json` and msgspec raise theirs. headgate's ``body_reader`` already raises a ``ValueError`` from its decoder as
-``ResponseParseError`` on a 2xx, with the read's error as its cause.
+* :class:`ReadError` is raised by :meth:`~flatread.core.File.frame` and :meth:`~flatread.core.File.rows` for a body
+  that is not the file its reader describes: a cell that is not its column's type, a row of the wrong width, a header
+  that is not the struct's labels, a cut or damaged body. Its message names where: the row, the cell, the line or the
+  member. :class:`EmptyBodyError` and :class:`RaggedRowError` are the two kinds worth telling apart.
+* :class:`LayoutError` is raised for a reader declared wrong: a field with no ``Label`` where its format needs one, a
+  ``Format`` on a field that is no date, spans that overlap, a switch naming a field the struct lacks. Most are raised
+  when the reader is built; a few only show once a body is read (an inner reader's columns that are not the struct's).
+
+Both are :class:`ValueError`, as :mod:`json` and msgspec raise theirs, so code that catches a decoder's
+``ValueError`` catches them; catch :class:`ReadError` alone to handle bad data and let a misdeclared reader fail loudly.
 """
 
-__all__ = ["EmptyBodyError", "RaggedRowError", "ReadError", "UnknownLayoutError"]
+__all__ = ["EmptyBodyError", "LayoutError", "RaggedRowError", "ReadError"]
 
 
 class ReadError(ValueError):
-    """A body that is not the file it should be: the root of the errors flatread names."""
+    """A body that is not the file its reader describes; the message names where it went wrong."""
 
 
 class EmptyBodyError(ReadError):
-    """The body has nothing to read: no bytes, only whitespace, or a header and too few rows."""
-
-
-class UnknownLayoutError(ReadError):
-    """The body is not laid out as the reader says: another header, another record shape, or no file at all."""
+    """A body with nothing to read: no bytes, only whitespace, or a header and no rows where rows are required."""
 
 
 class RaggedRowError(ReadError):
-    """A row has more or fewer fields than its header."""
+    """A row with more or fewer cells than its header."""
+
+
+class LayoutError(ValueError):
+    """A reader declared wrong: its row struct's markers or its switches describe no file it can read."""

@@ -36,6 +36,7 @@ from pdfminer.pdfparser import PDFParser
 from pdfminer.psexceptions import PSException
 
 from flatread.core import _NUL, TextFile
+from flatread.errors import EmptyBodyError, LayoutError, ReadError
 
 __all__ = ["LaidOutPdf", "PdfFile", "PdfLine", "text_layer"]
 
@@ -89,7 +90,7 @@ class PdfFile[RowT: msgspec.Struct](TextFile[RowT]):
         for n, cells in enumerate(records, 1):
             if len(cells) != len(self._labels):
                 msg = f"record {n} has {len(cells)} cells, not {len(self._labels)}"
-                raise ValueError(msg)
+                raise LayoutError(msg)
         return pl.DataFrame(records, schema=dict.fromkeys(self._labels, pl.String), orient="row")
 
 
@@ -182,15 +183,15 @@ def text_layer(body: bytes) -> list[PdfLine]:
     """
     if not body:
         msg = "the body is empty"
-        raise ValueError(msg)
+        raise EmptyBodyError(msg)
     try:
         lines = [PdfLine(n, line.y1, tuple(_chars(line))) for n, line in _grouped_lines(body)]
     except _UNREADABLE as exc:
         msg = f"the body is not a readable PDF: {exc}"
-        raise ValueError(msg) from exc
+        raise ReadError(msg) from exc
     if not any(line.text.strip() for line in lines):
         msg = "the PDF has no text layer: a scanned document"
-        raise ValueError(msg)
+        raise ReadError(msg)
     return lines
 
 

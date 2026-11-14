@@ -34,7 +34,7 @@ class Rate(msgspec.Struct):
 RATES = CsvFile(Rate, final_line_ending=True)
 
 RATES.rows(b"Date,Rate\n01/02/2026,4.33\n")  # [Rate(day=datetime.date(2026, 1, 2), rate=4.33)]
-RATES.rows(b"Date,Rate\n01/02/2026,4.33")  # ValueError: ... always ends its last line with a line ending: it was cut
+RATES.rows(b"Date,Rate\n01/02/2026,4.33")  # ReadError: ... always ends its last line with a line ending: it was cut
 ```
 
 ## Readers
@@ -68,8 +68,9 @@ that needs it.
 
 ## Errors
 
-A body of the wrong shape raises a `ValueError`. `flatread.errors` names three kinds, each a `ReadError` (itself a
-`ValueError`): `EmptyBodyError`, `UnknownLayoutError` and `RaggedRowError`.
+A read raises `flatread.errors.ReadError` for a body that is not its file, naming the row, cell, line or member, and
+`LayoutError` for a reader declared wrong (most when it is built). `EmptyBodyError` and `RaggedRowError` are the
+`ReadError`s worth telling apart. Both roots are `ValueError`s.
 
 ## From 4.0
 

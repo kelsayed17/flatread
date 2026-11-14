@@ -23,6 +23,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import File, _Column, _decoded, _second, _stated
+from flatread.errors import ReadError
 
 __all__ = ["StreamedZip", "Transcoded", "ZippedFile", "ZippedFiles", "ZippedOrBare", "zipped_member"]
 
@@ -135,14 +136,14 @@ class ZippedFiles[RowT: msgspec.Struct](File[RowT]):
             matched = sorted(filter(None, map(self._member.fullmatch, names)), key=lambda match: match.string)
             if not names or len(matched) != len(names):
                 msg = f"the zip holds {names!r}, not one or more members, each matching {self._member.pattern}"
-                raise ValueError(msg)
+                raise ReadError(msg)
             for match in matched:
                 part = super()._read(_inflated(archive, match.string))
                 try:
                     given = [_stated(column, match[column.field], part.height, "cell") for column in stated]
                 except ValueError as e:
                     msg = f"the member {match[0]!r} states its rows' {e}"
-                    raise ValueError(msg) from e
+                    raise ReadError(msg) from e
                 part = part.with_columns(given)
                 parts.append(self._part(match, part.select(name for name in order if name in part.columns)))
         return pl.concat(parts)
@@ -159,7 +160,7 @@ def zipped_member(body: bytes, member: re.Pattern[str], members: int | None = No
         found = [name for name in names if member.fullmatch(name)]
         if len(found) != 1:
             msg = f"the zip holds {len(found)} members matching {member.pattern}, not one: {names!r}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return found[0], _inflated(archive, found[0])
 
 
@@ -169,11 +170,11 @@ def _unzipped(body: bytes, members: int | None) -> zipfile.ZipFile:
         archive = zipfile.ZipFile(io.BytesIO(body))
     except zipfile.BadZipFile as e:
         msg = f"the body is not a zip: {e}"
-        raise ValueError(msg) from e
+        raise ReadError(msg) from e
     if members is not None and len(names := archive.namelist()) != members:
         archive.close()
         msg = f"the zip holds {names!r}, not {members} members"
-        raise ValueError(msg)
+        raise ReadError(msg)
     return archive
 
 
@@ -182,12 +183,12 @@ def _inflated(archive: zipfile.ZipFile, name: str) -> bytes:
     # zipfile inflates no more than the declared size, so checking it bounds the read
     if (size := archive.getinfo(name).file_size) > _INFLATED_MAX:
         msg = f"the zip's {name!r} inflates to {size} bytes, over {_INFLATED_MAX}"
-        raise ValueError(msg)
+        raise ReadError(msg)
     try:
         return archive.read(name)
     except (zipfile.BadZipFile, zlib.error, EOFError) as e:  # a damaged or cut deflate stream, a CRC that fails
         msg = f"the zip's {name!r} will not inflate: {e}"
-        raise ValueError(msg) from e
+        raise ReadError(msg) from e
 
 
 #: The zip records a forward read meets (PKWARE's APPNOTE 4.3.7, 4.3.9, 4.3.12): a local file header (30 bytes, then the
@@ -229,7 +230,7 @@ class _Forward:
         """Return the next *size* bytes; a zip that ends first was cut, and raises."""
         if not await self._fill(size):
             msg = "the zip was cut: it ends inside a member"
-            raise ValueError(msg)
+            raise ReadError(msg)
         data = bytes(self._buffer[:size])
         del self._buffer[:size]
         return data
@@ -238,7 +239,7 @@ class _Forward:
         """Return what is held, at most *most* bytes, waiting for a chunk if nothing is; the zip ending raises."""
         if not self._buffer and not await self._fill(1):
             msg = "the zip was cut: it ends inside a member"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return await self.read(len(self._buffer) if most is None else min(most, len(self._buffer)))
 
     async def stored(self, size: int) -> AsyncIterator[bytes]:
@@ -257,7 +258,7 @@ class _Forward:
                 text = inflate.decompress(data, _INFLATE_STEP)
             except zlib.error as e:
                 msg = f"the zip's member will not inflate: {e}"
-                raise ValueError(msg) from e
+                raise ReadError(msg) from e
             if text:
                 yield text
         self._buffer[:0] = inflate.unused_data
@@ -311,7 +312,7 @@ class StreamedZip:
             described = bool(flags & _DESCRIBED)
             if method not in {_DEFLATED, _STORED} or (described and method != _DEFLATED):
                 msg = f"the zip's {name!r} is compressed by method {method}, which is not read"
-                raise ValueError(msg)
+                raise ReadError(msg)
             if self._nested and method == _STORED and name.endswith(".zip"):  # a zip stored in the zip
                 async for text in self._found(_Forward(archive.stored(size)), first=True):
                     yield text
@@ -325,7 +326,7 @@ class StreamedZip:
                     check, length = zlib.crc32(text, check), length + len(text)
                     if length > inflated_size and not described:  # raised before it is all held, not after
                         msg = f"the zip's {name!r} inflates past the {inflated_size} bytes it states: it is damaged"
-                        raise ValueError(msg)
+                        raise ReadError(msg)
                     yield text
             if described:
                 crc, inflated_size = await archive.descriptor()
@@ -333,19 +334,19 @@ class StreamedZip:
                 break
         if (check, length) != (crc, inflated_size):
             msg = f"the zip's {name!r} does not match its CRC-32 and size: it is damaged"
-            raise ValueError(msg)
+            raise ReadError(msg)
         if self._alone and (after := await archive.peek(len(_CENTRAL_SIGNATURE))) != _CENTRAL_SIGNATURE:
             msg = (
                 "the zip was cut: it ends after its member"
                 if len(after) < len(_CENTRAL_SIGNATURE)
                 else "the zip holds more than its one member"
             )
-            raise ValueError(msg)
+            raise ReadError(msg)
 
-    def _no_member(self, header: bytes, *, first: bool) -> ValueError:
+    def _no_member(self, header: bytes, *, first: bool) -> ReadError:
         """Return the error for *header*, a record that is no local header: the zip's *first*, or a later one."""
         if first:
-            return ValueError("the body is not a zip: it does not open with a local file header")
+            return ReadError("the body is not a zip: it does not open with a local file header")
         if len(header) < len(_CENTRAL_SIGNATURE):
-            return ValueError("the zip was cut: it ends after a member")
-        return ValueError(f"the zip holds no member matching {self._member.pattern}")  # the central directory
+            return ReadError("the zip was cut: it ends after a member")
+        return ReadError(f"the zip holds no member matching {self._member.pattern}")  # the central directory

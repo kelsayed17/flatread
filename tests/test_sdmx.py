@@ -12,6 +12,7 @@ import msgspec
 import pytest
 
 from flatread import sdmx
+from flatread.errors import LayoutError, ReadError
 from flatread.fields import Label
 from flatread.sdmx import SdmxCsv, SdmxData, SdmxObservations, SdmxSeries, SdmxStructure
 
@@ -53,7 +54,7 @@ def test_sdmx_s_non_finite_names_are_values_and_a_header_alone_is_no_rows() -> N
 @pytest.mark.parametrize("value", [b"inf", b"nan", b"1.5 ", b"1e400", b"1,5"])
 def test_an_obs_value_sdmx_does_not_write_raises(value: bytes) -> None:
     quoted = b'"' + value + b'"' if b"," in value else value
-    with pytest.raises(ValueError, match=r"^the OBS_VALUE cell .* is not a number: row 1$"):
+    with pytest.raises(ReadError, match=r"^the OBS_VALUE cell .* is not a number: row 1$"):
         _CSV.frame(_HEADER + b"\r\nK,D,1," + quoted + b",A\r\n")
 
 
@@ -65,12 +66,12 @@ def test_an_obs_value_sdmx_does_not_write_raises(value: bytes) -> None:
     ],
 )
 def test_a_cut_body_or_another_header_raises(body: bytes, message: str) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ReadError, match=message):
         _CSV.frame(body)
 
 
 def test_a_struct_without_obs_value_is_no_sdmx_csv() -> None:
-    with pytest.raises(ValueError, match=r"^_Dataflow has no obs_value field, which every SDMX-CSV holds$"):
+    with pytest.raises(LayoutError, match=r"^_Dataflow has no obs_value field, which every SDMX-CSV holds$"):
         SdmxCsv(_Dataflow)
 
 
@@ -114,12 +115,12 @@ def test_a_structure_message_reads_one_kind_of_structure_in_its_version_s_namesp
 
 
 def test_a_message_of_the_other_version_raises() -> None:
-    with pytest.raises(ValueError, match=r"the document's root is <\{http://www.SDMX.org/.*\}Structure>, not"):
+    with pytest.raises(ReadError, match=r"the document's root is <\{http://www.SDMX.org/.*\}Structure>, not"):
         SdmxStructure(_Dataflow, "dataflows").rows(_V10)
 
 
 def test_a_kind_of_structure_the_version_does_not_list_raises() -> None:
-    with pytest.raises(ValueError, match=r"^an SDMX-ML 2.1 structure message lists no codes, only \['dataflows'\]$"):
+    with pytest.raises(LayoutError, match=r"^an SDMX-ML 2.1 structure message lists no codes, only \['dataflows'\]$"):
         SdmxStructure(_Code, "codes")
 
 
@@ -225,7 +226,7 @@ def test_observations_reach_polars_a_chunk_at_a_time(monkeypatch: pytest.MonkeyP
     ],
 )
 def test_a_series_the_observations_cannot_read_raises(body: bytes, message: str) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ReadError, match=message):
         _ObsOf(_Obs, "D").frame(body)
 
 
@@ -243,7 +244,7 @@ def test_a_series_the_observations_cannot_read_raises(body: bytes, message: str)
     ],
 )
 def test_a_series_without_exactly_its_annotations_raises(note: bytes) -> None:
-    with pytest.raises(ValueError, match=r"^the series 'S1' of the D data set of the body lacks its annotations"):
+    with pytest.raises(ReadError, match=r"^the series 'S1' of the D data set of the body lacks its annotations"):
         _SeriesOf(_Series, "D").frame(_message(_one(b"S1", b"", note=note)))
 
 
@@ -258,10 +259,10 @@ def _zip(*members: tuple[str, bytes]) -> bytes:
 def test_a_zipped_message_is_read_from_its_one_member(monkeypatch: pytest.MonkeyPatch) -> None:
     body = _zip(("T.xml", _message(_one(b"S1", _TWO))))
     assert len(_Zipped(_Obs, "D").rows(body)) == 2
-    with pytest.raises(ValueError, match=r"^the zip holds 2 members matching \[\^/\]\*\\.xml, not one"):
+    with pytest.raises(ReadError, match=r"^the zip holds 2 members matching \[\^/\]\*\\.xml, not one"):
         _Zipped(_Obs, "D").frame(_zip(("T.xml", b""), ("U.xml", b"")))
     monkeypatch.setattr(sdmx, "_INFLATED_MAX", 10)
-    with pytest.raises(ValueError, match=r"^the zip's 'T.xml' inflates to \d+ bytes, over 10$"):
+    with pytest.raises(ReadError, match=r"^the zip's 'T.xml' inflates to \d+ bytes, over 10$"):
         _Zipped(_Obs, "D").frame(body)
 
 
@@ -269,9 +270,9 @@ def test_a_format_whose_names_or_struct_do_not_fit_raises() -> None:
     class _Unbound(_ObsOf[_Obs]):
         _observation = "y:Obs"
 
-    with pytest.raises(ValueError, match=r"^the element 'y:Obs' writes a prefix the format's namespaces do not bind$"):
+    with pytest.raises(LayoutError, match=r"^the element 'y:Obs' writes a prefix the format's namespaces do not bind$"):
         _Unbound(_Obs, "D")
-    with pytest.raises(ValueError, match=r"^_Series's fields after the key are \['FREQ', 'TITLE'\], not an obs"):
+    with pytest.raises(LayoutError, match=r"^_Series's fields after the key are \['FREQ', 'TITLE'\], not an obs"):
         _ObsOf(_Series, "D")
 
 
@@ -316,7 +317,7 @@ _GOOD = _one(b"S1", _TWO)
     ],
 )
 def test_a_message_that_is_not_its_format_s_raises(body: bytes, message: str) -> None:
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ReadError, match=message):
         _SeriesOf(_Series, "D").frame(body)
 
 
@@ -336,12 +337,12 @@ def test_a_message_that_is_not_its_format_s_raises(body: bytes, message: str) ->
     ],
 )
 def test_an_observation_off_its_format_raises(obs: bytes, message: str) -> None:
-    with pytest.raises(ValueError, match=rf"^the D observation of 'S1' .*{message}"):
+    with pytest.raises(ReadError, match=rf"^the D observation of 'S1' .*{message}"):
         _ObsOf(_Obs, "D").frame(_message(_one(b"S1", b"<x:Obs " + obs + b"/>")))
 
 
 def test_a_member_that_will_not_inflate_raises() -> None:
     body = bytearray(_zip(("T.xml", _message(*[_one(f"S{n}".encode(), _TWO) for n in range(50)]))))
     body[60] ^= 0xFF
-    with pytest.raises(ValueError, match=r"^the zip's 'T.xml' will not inflate"):
+    with pytest.raises(ReadError, match=r"^the zip's 'T.xml' will not inflate"):
         _Zipped(_Obs, "D").frame(bytes(body))

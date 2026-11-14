@@ -43,6 +43,7 @@ from flatread.delimited import (
     TitledCsv,
     TrailerCsv,
 )
+from flatread.errors import LayoutError, ReadError
 from flatread.fields import Flag, Format, Joined, Label, Shape, Span
 from flatread.fixed import FixedWidthFile
 from flatread.found import FoundCsv, FoundSheet
@@ -106,7 +107,9 @@ class TestAFile:
             def _read(self, body: bytes) -> pl.DataFrame:
                 return pl.read_csv(body)
 
-        with pytest.raises(ValueError, match=r"the reader's columns \['NAME', 'VALUE', 'NOTE'\] are not _Row's fields"):
+        with pytest.raises(
+            LayoutError, match=r"the reader's columns \['NAME', 'VALUE', 'NOTE'\] are not _Row's fields"
+        ):
             Raw(_Row).rows(b"NAME,VALUE,NOTE\na,1.5,x\n")
 
     def test_a_reader_whose_column_is_not_its_field_s_type_raises(self) -> None:
@@ -118,7 +121,7 @@ class TestAFile:
                 return pl.read_csv(body, new_columns=["name", "value", "note"], infer_schema=False)
 
         with pytest.raises(
-            ValueError, match=r"^the reader's \{'value': 'String'\} columns are not typed as _Row's fields"
+            LayoutError, match=r"^the reader's \{'value': 'String'\} columns are not typed as _Row's fields"
         ):
             Untyped(_Row).rows(b"NAME,VALUE,NOTE\na,1.5,x\n")
 
@@ -149,42 +152,42 @@ class TestACsvFile:
             name: Annotated[str, Label("NAME")]
             value: float
 
-        with pytest.raises(ValueError, match=r"the field Unlabeled\.value names no column: annotate it with a Label"):
+        with pytest.raises(LayoutError, match=r"the field Unlabeled\.value names no column: annotate it with a Label"):
             CsvFile(Unlabeled)
 
     def test_a_date_field_without_a_format_raises(self) -> None:
         class Undated(msgspec.Struct, frozen=True, gc=False):
             day: Annotated[dt.date, Label("DAY")]
 
-        with pytest.raises(ValueError, match="the date field 'day' needs the Format its file writes it in"):
+        with pytest.raises(LayoutError, match="the date field 'day' needs the Format its file writes it in"):
             CsvFile(Undated)
 
     def test_a_format_on_another_field_raises(self) -> None:
         class Misdated(msgspec.Struct, frozen=True, gc=False):
             value: Annotated[float, Label("VALUE"), Format("%Y")]
 
-        with pytest.raises(ValueError, match="the field 'value' is no date or time, so it takes no Format"):
+        with pytest.raises(LayoutError, match="the field 'value' is no date or time, so it takes no Format"):
             CsvFile(Misdated)
 
     def test_a_zone_on_a_date_raises(self) -> None:
         class Zoned(msgspec.Struct, frozen=True, gc=False):
             day: Annotated[dt.date, Label("DAY"), Format("%Y-%m-%d", time_zone="UTC")]
 
-        with pytest.raises(ValueError, match="the date field 'day' has no time, so its Format takes no zone"):
+        with pytest.raises(LayoutError, match="the date field 'day' has no time, so its Format takes no zone"):
             CsvFile(Zoned)
 
     def test_a_field_no_column_reads_raises(self) -> None:
         class Lasting(msgspec.Struct, frozen=True, gc=False):
             took: Annotated[dt.timedelta, Label("TOOK")]
 
-        with pytest.raises(ValueError, match="the field 'took' is a timedelta, which no column reads"):
+        with pytest.raises(LayoutError, match="the field 'took' is a timedelta, which no column reads"):
             CsvFile(Lasting)
 
     def test_a_time_no_one_moment_in_its_zone_raises(self) -> None:
         class Local(msgspec.Struct, frozen=True, gc=False):
             at: Annotated[dt.datetime, Label("AT"), Format("%m/%d/%Y %H:%M", time_zone="America/New_York")]
 
-        with pytest.raises(ValueError, match="the 'at' column holds a time that is no one moment in its zone"):
+        with pytest.raises(ReadError, match="the 'AT' column holds a time that is no one moment in its zone"):
             CsvFile(Local).rows(b"AT\n11/01/2026 01:30\n")
 
     def test_a_time_is_read_naive_or_aware_in_its_zone(self) -> None:
@@ -201,7 +204,7 @@ class TestACsvFile:
             Hour(dt.datetime(2026, 4, 1, 12), dt.datetime(2026, 4, 1, 19, tzinfo=dt.UTC)),
         ]
         assert flat.frame(body).schema["utc"] == pl.Datetime("us", "UTC")
-        with pytest.raises(ValueError, match="the 'local' cell '04/01/2026 01:00:00 AM' is not a time written"):
+        with pytest.raises(ReadError, match="the 'LOCAL' cell '04/01/2026 01:00:00 AM' is not a time written"):
             flat.rows(b"LOCAL,UTC\n04/01/2026 01:00:00 AM,04/01/2026 8:00:00 AM\n")
 
     def test_a_time_of_day_reads_by_its_format_exactly(self) -> None:
@@ -210,7 +213,7 @@ class TestACsvFile:
 
         assert CsvFile(Clocked).rows(b"AT\n2:15pm\n11:30am\n") == [Clocked(dt.time(14, 15)), Clocked(dt.time(11, 30))]
         assert CsvFile(Clocked).frame(b"AT\n2:15pm\n").schema["at"] == pl.Time
-        with pytest.raises(ValueError, match="the 'at' cell '02:15pm' is not a time of day written %-I:%M%P: row 1"):
+        with pytest.raises(ReadError, match="the 'AT' cell '02:15pm' is not a time of day written %-I:%M%P: row 1"):
             CsvFile(Clocked).rows(b"AT\n02:15pm\n")
 
     def test_a_time_of_day_needs_its_format_and_takes_no_zone(self) -> None:
@@ -220,9 +223,9 @@ class TestACsvFile:
         class Zoned(msgspec.Struct, frozen=True, gc=False):
             at: Annotated[dt.time, Label("AT"), Format("%H:%M", time_zone="UTC")]
 
-        with pytest.raises(ValueError, match="the time-of-day field 'at' needs the Format its file writes it in"):
+        with pytest.raises(LayoutError, match="the time-of-day field 'at' needs the Format its file writes it in"):
             CsvFile(Bare)
-        with pytest.raises(ValueError, match="the time-of-day field 'at' has no date, so its Format takes no zone"):
+        with pytest.raises(LayoutError, match="the time-of-day field 'at' has no date, so its Format takes no zone"):
             CsvFile(Zoned)
 
     def test_a_label_written_twice_is_two_columns_by_their_places(self) -> None:
@@ -233,7 +236,7 @@ class TestACsvFile:
 
         filled = CsvFile(Filled, separator="|")
         assert filled.rows(b"Symbol|Filler|Filler\nA|x|\n") == [Filled("A", "x", None)]
-        with pytest.raises(ValueError, match=r"column names not specified in schema .*\[\"Other\"\]"):
+        with pytest.raises(ReadError, match=r"column names not specified in schema .*\[\"Other\"\]"):
             filled.rows(b"Symbol|Filler|Other\nA|x|\n")
 
     def test_each_date_column_takes_its_own_format(self) -> None:
@@ -245,7 +248,7 @@ class TestACsvFile:
         assert flat.rows(b"START,END\n2026-01,01/31/2026\n") == [Span(dt.date(2026, 1, 1), dt.date(2026, 1, 31))]
 
     def test_a_date_not_in_its_format_raises(self) -> None:
-        with pytest.raises(ValueError, match="the 'day' cell '2005-01-14' is not a date written %m-%d-%Y"):
+        with pytest.raises(ReadError, match="the 'DAY' cell '2005-01-14' is not a date written %m-%d-%Y"):
             CsvFile(_Dated).rows(b"DAY,VALUE\n2005-01-14,100.00\n")
 
     @pytest.mark.parametrize(
@@ -254,42 +257,42 @@ class TestACsvFile:
         ids=["short year", "no zero pad", "no such day", "the year 0"],
     )
     def test_a_date_must_be_written_as_its_format_writes_it(self, day: str) -> None:
-        with pytest.raises(ValueError, match=f"the 'day' cell '{day}' is not a date written %m-%d-%Y"):
+        with pytest.raises(ReadError, match=f"the 'DAY' cell '{day}' is not a date written %m-%d-%Y"):
             CsvFile(_Dated).rows(f"DAY,VALUE\n{day},100.00\n".encode())
 
     def test_a_row_of_empty_cells_is_a_row_not_a_blank_line(self) -> None:
-        with pytest.raises(ValueError, match=r"the \['day', 'value'\] columns have an empty cell"):
+        with pytest.raises(ReadError, match=r"the \['day', 'value'\] columns have an empty cell"):
             CsvFile(_Dated).rows(b"DAY,VALUE\n01-14-2005,100.00\n,\n")
 
     def test_an_optional_field_takes_an_empty_cell(self) -> None:
         flat = CsvFile(_Row)
         assert flat.rows(b"NAME,VALUE,NOTE\na,1.5,x\nb,,\n") == [_Row("a", 1.5, "x"), _Row("b", None, None)]
-        with pytest.raises(ValueError, match=r"the \['name'\] columns have an empty cell"):
+        with pytest.raises(ReadError, match=r"the \['name'\] columns have an empty cell"):
             flat.rows(b"NAME,VALUE,NOTE\n,1.5,x\n")
 
     def test_a_quoted_empty_cell_is_no_value(self) -> None:
         assert CsvFile(_Row).rows(b'NAME,VALUE,NOTE\na,1.5,""\n') == [_Row("a", 1.5, None)]
-        with pytest.raises(ValueError, match=r"the \['name'\] columns have an empty cell"):
+        with pytest.raises(ReadError, match=r"the \['name'\] columns have an empty cell"):
             CsvFile(_Row).rows(b'NAME,VALUE,NOTE\n"",1.5,x\n')
 
     def test_a_short_row_beside_a_nul_is_counted_by_the_csv_module(self) -> None:
-        with pytest.raises(ValueError, match="row 2 has 2 fields, not the header's 3"):
+        with pytest.raises(ReadError, match="row 2 has 2 fields, not the header's 3"):
             CsvFile(_Row).rows(b"NAME,VALUE,NOTE\na" + bytes(1) + b",1.5,x\nb,2.5\n")
-        with pytest.raises(ValueError, match="the body is not UTF-8"):
+        with pytest.raises(ReadError, match="the body is not UTF-8"):
             CsvFile(_Row).rows(b"NAME,VALUE,NOTE\na" + bytes(1) + b",1.5,x\nb\xff,2.5\n")
 
     def test_a_blank_line_is_a_row_too_short(self) -> None:
         """A clean file has none: a blank line is a row of one empty field, named like any short row."""
-        with pytest.raises(ValueError, match=r"^row 2 has 1 fields, not the header's 3$"):
+        with pytest.raises(ReadError, match=r"^row 2 has 1 fields, not the header's 3$"):
             CsvFile(_Row).rows(b"NAME,VALUE,NOTE\na,1.5,x\n\nb,2.5,y\n")
-        with pytest.raises(ValueError, match=r"^row 2 has 1 fields, not the header's 2$"):
+        with pytest.raises(ReadError, match=r"^row 2 has 1 fields, not the header's 2$"):
             CsvFile(_Dated).rows(b"DAY,VALUE\n01-14-2005,100.00\n\n")
 
     @pytest.mark.parametrize(
         ("body", "match"),
         [
             (b"NAME,AMOUNT,NOTE\na,1.5,x\n", "column names not specified in schema"),
-            (b"NAME,VALUE,NOTE\na,n/a,x\n", "could not parse `n/a` as dtype `f64`"),
+            (b"NAME,VALUE,NOTE\na,n/a,x\n", "^the 'VALUE' cell 'n/a' is not a number: row 1$"),
             (b"", "the body is empty"),
             (b"\r\n\n", "the body is empty"),
             (b"NAME,VALUE,NOTE\n", "the body is a header and no rows"),
@@ -309,7 +312,7 @@ class TestACsvFile:
         ],
     )
     def test_a_body_that_is_not_the_file_raises(self, body: bytes, match: str) -> None:
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(ReadError, match=match):
             CsvFile(_Row).rows(body)
 
     @pytest.mark.parametrize(
@@ -324,14 +327,14 @@ class TestACsvFile:
     )
     def test_a_row_not_as_wide_as_the_header_raises(self, body: bytes, match: str) -> None:
         """Even where its missing cells would be optional ones: polars would read them as nulls."""
-        with pytest.raises(ValueError, match=match):
+        with pytest.raises(ReadError, match=match):
             CsvFile(_Row).rows(body)
 
     def test_a_quote_inside_a_cell_is_text(self) -> None:
         """A quote is a cell's quoting only where it opens the cell, as the csv module and RFC 4180 read it."""
         rows = CsvFile(_Row).rows(b'NAME,VALUE,NOTE\n12" pipe,1.5,a"b\n')
         assert rows == [_Row('12" pipe', 1.5, 'a"b')]
-        with pytest.raises(ValueError, match=r"^row 1 has 4 fields, not the header's 3$"):
+        with pytest.raises(ReadError, match=r"^row 1 has 4 fields, not the header's 3$"):
             CsvFile(_Row).rows(b'NAME,VALUE,NOTE\na"b,c"d,1.5,x\n')
 
     def test_a_quoted_cell_still_holds_its_quote_beside_a_quote_inside_a_cell(self) -> None:
@@ -352,7 +355,7 @@ class TestTheReadCsvOptions:
         assert rows == [_Row("a", None, "x"), _Row("b", None, None), _Row("c", 2.5, None)]
 
     def test_without_the_token_the_cell_is_not_a_number(self) -> None:
-        with pytest.raises(ValueError, match="could not parse `NA` as dtype `f64`"):
+        with pytest.raises(ReadError, match=r"^the 'VALUE' cell 'NA' is not a number: row 1$"):
             CsvFile(_Row).rows(b"NAME,VALUE,NOTE\na,NA,x\n")
 
     def test_a_column_a_published_header_leaves_out_reads_as_nulls(self) -> None:
@@ -371,28 +374,28 @@ class TestTheReadCsvOptions:
     )
     def test_a_row_not_as_wide_as_a_published_header_raises(self, body: bytes, message: str) -> None:
         """A long row's cell would fill a column the header leaves out, where polars inserts it."""
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _Published(_Row).rows(body)
 
     def test_a_header_the_file_was_never_published_with_raises(self) -> None:
         flat = _Published(_Row)
-        with pytest.raises(ValueError, match=r"the header \['NAME', 'NOTE'\] is none of the 3 the _Row file has had"):
+        with pytest.raises(ReadError, match=r"the header \['NAME', 'NOTE'\] is none of the 3 the _Row file has had"):
             flat.rows(b"NAME,NOTE\na,x\n")
 
     def test_a_required_column_a_published_header_leaves_out_raises(self) -> None:
         flat = _Published(_Row)
-        with pytest.raises(ValueError, match=r"the \['name'\] columns have an empty cell, a short row or no column"):
+        with pytest.raises(ReadError, match=r"the \['name'\] columns have an empty cell, a short row or no column"):
             flat.rows(b"VALUE,NOTE\n1.5,x\n")
 
     def test_a_header_naming_a_label_no_field_has_is_a_layout_bug(self) -> None:
         class Misheaded(HeadersCsv[_Row]):
             _headers = (("NAME", "RATE"),)
 
-        with pytest.raises(ValueError, match=r"the headers name \['RATE'\], which no field of _Row labels"):
+        with pytest.raises(LayoutError, match=r"the headers name \['RATE'\], which no field of _Row labels"):
             Misheaded(_Row)
 
     def test_a_column_the_file_leaves_out_raises_by_default(self) -> None:
-        with pytest.raises(ValueError, match="column names specified in schema not found"):
+        with pytest.raises(ReadError, match="column names specified in schema not found"):
             CsvFile(_Row).rows(b"NAME,VALUE\na,1.5\n")
 
 
@@ -448,7 +451,7 @@ class TestANamedCsv:
         ],
     )
     def test_a_header_or_row_that_is_not_the_file_s_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _Named(_Renamed).rows(body)
 
     def test_a_label_two_fields_share_or_a_carried_label_no_field_has_is_a_layout_bug(self) -> None:
@@ -459,13 +462,13 @@ class TestANamedCsv:
         class Stray(NamedCsv[_Renamed]):
             _carried = ("RATE",)
 
-        with pytest.raises(ValueError, match=r"^two fields of Shared share a label"):
+        with pytest.raises(LayoutError, match=r"^two fields of Shared share a label"):
             NamedCsv(Shared)
-        with pytest.raises(ValueError, match=r"^the carried labels \['RATE'\] are no field of _Renamed's labels$"):
+        with pytest.raises(LayoutError, match=r"^the carried labels \['RATE'\] are no field of _Renamed's labels$"):
             Stray(_Renamed)
 
     def test_a_reader_that_does_not_read_a_header_by_name_refuses_alternatives(self) -> None:
-        with pytest.raises(ValueError, match=r"^the field 'name' names Label alternatives, which only a header read"):
+        with pytest.raises(LayoutError, match=r"^the field 'name' names Label alternatives, which only a header read"):
             CsvFile(_Renamed)
 
     def test_a_format_derives_a_date_s_format(self) -> None:
@@ -482,7 +485,7 @@ class TestANamedCsv:
 
 class TestTheLineEnding:
     def test_lines_ended_by_cr_alone_are_refused_as_a_parse_error(self) -> None:
-        with pytest.raises(ValueError, match=r"^the header line is not one row of cells: "):
+        with pytest.raises(ReadError, match=r"^the header line is not one row of cells: "):
             CsvFile(_Row).rows(b"NAME,VALUE,NOTE\ra,1.5,x\r")
 
     @pytest.mark.parametrize(
@@ -491,7 +494,7 @@ class TestTheLineEnding:
         ids=["always ends one, cut", "never ends one, cut"],
     )
     def test_a_body_that_ends_unlike_the_file_was_cut(self, *, final_line_ending: bool, body: bytes) -> None:
-        with pytest.raises(ValueError, match="the body's end is not the file's"):
+        with pytest.raises(ReadError, match="the body's end is not the file's"):
             CsvFile(_Row, final_line_ending=final_line_ending).rows(body)
 
     @pytest.mark.parametrize("body", [b"NAME,VALUE,NOTE\na,1.5,x", b"NAME,VALUE,NOTE\na,1.5,x\r\n"])
@@ -510,7 +513,7 @@ class TestTheRowAnErrorNames:
         ids=["an empty cell", "NaN", "a date written another way"],
     )
     def test_it_is_the_first_bad_row_after_the_header(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=rf"{message}.*: row 2$"):
+        with pytest.raises(ReadError, match=rf"{message}.*: row 2$"):
             CsvFile(_Dated).rows(body)
 
 
@@ -518,7 +521,7 @@ class TestASeparator:
     def test_a_pipe_separated_file_reads_its_cells_and_counts_its_rows_by_it(self) -> None:
         flat = CsvFile(_Row, separator="|")
         assert flat.rows(b'NAME|VALUE|NOTE\na,b|1.5|"x|y"\n') == [_Row("a,b", 1.5, "x|y")]
-        with pytest.raises(ValueError, match=r"^row 1 has 2 fields, not the header's 3$"):
+        with pytest.raises(ReadError, match=r"^row 1 has 2 fields, not the header's 3$"):
             flat.rows(b"NAME|VALUE|NOTE\na|1.5\n")
 
 
@@ -530,11 +533,11 @@ class TestAFormatThatQuotesNothing:
     def test_a_lone_quote_in_a_cell_is_text(self) -> None:
         flat = _Unquoted(_Row, separator="|")
         assert flat.rows(b'NAME|VALUE|NOTE\n12" pipe|1.5|x\n') == [_Row('12" pipe', 1.5, "x")]
-        with pytest.raises(ValueError, match=r"^row 1 has 4 fields, not the header's 3$"):
+        with pytest.raises(ReadError, match=r"^row 1 has 4 fields, not the header's 3$"):
             flat.rows(b'NAME|VALUE|NOTE\n"a|b"|1.5|x\n')
 
     def test_where_quotes_are_quoting_a_lone_one_is_refused(self) -> None:
-        with pytest.raises(ValueError, match="malformed"):
+        with pytest.raises(ReadError, match="malformed"):
             CsvFile(_Row, separator="|").rows(b'NAME|VALUE|NOTE\n12" pipe|1.5|x\n')
 
 
@@ -560,7 +563,7 @@ class TestAHeaderWithAnOddQuote:
 
     def test_a_body_whose_quote_never_closes_is_refused_in_linear_work(self) -> None:
         started = time.perf_counter()
-        with pytest.raises(ValueError, match=r"malformed|not found|header"):
+        with pytest.raises(ReadError, match=r"malformed|not found|header"):
             CsvFile(_Row).rows(b'"NAME,VALUE,NOTE\n' + b"a,1,x\n" * 600_000)
         assert time.perf_counter() - started < 5  # recounting the quotes from byte 0 a line takes minutes here
 
@@ -594,7 +597,7 @@ class TestAHeaderlessCsv:
         ids=["short", "long", "every row short"],
     )
     def test_a_row_not_as_wide_as_the_fields_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _Bare(_Unlabeled, separator="\t").rows(body)
 
 
@@ -670,11 +673,11 @@ class TestASpilledCsv:
         assert self._read(b"ID|NAME|VALUE\n1|A\x1fB|C|1.5\n") == [_Spills(1, "A\x1fB|C", 1.5)]
 
     def test_a_short_row_still_raises(self) -> None:
-        with pytest.raises(ValueError, match="row 1"):
+        with pytest.raises(ReadError, match="row 1"):
             self._read(b"ID|NAME|VALUE\n1|BAM\n")
 
     def test_a_header_without_the_field_raises(self) -> None:
-        with pytest.raises(ValueError, match="lacks 'NAME'"):
+        with pytest.raises(ReadError, match="lacks 'NAME'"):
             self._read(b"ID|VALUE\n1|1.5\n")
 
     def test_a_format_that_cannot_spill_raises_at_construction(self) -> None:
@@ -700,7 +703,7 @@ class TestASpilledCsv:
             (_Quoted, "quotes nothing"),
             (_Headerless, "quotes nothing"),
         ):
-            with pytest.raises(ValueError, match=message):
+            with pytest.raises(LayoutError, match=message):
                 kind(_Spills, separator="|")
 
 
@@ -755,7 +758,7 @@ class TestATrailerCsv:
         ids=["cut", "another count", "the trailer alone"],
     )
     def test_a_body_its_trailer_does_not_vouch_for_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _Counted(_Row).rows(body)
 
     def test_a_group_named_for_a_field_is_its_value_on_every_row(self) -> None:
@@ -766,9 +769,9 @@ class TestATrailerCsv:
             _Generated(at, "b", None),
         ]
         assert stamped.frame(b"NAME,VALUE\n20261106030225\n").columns == ["generated_at", "name", "value"]
-        with pytest.raises(ValueError, match="the 'generated_at' cell '20261399030225' is not a time written"):
+        with pytest.raises(ReadError, match="the 'generated_at' cell '20261399030225' is not a time written"):
             stamped.rows(b"NAME,VALUE\na,1.5\n20261399030225\n")
-        with pytest.raises(ValueError, match="column names not specified in schema"):
+        with pytest.raises(ReadError, match="column names not specified in schema"):
             stamped.rows(b"generated_at,NAME,VALUE\nx,a,1.5\n20261106030225\n")
 
     def test_a_group_named_for_a_whole_number_field_is_that_number(self) -> None:
@@ -781,7 +784,7 @@ class TestATrailerCsv:
 
         assert Trailed(Batched).rows(b"NAME\na\nb\nbatch 7\n") == [Batched(7, "a"), Batched(7, "b")]
         assert Trailed(Batched).frame(b"NAME\nbatch 7\n").schema["batch"] == pl.Int64
-        with pytest.raises(ValueError, match="the 'batch' cell 'x' is not a whole number"):
+        with pytest.raises(ReadError, match="the 'batch' cell 'x' is not a whole number"):
             Trailed(Batched).rows(b"NAME\na\nbatch x\n")
 
     def test_a_quoted_line_ending_takes_a_line_and_no_row(self) -> None:
@@ -792,12 +795,12 @@ class TestATrailerCsv:
         ]
 
     def test_a_blank_line_above_the_trailer_is_a_short_row(self) -> None:
-        with pytest.raises(ValueError, match=r"^row 2 has 1 fields, not the header's 3$"):
+        with pytest.raises(ReadError, match=r"^row 2 has 1 fields, not the header's 3$"):
             _Counted(_Row).rows(b"NAME,VALUE,NOTE\na,1.5,x\n\nc,2.5,y\n2\n")
 
     def test_it_composes_with_headers(self) -> None:
         assert _Both(_Row).rows(b"NAME,VALUE\na,1.5\n1\n") == [_Row("a", 1.5, None)]
-        with pytest.raises(ValueError, match="the header \\['VALUE', 'NOTE'\\] is none of the 2"):
+        with pytest.raises(ReadError, match="the header \\['VALUE', 'NOTE'\\] is none of the 2"):
             _Both(_Row).rows(b"VALUE,NOTE\n1.5,x\n1\n")
 
 
@@ -845,7 +848,7 @@ class TestATitledCsv:
         ids=["another title", "a title missing", "cut in its titles", "another count"],
     )
     def test_a_body_its_titles_do_not_open_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _Priced(_Row).rows(body)
 
     def test_a_group_named_for_a_field_states_it_on_every_row(self) -> None:
@@ -865,7 +868,7 @@ class TestATitledCsv:
             _titles = (re.compile(r"as of (?P<generated_at>\d{14})|a note"),)
 
         assert Maybe(_Generated).rows(b"as of 20261109163000\nNAME,VALUE\na,1.5\n")[0].name == "a"
-        with pytest.raises(ValueError, match="have an empty cell"):
+        with pytest.raises(ReadError, match="have an empty cell"):
             Maybe(_Generated).rows(b"a note\nNAME,VALUE\na,1.5\n")
 
     def test_a_count_group_is_the_rows_not_a_field_and_a_count_column_reads(self) -> None:
@@ -876,7 +879,7 @@ class TestATitledCsv:
             _titles = (re.compile(r"(?P<count>\d+) rows"),)
 
         assert Titled(Counted).rows(b"2 rows\nCOUNT\n7\n8\n") == [Counted(7), Counted(8)]
-        with pytest.raises(ValueError, match="the title counts 3 rows, and the body holds 2"):
+        with pytest.raises(ReadError, match="the title counts 3 rows, and the body holds 2"):
             Titled(Counted).rows(b"3 rows\nCOUNT\n7\n8\n")
 
     def test_a_group_named_for_a_whole_number_field_is_that_number(self) -> None:
@@ -888,14 +891,14 @@ class TestATitledCsv:
             _titles = (re.compile(r"batch (?P<batch>\S+)"),)
 
         assert Titled(Batched).rows(b"batch 7\nNAME\na\n") == [Batched(7, "a")]
-        with pytest.raises(ValueError, match="the 'batch' cell 'x' is not a whole number"):
+        with pytest.raises(ReadError, match="the 'batch' cell 'x' is not a whole number"):
             Titled(Batched).rows(b"batch x\nNAME\na\n")
 
     def test_it_composes_with_a_trailer_and_headers(self) -> None:
         assert _Framed(_Row).rows(b"PRICES as of 11/09/2026\n1 rows\n\nNAME,VALUE\na,1.5\n1\n") == [
             _Row("a", 1.5, None)
         ]
-        with pytest.raises(ValueError, match="the trailer counts 2 rows, and the body holds 1"):
+        with pytest.raises(ReadError, match="the trailer counts 2 rows, and the body holds 1"):
             _Framed(_Row).rows(b"PRICES as of 11/09/2026\n1 rows\n\nNAME,VALUE\na,1.5\n2\n")
 
 
@@ -911,14 +914,14 @@ class TestAFlag:
             _Flagged("b", open=False),
             _Flagged("c", open=None),
         ]
-        with pytest.raises(ValueError, match="the 'open' cell 'yes' is not 'Y' or 'N': row 1"):
+        with pytest.raises(ReadError, match="the 'OPEN' cell 'yes' is not 'Y' or 'N': row 1"):
             CsvFile(_Flagged).rows(b"NAME,OPEN\na,yes\n")
 
     def test_a_flag_on_another_field_raises(self) -> None:
         class Misflagged(msgspec.Struct, frozen=True, gc=False):
             name: Annotated[str, Label("NAME"), Flag("Y", "N")]
 
-        with pytest.raises(ValueError, match="the field 'name' is no boolean, so it takes no Flag"):
+        with pytest.raises(LayoutError, match="the field 'name' is no boolean, so it takes no Flag"):
             CsvFile(Misflagged)
 
 
@@ -970,14 +973,14 @@ class TestASheetFile:
     def test_titles_above_the_header_are_skipped_and_rows_take_the_sheets_numbers(self) -> None:
         sheet = SheetFile(_Sheet, sheet="S", header_row=3)
         body = _book(["A title"], [], _HEADER, _LINE, _with(Count=None))
-        with pytest.raises(ValueError, match=r"the \['count'\] columns have an empty cell.*: row 5$"):
+        with pytest.raises(ReadError, match=r"the \['count'\] columns have an empty cell.*: row 5$"):
             sheet.rows(body)
         assert len(sheet.rows(_book(["A title"], [], _HEADER, _LINE))) == 1
 
     def test_the_sheets_words_for_none_read_as_none(self) -> None:
         sheet = SheetFile(_Sheet, sheet="S", null_values=["#N/A"])
         assert sheet.rows(_book(_HEADER, _with(Rate="#N/A")))[0].rate is None
-        with pytest.raises(ValueError, match="the 'Rate' cell '#N/A' is not a number: row 2"):
+        with pytest.raises(ReadError, match="the 'Rate' cell '#N/A' is not a number: row 2"):
             SheetFile(_Sheet, sheet="S").rows(_book(_HEADER, _with(Rate="#N/A")))
 
     def test_an_empty_text_cell_is_none(self) -> None:
@@ -1017,7 +1020,7 @@ class TestASheetFile:
         ],
     )
     def test_a_cell_not_its_columns_type_raises(self, cells: dict[str, Cell], message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             SheetFile(_Sheet, sheet="S").rows(_book(_HEADER, _with(**cells)))
 
     def test_a_column_under_an_empty_header_cell_is_a_field_labeled_empty(self) -> None:
@@ -1030,12 +1033,12 @@ class TestASheetFile:
         assert sheet.rows(_book([None, "Rate", None], [dt.date(2026, 1, 2), 1.5, "x"])) == [
             Dated(dt.date(2026, 1, 2), 1.5, "x")
         ]
-        with pytest.raises(ValueError, match=r"header \(row 1\) \['Day', 'Rate', ''\] is not \['', 'Rate', ''\]"):
+        with pytest.raises(ReadError, match=r"header \(row 1\) \['Day', 'Rate', ''\] is not \['', 'Rate', ''\]"):
             sheet.rows(_book(["Day", "Rate", None], [dt.date(2026, 1, 2), 1.5, "x"]))
         # A label fastexcel would give an empty cell is still a label, not an empty cell.
-        with pytest.raises(ValueError, match="is not"):
+        with pytest.raises(ReadError, match="is not"):
             sheet.rows(_book(["__UNNAMED__0", "Rate", None], [dt.date(2026, 1, 2), 1.5, "x"]))
-        with pytest.raises(ValueError, match="the 'day' cell 'soon' is not a date cell: row 2"):
+        with pytest.raises(ReadError, match="the 'day' cell 'soon' is not a date cell: row 2"):
             sheet.rows(_book([None, "Rate", None], ["soon", 1.5, "x"]))
 
     def test_a_time_of_day_holds_the_sheets_time_cells(self) -> None:
@@ -1049,9 +1052,9 @@ class TestASheetFile:
             Clocked("b", None),
         ]
         assert sheet.frame(_book(["Release", "Time"], ["a", dt.time(9, 15)])).schema["at"] == pl.Time
-        with pytest.raises(ValueError, match="the 'Time' cell '2026-01-02 00:00:00' is not a time cell: row 2"):
+        with pytest.raises(ReadError, match="the 'Time' cell '2026-01-02 00:00:00' is not a time cell: row 2"):
             sheet.rows(_book(["Release", "Time"], ["a", dt.date(2026, 1, 2)]))
-        with pytest.raises(ValueError, match="the 'Time' cell '9:15' is not a time cell: row 2"):
+        with pytest.raises(ReadError, match="the 'Time' cell '9:15' is not a time cell: row 2"):
             sheet.rows(_book(["Release", "Time"], ["a", "9:15"]))
 
     def test_a_label_written_twice_is_two_columns_by_their_places(self) -> None:
@@ -1064,7 +1067,7 @@ class TestASheetFile:
         assert sheet.rows(_book(["Week", "Rate", "Rate"], [dt.date(2026, 1, 1), 6.5, None])) == [
             Rates(dt.date(2026, 1, 1), 6.5, None)
         ]
-        with pytest.raises(ValueError, match=r"\['Week', 'Rate', 'Fees'\] is not \['Week', 'Rate', 'Rate_1'\]"):
+        with pytest.raises(ReadError, match=r"\['Week', 'Rate', 'Fees'\] is not \['Week', 'Rate', 'Rate_1'\]"):
             sheet.rows(_book(["Week", "Rate", "Fees"], [dt.date(2026, 1, 1), 6.5, None]))
 
     @pytest.mark.parametrize(
@@ -1080,7 +1083,7 @@ class TestASheetFile:
         ids=["not a workbook", "no sheet", "another header", "a cell outside", "an empty row", "no rows"],
     )
     def test_a_workbook_that_is_not_the_table_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             SheetFile(_Sheet, sheet="S").rows(body)
 
     def test_a_sheet_with_gaps_drops_its_empty_rows_and_names_its_own_rows(self) -> None:
@@ -1089,7 +1092,7 @@ class TestASheetFile:
 
         sheet = Gapped(_Sheet, sheet="S")
         assert [row.name for row in sheet.rows(_book(_HEADER, _LINE, [], _with(Name="b")))] == ["a", "b"]
-        with pytest.raises(ValueError, match=r"'Count' cell 'x' is not a whole number: row 4"):
+        with pytest.raises(ReadError, match=r"'Count' cell 'x' is not a whole number: row 4"):
             sheet.rows(_book(_HEADER, _LINE, [], _with(Count="x")))
 
 
@@ -1104,7 +1107,7 @@ class _Line(msgspec.Struct, frozen=True, gc=False):
 
 class TestASheetWithGaps:
     def test_a_table_of_only_gaps_is_no_table(self) -> None:
-        with pytest.raises(ValueError, match="a header and no rows"):
+        with pytest.raises(ReadError, match="a header and no rows"):
             _Gapped(_Line, sheet="S").rows(_book(["Name", "Note"], [], []))
 
 
@@ -1133,11 +1136,11 @@ class TestANotedSheet:
 
     def test_a_cell_past_the_first_column_below_the_table_raises_naming_its_row(self) -> None:
         body = _book(_HEADER, _LINE, ["Notes:"], ["a note"], _LINE)
-        with pytest.raises(ValueError, match=r"^the 'S' sheet's row 5 holds a cell past its first column under its"):
+        with pytest.raises(ReadError, match=r"^the 'S' sheet's row 5 holds a cell past its first column under its"):
             NotedSheet(_Sheet, sheet="S").rows(body)
 
     def test_notes_and_no_rows_are_no_table(self) -> None:
-        with pytest.raises(ValueError, match="a header and no rows"):
+        with pytest.raises(ReadError, match="a header and no rows"):
             NotedSheet(_Sheet, sheet="S").rows(_book(_HEADER, ["Notes:"], ["a note"]))
 
 
@@ -1187,25 +1190,25 @@ class TestAStackedHeader:
 
     def test_a_cell_in_a_column_with_no_heading_raises_naming_its_row(self) -> None:
         body = _book([None, "Stocks", None], ["Day", "East", None], [_D1, 1, "x"])
-        with pytest.raises(ValueError, match=r"a column with no heading holds a cell: row 3$"):
+        with pytest.raises(ReadError, match=r"a column with no heading holds a cell: row 3$"):
             _StackedSheet(_Stacked, sheet="S", header_row=2).rows(body)
 
     def test_a_header_with_a_key_twice_or_none_raises(self) -> None:
         twice = _book(["Stocks", "Stocks", "Stocks"], ["Day", "East", "East"], [_D1, 1, 2])
-        with pytest.raises(ValueError, match="names no key, or a column twice"):
+        with pytest.raises(ReadError, match="names no key, or a column twice"):
             _StackedSheet(_Stacked, sheet="S", header_row=2).rows(twice)
-        with pytest.raises(ValueError, match="the header opens"):
+        with pytest.raises(ReadError, match="the header opens"):
             _StackedSheet(_Stacked, sheet="S", header_row=2).rows(_book(["Day", "East"], [_D1, 1]))
 
     def test_the_header_rows_must_fit_the_sheet(self) -> None:
-        with pytest.raises(ValueError, match="the header opens"):
+        with pytest.raises(ReadError, match="the header opens"):
             _StackedSheet(_Stacked, sheet="S", header_row=2).rows(_book([None, "Stocks"], ["Other", "East"], [_D1, 1]))
 
     def test_a_week_with_no_values_is_a_week_and_a_cell_under_the_dates_raises(self) -> None:
         sheet = _StackedSheet(_Stacked, sheet="S", header_row=2)
         head: list[list[Cell]] = [[None, "Stocks"], ["Day", "East"]]
         assert sheet.rows(_book(*head, [_D1, None], [_D2, 5])) == [_Stacked(_D2, "Stocks", "East", 5.0)]
-        with pytest.raises(ValueError, match=r"row 5 holds a cell under its table"):
+        with pytest.raises(ReadError, match=r"row 5 holds a cell under its table"):
             sheet.rows(_book(*head, [_D1, 1], ["Notes"], ["x", 2]))
 
 
@@ -1231,7 +1234,7 @@ class TestScatteredRecordColumns:
         ]
 
     def test_a_record_column_missing_raises(self) -> None:
-        with pytest.raises(ValueError, match="has no one 'Last' column"):
+        with pytest.raises(ReadError, match="has no one 'Last' column"):
             _ScatteredSheet(_Scattered, sheet="S").rows(_book(["Day", "East"], [_D1, 1]))
 
 
@@ -1255,11 +1258,11 @@ class TestASheetsFile:
         assert self._reader().rows(body) == [_Year(2025, "a"), _Year(2026, "b"), _Year(2026, "c")]
 
     def test_a_sheet_of_another_name_or_a_table_that_is_not_its_own_raises(self) -> None:
-        with pytest.raises(ValueError, match="the workbook's sheet 'Contents' is not one of"):
+        with pytest.raises(ReadError, match="the workbook's sheet 'Contents' is not one of"):
             self._reader().rows(workbook({"Report 2025": [["Name"], ["a"]], "Contents": [["x"]]}))
-        with pytest.raises(ValueError, match="the 'Report 2026' sheet: "):
+        with pytest.raises(ReadError, match="the 'Report 2026' sheet: "):
             self._reader().rows(workbook({"Report 2025": [["Name"], ["a"]], "Report 2026": [["Other"], ["b"]]}))
-        with pytest.raises(ValueError, match="not a workbook"):
+        with pytest.raises(ReadError, match="not a workbook"):
             self._reader().rows(b"<html/>")
 
     def test_a_sheet_text_per_sheet_reads_its_grid_from_the_workbook_opened_once(
@@ -1313,7 +1316,7 @@ class TestACutSheet:
             for name in whole.namelist():
                 data = whole.read(name)
                 archive.writestr(name, data[: len(data) // 2] if name == "xl/worksheets/sheet1.xml" else data)
-        with pytest.raises(ValueError, match="the 'S' sheet cannot be loaded as the table: "):
+        with pytest.raises(ReadError, match="the 'S' sheet cannot be loaded as the table: "):
             SheetFile(_CodeCount, sheet="S").rows(cut.getvalue())
 
 
@@ -1331,7 +1334,7 @@ class TestASheetOfLines:
 
         body = _book(["Notes"], [], ["one"], [], ["two"])
         assert Lines(Line, sheet="S").rows(body) == [Line(None), Line("one"), Line(None), Line("two")]
-        with pytest.raises(ValueError, match="row 2 is empty"):
+        with pytest.raises(ReadError, match="row 2 is empty"):
             SheetFile(Line, sheet="S").rows(body)
 
 
@@ -1371,13 +1374,13 @@ class TestASectionedCsv:
         assert second.rows(_TWO) == [_Cell("c", 1, "Year", 5.0)]
 
     def test_the_file_must_open_with_a_header_and_hold_that_many_tables(self) -> None:
-        with pytest.raises(ValueError, match=r"the body has 2 tables, at bytes \[0, \d+\], not 1 from the first byte"):
+        with pytest.raises(ReadError, match=r"the body has 2 tables, at bytes \[0, \d+\], not 1 from the first byte"):
             _Tables(_Cell).rows(_TWO)
-        with pytest.raises(ValueError, match=r"the body has 0 tables"):
+        with pytest.raises(ReadError, match=r"the body has 0 tables"):
             _Tables(_Cell).rows(b'"X"\r\n1\r\n')
 
     def test_a_table_the_file_does_not_hold_is_a_bug(self) -> None:
-        with pytest.raises(ValueError, match="the file's 2 tables have no table 2"):
+        with pytest.raises(LayoutError, match="the file's 2 tables have no table 2"):
             _Tables(_Cell, section=2, sections=2)
 
 
@@ -1387,7 +1390,7 @@ class TestATranscodedFile:
         assert _Tables(_Cell, final_line_ending=True).rows(body) == [_Cell("café", 1, "Week", 1.0)]
 
     def test_a_body_that_does_not_decode_raises(self) -> None:
-        with pytest.raises(ValueError, match="the body is not cp1252"):
+        with pytest.raises(ReadError, match="the body is not cp1252"):
             _Tables(_Cell).rows(b'"LINE","Week"\r\n"\x81","1"\r\n')
 
 
@@ -1421,7 +1424,7 @@ class TestATranscodedFilesEncodings:
 
     def test_a_body_no_encoding_decodes_raises_unless_it_is_lossy(self) -> None:
         body = b"Name,Count\r\nx\xff,1\r\n"
-        with pytest.raises(ValueError, match="the body is not utf-8: "):
+        with pytest.raises(ReadError, match="the body is not utf-8: "):
             _UTF8OrNothing(_NameCount).rows(body)
         assert _StrayBytes(_NameCount).rows(body) == [_NameCount("x\ufffd", 1)]
 
@@ -1454,7 +1457,7 @@ class TestACsvsColumnsNoFieldReads:
         ids=["a row not closed", "a cell past the closing separator", "a header not closed"],
     )
     def test_a_line_not_closed_by_the_separator_raises(self, body: bytes, error: str) -> None:
-        with pytest.raises(ValueError, match=error):
+        with pytest.raises(ReadError, match=error):
             _ClosedLines(_NameCount).rows(body)
 
     def test_a_row_may_close_with_the_separator(self) -> None:
@@ -1467,7 +1470,7 @@ class TestACsvsColumnsNoFieldReads:
 
     def test_a_blank_column_holding_a_value_raises(self) -> None:
         body = b"Name,Filler,Count,Notes,Filler\r\nx,,1,,\r\ny,,2,,v\r\n"
-        with pytest.raises(ValueError, match="the 'Filler' column holds 'v', and it never holds a value: row 2"):
+        with pytest.raises(ReadError, match="the 'Filler' column holds 'v', and it never holds a value: row 2"):
             _Fillers(_NameCount).rows(body)
 
 
@@ -1486,7 +1489,7 @@ class TestATextTablesColumnsNoFieldReads:
         assert _TextCells(_NameCount).rows(b"Name,Count,Notes,Follow\nx,1,a note,  \n") == [_NameCount("x", 1)]
 
     def test_a_blank_column_holding_a_value_raises(self) -> None:
-        with pytest.raises(ValueError, match="the 'Follow' column holds 'y', and it never holds a value: row 1"):
+        with pytest.raises(ReadError, match="the 'Follow' column holds 'y', and it never holds a value: row 1"):
             _TextCells(_NameCount).rows(b"Name,Count,Follow\nx,1,y\n")
 
 
@@ -1507,11 +1510,11 @@ class TestAReshapedFile:
         assert reader.rows(b"Label,N\r\nx,1\r\n") == [_NameCount("X", 1)]
 
     def test_a_frame_read_as_it_is_must_be_the_rows_fields(self) -> None:
-        with pytest.raises(ValueError, match=r"the reader's columns \['label', 'n'\] are not _NameCount's fields"):
+        with pytest.raises(LayoutError, match=r"the reader's columns \['label', 'n'\] are not _NameCount's fields"):
             Reshaped(_NameCount, CsvFile(_Raw)).rows(b"Label,N\r\nx,1\r\n")
 
     def test_the_inner_reader_checks_the_file(self) -> None:
-        with pytest.raises(ValueError, match="row 1 has 1 fields, not the header's 2"):
+        with pytest.raises(ReadError, match="row 1 has 1 fields, not the header's 2"):
             _Shaped(_NameCount, CsvFile(_Raw)).rows(b"Label,N\r\nx\r\n")
 
 
@@ -1552,7 +1555,7 @@ class TestATrimmedSheet:
     def test_a_cell_of_only_whitespace_is_empty_where_a_sheet_says_so(self) -> None:
         body = _book(["Text", "Count"], [" ", 1], ["a", "  "])
         assert _TrimmedSheet(_Texts, sheet="S").rows(body) == [_Texts(None, 1), _Texts("a", None)]
-        with pytest.raises(ValueError, match="is not a whole number"):
+        with pytest.raises(ReadError, match="is not a whole number"):
             SheetFile(_Texts, sheet="S").rows(body)
         assert SheetFile(_Texts, sheet="S").rows(_book(["Text", "Count"], [" ", 1]))[0].text == " "
 
@@ -1560,7 +1563,7 @@ class TestATrimmedSheet:
         body = _book([" Text\u00a0", " Count "], ["a", 1])
         assert _StrippedSheet(_Texts, sheet="S").rows(body) == [_Texts("a", 1)]
         for refused in (_TrimmedSheet, SheetFile):
-            with pytest.raises(ValueError, match="is not"):
+            with pytest.raises(ReadError, match="is not"):
                 refused(_Texts, sheet="S").rows(body)
 
     def test_a_heading_a_sheet_writes_twice_is_twice(self) -> None:
@@ -1570,23 +1573,23 @@ class TestATrimmedSheet:
         assert Twice(_RepeatedRates, sheet="S").rows(_book(["Rate", "Rate"], [1, 2])) == [_RepeatedRates(1.0, 2.0)]
 
     def test_the_header_is_the_sheets_own_row_not_the_first_row_with_a_cell(self) -> None:
-        with pytest.raises(ValueError, match=r"the 'S' sheet's header \(row 1\) \['', ''\] is not"):
+        with pytest.raises(ReadError, match=r"the 'S' sheet's header \(row 1\) \['', ''\] is not"):
             _TrimmedSheet(_Texts, sheet="S").rows(_book([], ["Text", "Count"], ["a", 1]))
 
     def test_a_sheet_that_ends_before_its_header_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"the 'S' sheet ends at row [01], before its header row 3"):
+        with pytest.raises(ReadError, match=r"the 'S' sheet ends at row [01], before its header row 3"):
             _TrimmedSheet(_Texts, sheet="S", header_row=3).rows(_book(["Text", "Count"]))
 
     def test_a_table_that_starts_after_cells_of_the_sheets_top_rows_is_refused(self) -> None:
         body = _book(["Title"], [None, "Text", "Count"], [None, "a", 1])
-        with pytest.raises(ValueError, match=r"header row holds 3 columns, not the 2 loaded"):
+        with pytest.raises(ReadError, match=r"header row holds 3 columns, not the 2 loaded"):
             _TrimmedSheet(_Texts, sheet="S", header_row=2).rows(body)
 
     def test_the_rows_over_the_header_must_be_above_it(self) -> None:
         class Tall(SheetFile[_Texts]):
             _above = 2
 
-        with pytest.raises(ValueError, match="the 2 rows over the header do not fit above its row 2"):
+        with pytest.raises(LayoutError, match="the 2 rows over the header do not fit above its row 2"):
             Tall(_Texts, sheet="S", header_row=2)
 
 
@@ -1618,7 +1621,7 @@ class TestALongSheetsHeadings:
             _Scattered(_D1, _D2, "East", 1.0),
             _Scattered(_D1, _D2, "West", 2.0),
         ]
-        with pytest.raises(ValueError, match="are not keys"):
+        with pytest.raises(ReadError, match="are not keys"):
             _ScatteredSheet(_Scattered, sheet="S").rows(body)
 
     def test_an_empty_label_is_the_first_column_not_a_spacer(self) -> None:
@@ -1630,7 +1633,7 @@ class TestALongSheetsHeadings:
 
     def test_a_title_in_the_first_column_over_a_table_that_starts_in_the_second_is_refused(self) -> None:
         body = _book(["Title"], [None, "Day", "East", "Last", "West"], [None, _D1, 1, _D2, 2])
-        with pytest.raises(ValueError, match=r"header row holds 5 columns, not the 4 loaded"):
+        with pytest.raises(ReadError, match=r"header row holds 5 columns, not the 4 loaded"):
             _SpacerSheet(_Scattered, sheet="S", header_row=2).rows(body)
 
     def test_a_heading_is_any_text_but_a_field_name(self) -> None:
@@ -1638,11 +1641,11 @@ class TestALongSheetsHeadings:
             body = _book(["Day", "Last", heading], [_D1, _D2, 1])
             assert _SpacerSheet(_Scattered, sheet="S").rows(body) == [_Scattered(_D1, _D2, heading, 1.0)]
         for field in ("value", "region", "day", "last"):
-            with pytest.raises(ValueError, match="names no key, or a column twice"):
+            with pytest.raises(ReadError, match="names no key, or a column twice"):
                 _SpacerSheet(_Scattered, sheet="S").rows(_book(["Day", "Last", field, "East"], [_D1, _D2, 1, 2]))
 
     def test_a_heading_written_twice_is_twice_not_numbered(self) -> None:
-        with pytest.raises(ValueError, match=r"names no key, or a column twice$") as caught:
+        with pytest.raises(ReadError, match=r"names no key, or a column twice$") as caught:
             _SpacerSheet(_Scattered, sheet="S").rows(_book(["Day", "Last", "East", "East"], [_D1, _D2, 1, 2]))
         assert "'East', 'East'" in str(caught.value)
 
@@ -1661,7 +1664,7 @@ class TestALongSheetsHeadings:
             _key_count = 2
             _keys = re.compile(r"[^\x1f]+\x1f[^\x1f]+")
 
-        with pytest.raises(ValueError, match=r"the key fields \['group', 'series'\] are named by no group of"):
+        with pytest.raises(LayoutError, match=r"the key fields \['group', 'series'\] are named by no group of"):
             NoGroups(_Stacked, sheet="S", header_row=2).rows(_book([None, "Stocks"], ["Day", "East"], [_D1, 1]))
 
     def test_a_group_matching_nothing_is_no_text_where_the_field_admits_none(self) -> None:
@@ -1709,9 +1712,9 @@ class TestATableOfNoValues:
         assert frame.is_empty()
         assert frame.schema == {"day": pl.Date, "group": pl.String, "series": pl.String, "value": pl.Float64}
         for body in (_book(*head), _book(*head, ["a note"])):
-            with pytest.raises(ValueError, match="a header and no rows"):
+            with pytest.raises(ReadError, match="a header and no rows"):
                 sheet.frame(body)
-        with pytest.raises(ValueError, match="a header and no rows"):
+        with pytest.raises(ReadError, match="a header and no rows"):
             _StackedSheet(_Stacked, sheet="S", header_row=2).frame(_book(*head, [_D1, None]))
 
     def test_a_bare_header_is_an_empty_answer_unless_the_format_refuses_it(self) -> None:
@@ -1732,13 +1735,13 @@ class TestATableOfNoValues:
             "series": pl.String,
             "value": pl.Float64,
         }
-        with pytest.raises(ValueError, match="names no key, or a column twice"):
+        with pytest.raises(ReadError, match="names no key, or a column twice"):
             _StackedSheet(_Stacked, sheet="S", header_row=2).frame(body)
 
 
 class TestASectionedCsvsFirstByte:
     def test_a_line_before_the_first_header_is_no_part_of_a_table(self) -> None:
-        with pytest.raises(ValueError, match=r"the body has 1 tables, at bytes \[\d+\], not 1 from the first byte"):
+        with pytest.raises(ReadError, match=r"the body has 1 tables, at bytes \[\d+\], not 1 from the first byte"):
             _Tables(_Cell).rows(b'junk\r\n"LINE","Week"\r\n"a","1"\r\n')
 
 
@@ -1754,7 +1757,7 @@ class TestARepeatedHeadingInACsv:
 
     def test_a_heading_that_is_a_repeats_name_beside_the_repeat_is_refused_by_polars(self) -> None:
         body = b'"LINE","Change","Change_duplicated_0","Change"\r\n"a","1","2","3"\r\n'
-        with pytest.raises(ValueError, match="de-duplication"):
+        with pytest.raises(ReadError, match="de-duplication"):
             _Tables(_Cell).rows(body)
 
     def test_a_long_csv_that_may_not_repeat_a_heading_reads_polars_names_for_a_repeat(self) -> None:
@@ -1788,15 +1791,15 @@ class TestARepeatedHeadingInACsv:
             _repeats = True
 
         for body in (b"X\x1fLINE,Week\r\na,1\r\n", b"LINE,A\x1fB\r\na,1\r\n"):
-            with pytest.raises(ValueError, match=r"holds a U\+001F"):
+            with pytest.raises(ReadError, match=r"holds a U\+001F"):
                 Plain(_Cell).rows(body)
 
     def test_a_heading_holding_a_nul_is_refused(self) -> None:
         for heading in ("A\x00B", "\x00A", "A\x00\x000"):
             body = f'"LINE","A","{heading}"\r\n"a","1","2"\r\n'.encode()
-            with pytest.raises(ValueError, match="holds a NUL"):
+            with pytest.raises(ReadError, match="holds a NUL"):
                 _Tables(_Cell).rows(body)
-        with pytest.raises(ValueError, match="holds a NUL"):
+        with pytest.raises(ReadError, match="holds a NUL"):
             _SpacerSheet(_Scattered, sheet="S").rows(_book(["Day", "Last", "E\x00ast"], [_D1, _D2, 1]))
 
     def test_empty_headings_are_each_a_heading(self) -> None:
@@ -1813,7 +1816,7 @@ class TestARepeatedHeadingInACsv:
             if read:
                 assert [row.heading for row in _Tables(_Cell).rows(body)] == [heading]
             else:
-                with pytest.raises(ValueError, match="names no key, or a column twice"):
+                with pytest.raises(ReadError, match="names no key, or a column twice"):
                     _Tables(_Cell).rows(body)
 
 
@@ -1851,7 +1854,7 @@ class TestATitledSheet:
         ],
     )
     def test_rows_that_are_not_its_titles_raise(self, body: bytes, header_row: int, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _TitledSheet(_Sheet, sheet="S", header_row=header_row).rows(body)
 
 
@@ -1867,7 +1870,7 @@ class TestAPreambleSheet:
 
     def test_an_error_names_the_sheets_own_row(self) -> None:
         body = _book(["A banner"], [], _HEADER, _LINE, _with(Count="many"))
-        with pytest.raises(ValueError, match="row 5"):
+        with pytest.raises(ReadError, match="row 5"):
             PreambleSheet(_Sheet, sheet="S").rows(body)
 
     @pytest.mark.parametrize(
@@ -1879,7 +1882,7 @@ class TestAPreambleSheet:
         ],
     )
     def test_a_body_without_its_header_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             PreambleSheet(_Sheet, sheet="S").rows(body)
 
 
@@ -1916,7 +1919,7 @@ class TestAnOnlySheet:
         ],
     )
     def test_a_workbook_of_another_count_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             OnlySheet(_Sheet).rows(body)
 
 
@@ -1998,7 +2001,7 @@ class TestASheetText:
         ],
     )
     def test_a_table_that_is_not_its_own_raises(self, body: bytes, sheet: str | None, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             SheetText(_Spaced, sheet=sheet).rows(body)
 
 
@@ -2024,7 +2027,7 @@ class TestASheetGrid:
         ],
     )
     def test_a_body_without_the_sheet_raises(self, body: bytes, sheet: str | None, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             sheet_grid(body, sheet)
 
 
@@ -2188,7 +2191,7 @@ class TestACsvText:
         ],
     )
     def test_a_body_that_is_not_its_table_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             CsvText(_Spaced).rows(body)
 
     def test_a_misquoted_file_reads_a_stray_quote_as_text(self) -> None:
@@ -2200,7 +2203,7 @@ class TestACsvText:
                 return super()._table(grid.head(3))
 
         body = b'Month,Value\n2026-01,"1.5"\n2026-02,4\n"ts." Holdings o","x\n'
-        with pytest.raises(ValueError, match="the body is no delimited file"):
+        with pytest.raises(ReadError, match="the body is no delimited file"):
             CsvText(_Spaced).rows(body)
         assert Noted(_Spaced).rows(body) == [_Spaced(dt.date(2026, 1, 1), 1.5), _Spaced(dt.date(2026, 2, 1), 4.0)]
 
@@ -2217,15 +2220,15 @@ class TestAGridFile:
         class Tall(Listed):
             _above = 1
 
-        with pytest.raises(ValueError, match="the 1 rows over the header do not fit above its row 1"):
+        with pytest.raises(LayoutError, match="the 1 rows over the header do not fit above its row 1"):
             Tall(_Spaced)
 
     def test_two_columns_a_stacked_header_heads_alike_raise(self) -> None:
-        with pytest.raises(ValueError, match="heads two columns alike"):
+        with pytest.raises(ReadError, match="heads two columns alike"):
             _FactorsCsv(_Factor, header_row=2).rows(b",Stocks,,,\n,East,,,West\nJan-1996,1,,,2\n")
 
     def test_a_header_below_the_grids_end_is_no_header(self) -> None:
-        with pytest.raises(ValueError, match=r"the header \[\] is not"):
+        with pytest.raises(ReadError, match=r"the header \[\] is not"):
             CsvText(_Spaced, header_row=9).rows(b"Month,Value\n2026-01,4\n")
 
 
@@ -2245,7 +2248,7 @@ class TestAGridTableCut:
     def test_a_blank_ended_table_stops_at_its_first_blank_row(self) -> None:
         body = b"Month,Value\n2026-01,4\n,\nLast Updated: 9-30-2026,\n"
         assert _EndedGrid(_Spaced).rows(body) == [_Spaced(dt.date(2026, 1, 1), 4.0)]
-        with pytest.raises(ValueError, match=r"the 'Month' cell 'Last Updated: 9-30-2026' is not a date"):
+        with pytest.raises(ReadError, match=r"the 'Month' cell 'Last Updated: 9-30-2026' is not a date"):
             CsvText(_Spaced).rows(body)
 
     def test_a_titled_table_is_the_first_filled_row_under_its_title_to_the_next_blank(self) -> None:
@@ -2260,14 +2263,14 @@ class TestAGridTableCut:
         ],
     )
     def test_a_titled_table_without_its_title_or_rows_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _TitledGrid(_Spaced).rows(body)
 
     def test_a_titled_header_needs_the_rows_over_it(self) -> None:
         class Stacked(_TitledGrid):
             _above = 2
 
-        with pytest.raises(ValueError, match=r"the header in row 2 has not the 2 rows over it"):
+        with pytest.raises(ReadError, match=r"the header in row 2 has not the 2 rows over it"):
             Stacked(_Spaced, header_row=3).rows(b"II. Values\nMonth,Value\n2026-01,4\n")
 
     def test_a_filled_header_is_the_first_row_about_as_filled_as_the_fullest(self) -> None:
@@ -2366,7 +2369,7 @@ class TestABiffSheet:
         ],
     )
     def test_a_body_that_is_not_its_workbook_raises(self, body: bytes, sheet: str | None, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             BiffSheet(_Biff, sheet=sheet).rows(body)
 
 
@@ -2426,14 +2429,14 @@ class TestAJoinedField:
         ],
     )
     def test_cells_that_are_not_its_date_raise(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             CsvFile(_ByMonthName).rows(body)
 
     def test_a_joined_field_is_a_date_read_by_its_format(self) -> None:
         class Unformatted(msgspec.Struct, frozen=True, gc=False):
             month: Annotated[dt.date, Label("Month"), Joined("Year")]
 
-        with pytest.raises(ValueError, match="is Joined, so it is a date or time read by its Format"):
+        with pytest.raises(LayoutError, match="is Joined, so it is a date or time read by its Format"):
             CsvFile(Unformatted)
 
 
@@ -2451,7 +2454,7 @@ class TestFormatAlternatives:
             Either(dt.date(2009, 1, 14)),
         ]
         with pytest.raises(
-            ValueError, match="the 'day' cell '1/05/2008' is not a date written %m/%d/%Y or %-m/%-d/%Y: row 1"
+            ReadError, match="the 'DAY' cell '1/05/2008' is not a date written %m/%d/%Y or %-m/%-d/%Y: row 1"
         ):
             flat.rows(b"DAY\n1/05/2008\n")
 
@@ -2511,7 +2514,7 @@ class TestAnXmlFile:
         ids=["fraction", "text in float", "not a boolean", "another date form", "a blank required element"],
     )
     def test_an_element_not_its_fields_type_raises(self, cells: dict[str, str], message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _TABLE.rows(_xml(_cells(**cells)))
 
     @pytest.mark.parametrize(
@@ -2541,14 +2544,14 @@ class TestAnXmlFile:
         ],
     )
     def test_a_document_that_is_not_the_table_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _TABLE.rows(body)
 
     def test_a_date_field_needs_its_format(self) -> None:
         class Undated(msgspec.Struct, frozen=True, gc=False):
             day: Annotated[dt.date, Label("Day")]
 
-        with pytest.raises(ValueError, match="the field 'day' needs the Format its text is written in"):
+        with pytest.raises(LayoutError, match="the field 'day' needs the Format its text is written in"):
             XmlFile(Undated, root="Table", record="Row")
 
 
@@ -2636,26 +2639,26 @@ class TestANestedXml:
         ],
     )
     def test_a_document_that_is_not_the_table_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _SEATS.rows(body)
 
     def test_a_path_that_finds_no_text_raises(self) -> None:
         class Counted(msgspec.Struct, frozen=True, gc=False):
             count: Annotated[str, Label("count(*)")]
 
-        with pytest.raises(ValueError, match=r"record 1's 'count\(\*\)' finds 0.0, which is no text"):
+        with pytest.raises(ReadError, match=r"record 1's 'count\(\*\)' finds 0.0, which is no text"):
             NestedXml(Counted, root="T", record="R").rows(b"<T><R/></T>")
 
     def test_a_record_path_that_finds_no_elements_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"the record path 'seats/seat/@district' finds \['1'\], not elements"):
+        with pytest.raises(ReadError, match=r"the record path 'seats/seat/@district' finds \['1'\], not elements"):
             NestedXml(_Seat, root="House", record="seats/seat/@district").rows(_house(_SEAT))
 
     def test_a_prefix_no_namespace_binds_raises(self) -> None:
-        with pytest.raises(ValueError, match="a path will not evaluate on the document"):
+        with pytest.raises(ReadError, match="a path will not evaluate on the document"):
             NestedXml(_Seat, root="House", record="x:seats").rows(_house(_SEAT))
 
     def test_a_path_that_is_no_xpath_is_refused(self) -> None:
-        with pytest.raises(ValueError, match=r"the record path 'seats\[' or a field's Label .* is no XPath"):
+        with pytest.raises(LayoutError, match=r"the record path 'seats\[' or a field's Label .* is no XPath"):
             NestedXml(_Seat, root="House", record="seats[")
 
 
@@ -2675,7 +2678,7 @@ class TestAFlagInASheetOrXml:
             _Flagged("a", open=True),
             _Flagged("b", open=False),
         ]
-        with pytest.raises(ValueError, match="the 'OPEN' cell 'yes' is not 'Y' or 'N': row 2"):
+        with pytest.raises(ReadError, match="the 'OPEN' cell 'yes' is not 'Y' or 'N': row 2"):
             sheet.rows(workbook({"S": [["NAME", "OPEN"], ["a", "yes"]]}))
 
     def test_an_xml_elements_flag_reads_by_its_words(self) -> None:
@@ -2723,7 +2726,7 @@ class TestAFixedWidthFile:
     def test_its_numbers_may_be_grouped_in_thousands(self) -> None:
         body = _FIXED_HEADER + b"AB   1,234 1.5 20261106Y\n"
         assert _GroupedFixed(_Fixed).rows(body)[0].count == 1234
-        with pytest.raises(ValueError, match="the 'COUNT' cell '12,34' is not a number grouped in thousands: row 1"):
+        with pytest.raises(ReadError, match="the 'COUNT' cell '12,34' is not a number grouped in thousands: row 1"):
             _GroupedFixed(_Fixed).rows(_FIXED_HEADER + b"AB   12,34 1.5 20261106Y\n")
 
     def test_each_cell_is_its_span_stripped_and_typed(self) -> None:
@@ -2766,22 +2769,22 @@ class TestAFixedWidthFile:
         ],
     )
     def test_a_body_that_is_not_the_table_raises(self, body: bytes, error: str) -> None:
-        with pytest.raises(ValueError, match=error):
+        with pytest.raises(ReadError, match=error):
             FixedWidthFile(_Fixed).rows(body)
 
     def test_a_file_with_no_header_reads_every_line_and_its_fields_need_no_label(self) -> None:
         assert _Headless(_Fixed).rows(b"AB   00012 1.5 20261106Y\n")[0].count == 12
-        with pytest.raises(ValueError, match="the 'COUNT' cell 'COUNT' is not a whole number: row 1"):
+        with pytest.raises(ReadError, match="the 'COUNT' cell 'COUNT' is not a whole number: row 1"):
             _Headless(_Fixed).rows(_FIXED_HEADER)
 
     def test_a_stated_field_is_read_from_above_the_table_for_every_row(self) -> None:
         rows = _Titled(_Dates).rows(b"  11062026\nA    000000012\nZYME 000000008\n")
         assert rows == [_Dates(dt.date(2026, 11, 6), "A", 12), _Dates(dt.date(2026, 11, 6), "ZYME", 8)]
-        with pytest.raises(ValueError, match="the 'as_of' cell '13062026' is not a date"):
+        with pytest.raises(ReadError, match="the 'as_of' cell '13062026' is not a date"):
             _Titled(_Dates).rows(b"13062026\nA    000000012\n")
 
     def test_the_final_line_ending_is_checked(self) -> None:
-        with pytest.raises(ValueError, match="it was cut"):
+        with pytest.raises(ReadError, match="it was cut"):
             FixedWidthFile(_Fixed, final_line_ending=True).rows(_FIXED_HEADER + b"AB   00012 1.5 20261106Y")
 
     @pytest.mark.parametrize(
@@ -2795,7 +2798,7 @@ class TestAFixedWidthFile:
     def test_a_layout_with_a_field_out_of_place_raises(
         self, flat: type[FixedWidthFile[typing.Any]], row: type[msgspec.Struct], error: str
     ) -> None:
-        with pytest.raises(ValueError, match=error):
+        with pytest.raises(LayoutError, match=error):
             flat(row)
 
     def test_spans_out_of_order_overlapping_or_empty_raise(self) -> None:
@@ -2807,14 +2810,14 @@ class TestAFixedWidthFile:
             a: Annotated[str, Label("A"), Span(2, 2)]
 
         for row in (Overlapping, Empty):
-            with pytest.raises(ValueError, match="not one or more, in order"):
+            with pytest.raises(LayoutError, match="not one or more, in order"):
                 FixedWidthFile(row)
 
     def test_a_date_needs_its_format(self) -> None:
         class Undated(msgspec.Struct):
             day: Annotated[dt.date, Label("DAY"), Span(0, 8)]
 
-        with pytest.raises(ValueError, match="needs the Format"):
+        with pytest.raises(LayoutError, match="needs the Format"):
             FixedWidthFile(Undated)
 
 
@@ -2880,7 +2883,7 @@ class _CountedSales(_Sales):
         super()._check_lines(read)
         if (rows := sum(match.re is self._line for _, match in read)) != int(read[-1][1][1]):
             msg = f"the report counts {read[-1][1][1]} stores, and holds {rows}"
-            raise ValueError(msg)
+            raise ReadError(msg)
 
 
 class TestAReportFile:
@@ -2907,34 +2910,34 @@ class TestAReportFile:
         ],
     )
     def test_a_body_that_is_not_the_report_raises(self, body: bytes, error: str) -> None:
-        with pytest.raises(ValueError, match=error):
+        with pytest.raises(ReadError, match=error):
             _Sales(_Sale, null_values=("n.a.",)).rows(body)
 
     def test_a_report_that_writes_its_end_must_end_with_it(self) -> None:
         ended = _SALES + b"  ***** END OF REPORT *****\n\n"
         assert len(_Ended(_Sale, null_values=("n.a.",)).rows(ended)) == 3
-        with pytest.raises(ValueError, match=r"the report ends with ' PIER .*': it was cut"):
+        with pytest.raises(ReadError, match=r"the report ends with ' PIER .*': it was cut"):
             _Ended(_Sale, null_values=("n.a.",)).rows(_SALES)
 
     def test_a_report_that_may_hold_no_rows_reads_none(self) -> None:
         empty = _SALES.split(b"REGION NORTH")[0] + b"NO SALES\n"
         assert _MaybeEmptySales(_Sale).rows(empty) == []
-        with pytest.raises(ValueError, match="no column header"):
+        with pytest.raises(ReadError, match="no column header"):
             _MaybeEmptySales(_Sale).rows(b"SALES REPORT   DAY 11/06/2026   PAGE 1\nNO SALES\n")
 
     def test_a_format_checks_its_lines(self) -> None:
         assert len(_CountedSales(_Sale, null_values=("n.a.",)).rows(_SALES + b"STORES 3\n")) == 3
-        with pytest.raises(ValueError, match="the report counts 4 stores, and holds 3"):
+        with pytest.raises(ReadError, match="the report counts 4 stores, and holds 3"):
             _CountedSales(_Sale, null_values=("n.a.",)).rows(_SALES + b"STORES 4\n")
 
     def test_the_final_line_ending_is_checked(self) -> None:
-        with pytest.raises(ValueError, match="always ends its last line"):
+        with pytest.raises(ReadError, match="always ends its last line"):
             _Sales(_Sale, null_values=("n.a.",), final_line_ending=True).rows(_SALES.rstrip(b"\n"))
 
     def test_thousands_cleans_a_reports_numbers(self) -> None:
         body = _SALES.replace(b"MAIN ST       12", b"MAIN ST    1,200")
         assert _GroupedSales(_Sale, null_values=("n.a.",)).rows(body)[0].units == 1200
-        with pytest.raises(ValueError, match="the 'units' cell '12,00' is not a number grouped in thousands: row 1"):
+        with pytest.raises(ReadError, match="the 'units' cell '12,00' is not a number grouped in thousands: row 1"):
             _GroupedSales(_Sale, null_values=("n.a.",)).rows(_SALES.replace(b"MAIN ST       12", b"MAIN ST    12,00"))
 
     def test_a_layout_whose_groups_are_not_its_fields_raises(self) -> None:
@@ -2944,9 +2947,9 @@ class TestAReportFile:
         class Both(_Sales):
             _framing = (*_Sales._framing, re.compile(r"STORE (?P<store>\w+)"))
 
-        with pytest.raises(ValueError, match=r"the format's groups \['clerk'\] name no field of _Sale"):
+        with pytest.raises(LayoutError, match=r"the format's groups \['clerk'\] name no field of _Sale"):
             Stray(_Sale)
-        with pytest.raises(ValueError, match=r"the fields \['store'\] are both a row's cells and stated"):
+        with pytest.raises(LayoutError, match=r"the fields \['store'\] are both a row's cells and stated"):
             Both(_Sale)
 
 
@@ -2986,9 +2989,9 @@ class TestALongReport:
         ]
 
     def test_a_row_of_another_count_of_values_raises(self) -> None:
-        with pytest.raises(ValueError, match="row 2 holds 3 values, not 4: 2 for each key above it"):
+        with pytest.raises(ReadError, match="row 2 holds 3 values, not 4: 2 for each key above it"):
             _Held(_Shares, null_values=("-",)).rows(_HELD.replace(b"4.5 -", b"4.5"))
-        with pytest.raises(ValueError, match="row 1 holds 2 values, not 0"):
+        with pytest.raises(ReadError, match="row 1 holds 2 values, not 0"):
             _Held(_Shares).rows(b"Japan   5.5 50\n")
 
 
@@ -3008,13 +3011,13 @@ class TestCarried:
         assert [(row.sector, row.name) for row in rows] == [("Banks", "a"), ("Banks", "b"), ("Oil", "c"), ("Oil", "d")]
 
     def test_a_first_row_without_its_group_or_a_carried_stray_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"\['sector'\] columns have an empty cell.*row 1"):
+        with pytest.raises(ReadError, match=r"\['sector'\] columns have an empty cell.*row 1"):
             _Sectors(_Holding).rows(b"SECTOR,NAME,VALUE\n,a,1\n")
 
         class Stray(_Sectors):
             _carried = ("region",)
 
-        with pytest.raises(ValueError, match=r"carries \['region'\] down, which are no fields of _Holding"):
+        with pytest.raises(LayoutError, match=r"carries \['region'\] down, which are no fields of _Holding"):
             Stray(_Holding).rows(b"SECTOR,NAME,VALUE\nBanks,a,1\n")
 
 
@@ -3072,12 +3075,12 @@ class TestAZippedFile:
         ids=["no zip", "another count", "no member", "a third member", "several members", "a damaged member"],
     )
     def test_a_zip_that_is_not_the_file_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _Paired(_Record, root="Table", record="Row").frame(body)
 
     def test_a_member_past_the_inflate_cap_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr("flatread.archives._INFLATED_MAX", len(_CSV) - 1)
-        with pytest.raises(ValueError, match=r"^the zip's 'table\.csv' inflates to \d+ bytes, over \d+$"):
+        with pytest.raises(ReadError, match=r"^the zip's 'table\.csv' inflates to \d+ bytes, over \d+$"):
             _ZippedCsv(_Row).rows(_zip(**{"table.csv": _CSV}))
 
 
@@ -3096,7 +3099,7 @@ class _Month(ZippedFiles[_Daily], CsvFile[_Daily]):
     def _part(self, name: re.Match[str], part: pl.DataFrame) -> pl.DataFrame:
         if part.is_empty():
             msg = f"{name[0]} holds no rows"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return part
 
 
@@ -3154,7 +3157,7 @@ class TestZippedFiles:
                 r"^the member 'day20261305\.csv' states its rows' the 'day' cell '20261305' is not a date",
             ),
             (_zip(**{"day20261105.csv": b"NAME,VALUE\n"}), r"^day20261105\.csv holds no rows$"),
-            (_zip(**{"day20261105.csv": b"NAME,VALUE\na,x\n"}), r"could not parse `x`"),
+            (_zip(**{"day20261105.csv": b"NAME,VALUE\na,x\n"}), r"the 'VALUE' cell 'x' is not a number: row 1$"),
             (_zip(**{"day20261105.csv": b"NAME,VAL\na,1\n"}), r"column names not specified in schema"),
         ],
         ids=[
@@ -3167,7 +3170,7 @@ class TestZippedFiles:
         ],
     )
     def test_a_zip_that_is_not_the_tables_parts_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _Month(_Daily).frame(body)
 
 
@@ -3260,7 +3263,7 @@ class TestALongFile:
         )
         assert _LongSheet(_Long, sheet="S").rows(body) == _LongCsv(_Long).rows(_WIDE)
         bad = _book(["NAME", "DAY", "Horizon 2"], ["a", "2026-01-02", 1.5], ["b", "2026-01-03", "x"])
-        with pytest.raises(ValueError, match=r"^the 'Horizon 2' cell 'x' is not a number: row 3$"):
+        with pytest.raises(ReadError, match=r"^the 'Horizon 2' cell 'x' is not a number: row 3$"):
             _LongSheet(_Long, sheet="S").rows(bad)
 
     def test_it_composes_with_a_container(self) -> None:
@@ -3285,12 +3288,12 @@ class TestALongFile:
             (b"NAME,DAY\na,2026-01-02\n", r"names no key, or a column twice$"),
             (b"NAME,DAY,H2,H2\na,2026-01-02,1,2\n", r"names no key, or a column twice$"),
             (b"NAME,DAY,H2,H02\na,2026-01-02,1,2\n", r"name keys \['2', '02'\], not each one horizon once$"),
-            (b"NAME,DAY,H2\na,2026-01-02,x\n", r"could not parse `x` as dtype `f64` at column 'H2'"),
+            (b"NAME,DAY,H2\na,2026-01-02,x\n", r"^the 'H2' cell 'x' is not a number: row 1$"),
         ],
         ids=["leading labels", "a stray column", "no key", "a header twice", "a key twice", "a cell not a number"],
     )
     def test_a_table_that_is_not_the_layout_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _LongCsv(_Long).rows(body)
 
     def test_a_header_may_name_no_key_where_the_key_field_admits_none(self) -> None:
@@ -3316,20 +3319,20 @@ class TestALongFile:
             _key = SpreadCsv._key
 
         assert SpreadCsv(Spread).rows(b"NAME,X,Y_6M\na,1,2\n") == [Spread("a", None, 1.0), Spread("a", "6M", 2.0)]
-        with pytest.raises(ValueError, match=r"name keys \[None, None\], not each one horizon once$"):
+        with pytest.raises(ReadError, match=r"name keys \[None, None\], not each one horizon once$"):
             SpreadCsv(Spread).rows(b"NAME,X,Y\na,1,2\n")
-        with pytest.raises(ValueError, match=r"name keys \[None, '6M'\], not each one horizon once$"):
+        with pytest.raises(ReadError, match=r"name keys \[None, '6M'\], not each one horizon once$"):
             NamedCsv(Named).rows(b"NAME,X,Y_6M\na,1,2\n")
 
     def test_a_key_that_is_not_its_type_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"name keys \['2026-13'\], not each a month: "):
+        with pytest.raises(ReadError, match=r"name keys \['2026-13'\], not each a month: "):
             _MonthlyCsv(_Monthly).rows(b"NAME,2026-13\na,1\n")
 
     def test_an_empty_required_value_names_the_tables_row_and_header(self) -> None:
         body = b"NAME,2026-01,2026-02\na,1,2\nb,3,\n"
-        with pytest.raises(ValueError, match=r"^the \['2026-02'\] columns have an empty cell, .*: row 2$"):
+        with pytest.raises(ReadError, match=r"^the \['2026-02'\] columns have an empty cell, .*: row 2$"):
             _MonthlyCsv(_Monthly).rows(body)
-        with pytest.raises(ValueError, match=r"^the \['2026-01'\] columns hold NaN or an infinity, .*: row 1$"):
+        with pytest.raises(ReadError, match=r"^the \['2026-01'\] columns hold NaN or an infinity, .*: row 1$"):
             _MonthlyCsv(_Monthly).rows(b"NAME,2026-01\na,inf\n")
 
     def test_a_value_field_takes_no_format_or_flag(self) -> None:
@@ -3341,7 +3344,7 @@ class TestALongFile:
         class DatedCsv(LongFile[Dated], CsvFile[Dated]):
             _keys = re.compile(r"\d+")
 
-        with pytest.raises(ValueError, match=r"^the value field 'value' takes no Format or Flag$"):
+        with pytest.raises(LayoutError, match=r"^the value field 'value' takes no Format or Flag$"):
             DatedCsv(Dated)
 
 
@@ -3387,11 +3390,11 @@ class TestAPaddedCsv:
         assert _Padded(_Counts).rows(body) == [_Counts(dt.date(2019, 10, 2), "CHI", 1, 2.5)]
 
     def test_a_cell_that_is_not_its_type_raises_naming_its_row(self) -> None:
-        with pytest.raises(ValueError, match=r"the 'COUNT' cell '1\.5' is not a whole number: row 2"):
+        with pytest.raises(ReadError, match=r"the 'COUNT' cell '1\.5' is not a whole number: row 2"):
             _Padded(_Counts).rows(b"DAY,NAME,COUNT,RATE\n10/02/2019,A,1,1\n10/02/2019,B, 1.5,1\n")
 
     def test_a_cell_of_spaces_where_every_cell_holds_a_value_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"\['rate'\] columns have an empty cell"):
+        with pytest.raises(ReadError, match=r"\['rate'\] columns have an empty cell"):
             _Padded(_Counts).rows(b"DAY,NAME,COUNT,RATE\n10/02/2019,A,1,  \n")
 
     def test_a_long_table_s_values_are_stripped_too(self) -> None:
@@ -3418,12 +3421,12 @@ class TestAThousandsCsv:
     @pytest.mark.parametrize("cell", ["1,78", "12,3456", ",123", "1,000,"])
     def test_a_number_not_grouped_in_thousands_raises(self, cell: str) -> None:
         body = f'DAY,NAME,COUNT,RATE\n10/02/2019,A,1,"{cell}"\n'.encode()
-        with pytest.raises(ValueError, match=f"the 'RATE' cell '{cell}' is not a number grouped in thousands: row 1"):
+        with pytest.raises(ReadError, match=f"the 'RATE' cell '{cell}' is not a number grouped in thousands: row 1"):
             _Grouped(_Counts).rows(body)
 
     def test_it_composes_with_padding(self) -> None:
         body = b'DAY,NAME,COUNT,RATE\n10/02/2019, A ," 1,000 ", 2,500\n'
-        with pytest.raises(ValueError, match="row 1 has 5 fields"):
+        with pytest.raises(ReadError, match="row 1 has 5 fields"):
             _PaddedGrouped(_Counts).rows(body)
         body = b'DAY,NAME,COUNT,RATE\n10/02/2019, A ," 1,000 ","2,500 "\n'
         assert _PaddedGrouped(_Counts).rows(body) == [_Counts(dt.date(2019, 10, 2), "A", 1000, 2500.0)]
@@ -3445,7 +3448,7 @@ class TestAPaddedSheet:
 
     def test_a_plain_sheet_refuses_the_padding(self) -> None:
         body = workbook({"S": [["Month", "Name", "Value"], [" 1988m1", "a", 1.5]]})
-        with pytest.raises(ValueError, match="the 'Month' cell ' 1988m1' is not a date written %Ym%-m: row 2"):
+        with pytest.raises(ReadError, match="the 'Month' cell ' 1988m1' is not a date written %Ym%-m: row 2"):
             SheetFile(_PaddedMonth, sheet="S").rows(body)
 
     def test_a_cell_stripped_to_a_word_for_none_holds_no_value(self) -> None:
@@ -3483,13 +3486,13 @@ class TestANumberTextSheet:
     )
     def test_a_text_cell_that_is_not_its_number_raises(self, count: Cell, share: Cell, message: str) -> None:
         body = workbook({"S": [["Day", "Count", "Share"], [dt.date(2026, 1, 1), count, share]]})
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _PaddedNumbers(_Rates, sheet="S").rows(body)
 
     @pytest.mark.parametrize("count", [" 1e3", " 1.0", " 1.", " inf", " nan", " 1e30", " 99999999999999999999"])
     def test_an_int_field_takes_text_that_is_a_whole_number_and_nothing_else(self, count: str) -> None:
         body = workbook({"S": [["Day", "Count", "Share"], [dt.date(2026, 1, 1), count, 1.0]]})
-        with pytest.raises(ValueError, match=r"the 'Count' cell '.*' is not a whole number: row 2"):
+        with pytest.raises(ReadError, match=r"the 'Count' cell '.*' is not a whole number: row 2"):
             _PaddedNumbers(_Rates, sheet="S").rows(body)
 
     def test_an_int_text_above_two_to_the_53_keeps_every_digit(self) -> None:
@@ -3498,7 +3501,7 @@ class TestANumberTextSheet:
 
     def test_a_float_field_refuses_an_infinity_written_as_text(self) -> None:
         body = workbook({"S": [["Day", "Count", "Share"], [dt.date(2026, 1, 1), 2, " inf"]]})
-        with pytest.raises(ValueError, match=r"\['share'\] columns hold NaN or an infinity"):
+        with pytest.raises(ReadError, match=r"\['share'\] columns hold NaN or an infinity"):
             _PaddedNumbers(_Rates, sheet="S").rows(body)
 
     def test_a_float_field_stripped_to_a_word_for_none_holds_no_value(self) -> None:
@@ -3508,7 +3511,7 @@ class TestANumberTextSheet:
     def test_a_padded_sheet_alone_refuses_a_number_written_as_padded_text(self) -> None:
         """Fastexcel's typed load reads ``'1.03'`` as its number, and ``' 1.03'`` as none."""
         body = workbook({"S": [["Day", "Count", "Share"], [dt.date(2026, 1, 1), 2, " 1.03"]]})
-        with pytest.raises(ValueError, match=r"the 'Share' cell '1\.03' is not a number: row 2"):
+        with pytest.raises(ReadError, match=r"the 'Share' cell '1\.03' is not a number: row 2"):
             PaddedSheet(_Rates, sheet="S").rows(body)
 
 
@@ -3564,7 +3567,7 @@ class TestUnreadColumns:
 
     def test_a_plain_sheet_refuses_the_column(self) -> None:
         body = workbook({"S": [["Day", "Count", "Share", "notes"], [dt.date(2026, 1, 1), 2, 1.5, "prose"]]})
-        with pytest.raises(ValueError, match=r"header \(row 1\) \['Day', 'Count', 'Share', 'notes'\] is not"):
+        with pytest.raises(ReadError, match=r"header \(row 1\) \['Day', 'Count', 'Share', 'notes'\] is not"):
             SheetFile(_Rates, sheet="S").rows(body)
 
     def test_an_unread_column_in_the_middle_of_a_trimmed_stripped_sheet_with_gaps(self) -> None:
@@ -3610,7 +3613,7 @@ class TestABesideSheet:
 
     def test_a_plain_sheet_refuses_the_cells_beside(self) -> None:
         body = workbook({"S": [["Name", "Value", None, "Note"], ["a", 1, None, "a note"]]})
-        with pytest.raises(ValueError, match="sheet's header"):
+        with pytest.raises(ReadError, match="sheet's header"):
             SheetFile(_Pair, sheet="S").rows(body)
 
     def test_its_columns_may_start_right_of_others_and_skip_a_spacer(self) -> None:
@@ -3619,7 +3622,7 @@ class TestABesideSheet:
 
     def test_a_list_beside_it_that_runs_longer_needs_the_table_to_end(self) -> None:
         body = workbook({"S": [["Name", "Value", None, "List"], ["a", 1, None, "x"], [None, None, None, "y"]]})
-        with pytest.raises(ValueError, match="row 3 is empty"):
+        with pytest.raises(ReadError, match="row 3 is empty"):
             BesideSheet(_Pair, sheet="S").rows(body)
         assert _Listed(_Pair, sheet="S").rows(body) == [_Pair("a", 1.0)]
 
@@ -3627,18 +3630,18 @@ class TestABesideSheet:
         class Short(BesideSheet[_Pair]):
             _columns_at = (0,)
 
-        with pytest.raises(ValueError, match=r"header \(row 1\) \['Name'\] is not \['Name', 'Value'\]"):
+        with pytest.raises(ReadError, match=r"header \(row 1\) \['Name'\] is not \['Name', 'Value'\]"):
             Short(_Pair, sheet="S").rows(workbook({"S": [["Name", "Value"], ["a", 1]]}))
 
     def test_a_sheet_without_the_tables_columns_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"'S' sheet has no column \[1, 3\] of its table"):
+        with pytest.raises(ReadError, match=r"'S' sheet has no column \[1, 3\] of its table"):
             _Offset(_Pair, sheet="S").rows(workbook({"S": [["Code", "Name"], ["X@Y", "a"]]}))
 
     def test_columns_that_are_not_one_a_field_are_a_bug(self) -> None:
         class Short(BesideSheet[_Pair]):
             _columns_at = (0,)
 
-        with pytest.raises(ValueError, match=r"the 'S' sheet's header \(row 1\) \['Name'\] is not \['Name', 'Value'\]"):
+        with pytest.raises(ReadError, match=r"the 'S' sheet's header \(row 1\) \['Name'\] is not \['Name', 'Value'\]"):
             Short(_Pair, sheet="S").rows(workbook({"S": [["Name", "Value"], ["a", 1]]}))
 
 
@@ -3666,12 +3669,12 @@ class TestAHeaderlessSheet:
 
     def test_a_sheet_wider_than_its_table_raises(self) -> None:
         body = workbook({"S": [["A@B", "A_B", "extra"]]})
-        with pytest.raises(ValueError, match="table is 3 columns wide, not 2"):
+        with pytest.raises(ReadError, match="table is 3 columns wide, not 2"):
             _Headerless(_Mapped, sheet="S", header_row=0).rows(body)
 
     def test_a_row_of_another_width_raises(self) -> None:
         body = workbook({"S": [["A@B", "A_B", "extra"]]})
-        with pytest.raises(ValueError, match="table is 3 columns wide, not 2"):
+        with pytest.raises(ReadError, match="table is 3 columns wide, not 2"):
             _Headerless(_Mapped, sheet="S", header_row=0).rows(body)
 
 
@@ -3711,7 +3714,7 @@ class TestAQuarterFormat:
 
     @pytest.mark.parametrize("cell", ["2026Q5", "2026Q0", "26Q1", "2026Q1 ", "2026-Q1", "2026q1"])
     def test_a_cell_written_otherwise_raises(self, cell: str) -> None:
-        with pytest.raises(ValueError, match=re.escape(f"the 'quarter' cell '{cell}' is not a date written %YQ%q")):
+        with pytest.raises(ReadError, match=re.escape(f"the 'QUARTER' cell '{cell}' is not a date written %YQ%q")):
             CsvFile(_Quarterly).rows(f"QUARTER,VALUE\n{cell},1\n".encode())
 
     def test_a_quarter_is_a_key_a_long_table_reads(self) -> None:
@@ -3743,14 +3746,14 @@ class TestAQuarterFormat:
         class Odd(msgspec.Struct, frozen=True, gc=False):
             quarter: Annotated[dt.date, Label("Q"), written]
 
-        with pytest.raises(ValueError, match="writes no day, so it writes a period"):
+        with pytest.raises(LayoutError, match="writes no day, so it writes a period"):
             CsvFile(Odd)
 
     def test_a_quarter_format_on_a_time_is_refused(self) -> None:
         class Odd(msgspec.Struct, frozen=True, gc=False):
             quarter: Annotated[dt.datetime, Label("Q"), Format("%YQ%q")]
 
-        with pytest.raises(ValueError, match="is no date, so its Format '%YQ%q' writes no quarter"):
+        with pytest.raises(LayoutError, match="is no date, so its Format '%YQ%q' writes no quarter"):
             CsvFile(Odd)
 
 
@@ -3778,7 +3781,7 @@ class TestAPeriodFormat:
         class Month(msgspec.Struct, frozen=True, gc=False):
             month: Annotated[dt.date, Label("M"), Format(written)]
 
-        with pytest.raises(ValueError, match=f"the 'month' cell '{cell}' is not a date written"):
+        with pytest.raises(ReadError, match=f"the 'M' cell '{cell}' is not a date written"):
             CsvFile(Month).rows(f"M\n{cell}\n".encode())
 
 
@@ -3821,17 +3824,17 @@ class TestACellHeaderSheetReadLong:
 
     def test_fastexcel_names_a_date_header_nothing(self) -> None:
         body = workbook({"S": [["Ticker", _JAN], ["A", 1]]})
-        with pytest.raises(ValueError, match=r"the header's columns \[''\] are not keys"):
+        with pytest.raises(ReadError, match=r"the header's columns \[''\] are not keys"):
             _PlainLong(_TickerDay, sheet="S").rows(body)
 
     def test_a_blank_row_inside_a_plain_sheet_still_raises(self) -> None:
         body = workbook({"S": [["Ticker", _JAN], ["A", 1], [None], ["B", 2]]})
-        with pytest.raises(ValueError, match="row 3 is empty"):
+        with pytest.raises(ReadError, match="row 3 is empty"):
             _RowedSheet(_Rowed, sheet="S").rows(body)
 
     def test_a_record_with_values_still_needs_its_fields(self) -> None:
         body = workbook({"S": [["Ticker", _JAN], [None, 1]]})
-        with pytest.raises(ValueError, match=r"\['ticker'\] columns have an empty cell.*row 2"):
+        with pytest.raises(ReadError, match=r"\['ticker'\] columns have an empty cell.*row 2"):
             _TickerSheet(_TickerDay, sheet="S").rows(body)
 
     def test_a_numbered_record_holds_its_own_row(self) -> None:
@@ -3926,19 +3929,19 @@ class TestAFoundCsv:
 
     def test_a_cell_is_text_as_written_and_a_whole_number_is_typed(self) -> None:
         assert self._rows(b'Year,Note\n 2026 ,"a, b"\n') == [_Found(None, 2026, None, "a, b")]
-        with pytest.raises(ValueError, match=r"'x' is not a whole number"):
+        with pytest.raises(ReadError, match=r"'x' is not a whole number"):
             self._rows(b"Year\nx\n")
 
     def test_an_unlabeled_column_must_be_empty_but_for_a_leading_row_count(self) -> None:
         assert self._rows(b"Year,,Note\n2026,,x\n") == [_Found(None, 2026, None, "x")]
         for body in (b"Year,,Note\n2026,y,x\n", b",Year,Note\n1,2026,x\n", b"Year\n2026,y\n"):
-            with pytest.raises(ValueError, match=r"line 2 holds a value under no label"):
+            with pytest.raises(ReadError, match=r"line 2 holds a value under no label"):
                 self._rows(body)
 
     def test_a_leading_unlabeled_column_of_whole_numbers_is_a_row_count_only_where_the_format_says_so(self) -> None:
         counted = _CountedCsv(_Found, key="year")
         assert counted.rows(b",Year,Note\n1,2026,x\n") == [_Found(None, 2026, None, "x")]
-        with pytest.raises(ValueError, match=r"line 2 holds a value under no label"):
+        with pytest.raises(ReadError, match=r"line 2 holds a value under no label"):
             counted.rows(b",Year\nx,2026\n")
 
     def test_a_header_that_names_a_stranger_a_field_twice_or_no_key_is_refused(self) -> None:
@@ -3947,7 +3950,7 @@ class TestAFoundCsv:
             (b"Year,Type,Kind\n1,2,3\n", r"names one field twice"),
             (b"Type,Note\na,b\n", r"no header naming year"),
         ):
-            with pytest.raises(ValueError, match=message):
+            with pytest.raises(ReadError, match=message):
                 self._rows(body)
 
     def test_a_section_line_states_its_field_as_written_for_the_rows_below(self) -> None:
@@ -3966,7 +3969,7 @@ class TestAFoundSheet:
         assert FoundSheet(_Found, key="year").rows(body) == [_Found(None, 2026, "a", "x")]
 
     def test_a_body_that_is_no_workbook_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"not a workbook"):
+        with pytest.raises(ReadError, match=r"not a workbook"):
             FoundSheet(_Found, key="year").rows(b"Year\n1\n")
 
 
@@ -3992,7 +3995,7 @@ class TestAZippedOrBare:
         assert reader.rows(b"name\nx\n") == [_Name("")]
 
     def test_a_zip_of_more_members_than_the_format_holds_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"not 1 members"):
+        with pytest.raises(ReadError, match=r"not 1 members"):
             _FoundNames(_Name, key="name").rows(_zip(**{"a.csv": b"name\n", "b.csv": b"name\n"}))
 
 
@@ -4031,7 +4034,7 @@ class TestAFoundTableReadLong:
 
 class TestAnOpenFoundTable:
     def test_a_header_cell_twice_is_refused(self) -> None:
-        with pytest.raises(ValueError, match=r"names one field twice"):
+        with pytest.raises(ReadError, match=r"names one field twice"):
             _WideCsv(_Wide, key="id").rows(b"ID,A,A\n1,2,3\n")
 
 
@@ -4060,18 +4063,18 @@ class TestAReportFileReadAsText:
 
     def test_lines_above_the_header_are_a_preamble_whatever_they_hold(self) -> None:
         assert self._rows(b"title\nx\nNAME\n----\na\nb\n") == ["a", "b"]
-        with pytest.raises(ValueError, match=r"holds no run of the header's lines"):
+        with pytest.raises(ReadError, match=r"holds no run of the header's lines"):
             self._rows(b"NAME\na\n")
 
     def test_a_blank_line_is_a_line_like_any_other_unless_the_format_skips_them(self) -> None:
-        with pytest.raises(ValueError, match=r"line 4 '' is neither a row"):
+        with pytest.raises(ReadError, match=r"line 4 '' is neither a row"):
             self._rows(b"NAME\n----\na\n\nb\n")
         assert [row.name for row in _Plain(_Names).rows(b"NAME\n----\na\n\nb\n")] == ["a", "b"]
 
     def test_lines_end_as_str_splitlines_ends_them_and_latin_1_is_read_where_utf_8_fails(self) -> None:
         assert self._rows(b"NAME\n----\na\x0cb\n") == ["a", "b"]
         assert self._rows(b"caf\xe9\nNAME\n----\nx\n") == ["x"]
-        with pytest.raises(ValueError, match=r"line 3 'a\\x0cb' is neither a row"):
+        with pytest.raises(ReadError, match=r"line 3 'a\\x0cb' is neither a row"):
             _Plain(_Names).rows(b"NAME\n----\na\x0cb\n")
 
 
@@ -4102,7 +4105,7 @@ class TestAPeriodsEnd:
         class Day(msgspec.Struct, frozen=True, gc=False):
             day: Annotated[dt.date, Label("D"), Format("%Y-%m-%d", end=True)]
 
-        with pytest.raises(ValueError, match=r"is no period, so its Format '%Y-%m-%d' has no end"):
+        with pytest.raises(LayoutError, match=r"is no period, so its Format '%Y-%m-%d' has no end"):
             CsvFile(Day)
 
 
@@ -4142,7 +4145,7 @@ class TestAGivenField:
         class Stray(CsvFile[_Row]):
             _given = types.MappingProxyType({"table": "F1"})
 
-        with pytest.raises(ValueError, match=r"gives \['table'\], which are no fields of _Row"):
+        with pytest.raises(LayoutError, match=r"gives \['table'\], which are no fields of _Row"):
             Stray(_Row)
 
     def test_a_long_table_takes_one_too(self) -> None:
@@ -4169,7 +4172,7 @@ class TestAPreambleCsv:
         assert PreambleCsv(_Row).rows(b"NAME,VALUE,NOTE\na,1,x\n") == [_Row("a", 1.0, "x")]
 
     def test_a_body_with_no_header_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"^no line opens with the header's first label 'NAME'$"):
+        with pytest.raises(ReadError, match=r"^no line opens with the header's first label 'NAME'$"):
             PreambleCsv(_Row).rows(b"title\nVALUE,NAME\n")
 
 
@@ -4206,7 +4209,7 @@ class TestALongFileOfSeveralKeys:
         class Padded(_Positions):
             _keys = re.compile(r"(?P<measure>[a-z]+)_(?P<year>[0-9]+)")
 
-        with pytest.raises(ValueError, match=r"name keys \[.*\], not each one year, measure once$"):
+        with pytest.raises(ReadError, match=r"name keys \[.*\], not each one year, measure once$"):
             Padded(_Position).rows(b"country,mv_2003,mv_02003\nUS,1,2\n")
 
     def test_a_key_not_of_its_field_raises(self) -> None:
@@ -4220,7 +4223,7 @@ class TestALongFileOfSeveralKeys:
             _keys = re.compile(r"(?P<measure>[a-z]+)_(?P<month>[0-9]{4}-[0-9]{2})")
             _key_count = 2
 
-        with pytest.raises(ValueError, match=r"name keys \['2026-13'\], not each a month: "):
+        with pytest.raises(ReadError, match=r"name keys \['2026-13'\], not each a month: "):
             DatedHoldings(Dated).rows(b"country,mv_2026-13\nUS,1\n")
 
 
@@ -4232,14 +4235,14 @@ class TestAShape:
         assert CsvFile(self._Period).rows(b"P\n2026:Q2\n1946\n") == [self._Period("2026:Q2"), self._Period("1946")]
 
     def test_a_cell_of_another_shape_raises_naming_its_row(self) -> None:
-        with pytest.raises(ValueError, match=r"^the 'P' cell '2026-06' is not of its shape .*: row 2$"):
+        with pytest.raises(ReadError, match=r"^the 'P' cell '2026-06' is not of its shape .*: row 2$"):
             CsvFile(self._Period).rows(b"P\n2026:Q2\n2026-06\n")
 
     def test_only_text_takes_one(self) -> None:
         class Number(msgspec.Struct, frozen=True, gc=False):
             value: Annotated[int, Label("V"), Shape("[0-9]+")]
 
-        with pytest.raises(ValueError, match=r"is no text, so it takes no Shape"):
+        with pytest.raises(LayoutError, match=r"is no text, so it takes no Shape"):
             CsvFile(Number)
 
 
@@ -4283,7 +4286,7 @@ class TestAGroupedSheet:
 
     def test_a_key_left_of_every_heading_raises(self) -> None:
         body = workbook({"S": [[None, None, "One"], [None, "a", "b"], [_JAN, 1, 2]]})
-        with pytest.raises(ValueError, match=r"the header's columns \['a'\] are not keys"):
+        with pytest.raises(ReadError, match=r"the header's columns \['a'\] are not keys"):
             _Answers(_Answer, sheet="S", header_row=2).rows(body)
 
 
@@ -4317,12 +4320,12 @@ class TestACellField:
 
     def test_a_cell_that_is_not_its_type_raises_naming_the_cell(self) -> None:
         body = workbook({"S": [["As of", "soon"], ["Name", "Count"], ["a", 1]]})
-        with pytest.raises(ValueError, match=r"cell 'as_of' is not its as_of: .*'soon' is not a date cell"):
+        with pytest.raises(ReadError, match=r"cell 'as_of' is not its as_of: .*'soon' is not a date cell"):
             SheetFile(_CellStated, sheet="S", header_row=2).rows(body)
 
     def test_a_required_cell_that_is_empty_raises(self) -> None:
         body = workbook({"S": [["As of"], ["Name", "Count"], ["a", 1]]})
-        with pytest.raises(ValueError, match=r"\['as_of'\] columns have an empty cell"):
+        with pytest.raises(ReadError, match=r"\['as_of'\] columns have an empty cell"):
             SheetFile(_CellStated, sheet="S", header_row=2).rows(body)
 
     def test_a_date_cell_past_the_sheets_columns_is_empty(self) -> None:
@@ -4335,14 +4338,14 @@ class TestACellField:
         ]
 
     def test_a_csv_takes_no_cell(self) -> None:
-        with pytest.raises(ValueError, match="is a Cell's, which only a sheet's reader reads"):
+        with pytest.raises(LayoutError, match="is a Cell's, which only a sheet's reader reads"):
             CsvFile(_CellStated)
 
     def test_an_address_excel_does_not_write_is_refused(self) -> None:
         class Bad(msgspec.Struct):
             day: Annotated[dt.date, fields.Cell("1A")]
 
-        with pytest.raises(ValueError, match="'1A' is no cell"):
+        with pytest.raises(LayoutError, match="'1A' is no cell"):
             SheetFile(Bad, sheet="S")
 
 
@@ -4403,18 +4406,18 @@ class TestABesideSheetOfLists:
 
     def test_the_header_must_be_the_columns_labels(self) -> None:
         body = _book(["A", "B", None, None, "Code", "Total"], ["x", 1, None, None, "AA", 1])
-        with pytest.raises(ValueError, match=r"the 'S' sheet's header \(row 1\) .* is not \['Code', 'Count'\]"):
+        with pytest.raises(ReadError, match=r"the 'S' sheet's header \(row 1\) .* is not \['Code', 'Count'\]"):
             _ListedBeside(_Listing, sheet="S").rows(body)
 
     def test_a_sheet_without_the_columns_raises(self) -> None:
-        with pytest.raises(ValueError, match=r"the 'S' sheet has no column \[4, 5\] of its table"):
+        with pytest.raises(ReadError, match=r"the 'S' sheet has no column \[4, 5\] of its table"):
             _ListedBeside(_Listing, sheet="S").rows(_book(["Code", "Count"], ["AA", 1]))
 
     def test_columns_that_are_not_one_per_field_raise(self) -> None:
         class Short(BesideSheet[_Listing]):
             _columns_at = (4,)
 
-        with pytest.raises(ValueError, match=r"the 'S' sheet's header \(row 1\) \['Code'\] is not \['Code', 'Count'\]"):
+        with pytest.raises(ReadError, match=r"the 'S' sheet's header \(row 1\) \['Code'\] is not \['Code', 'Count'\]"):
             Short(_Listing, sheet="S").rows(self.BODY)
 
     def test_without_columns_it_reads_the_first_ones(self) -> None:

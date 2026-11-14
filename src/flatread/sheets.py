@@ -75,6 +75,7 @@ from flatread.core import (
     _stated,
     _temporal,
 )
+from flatread.errors import LayoutError, ReadError
 from flatread.layout import LongFile
 
 __all__ = [
@@ -153,7 +154,7 @@ def _workbook(body: bytes) -> fastexcel.ExcelReader:
         return fastexcel.read_excel(body)
     except fastexcel.FastExcelError as e:
         msg = f"the body is not a workbook: {e}"
-        raise ValueError(msg) from e
+        raise ReadError(msg) from e
 
 
 def _of_kind(column: _Column, cells: pl.Series) -> bool:
@@ -239,13 +240,13 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         grid = self._opened_grid if self._opened_grid is not None else self._text_grid(reader, self._sheet)
         if self._header and grid.height < self._header_row:
             msg = f"the {self._sheet!r} sheet ends at row {grid.height}, before its header row {self._header_row}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         span = self._span(grid)
         used = self._used_columns()
         table = span if used is None else [str(at) for at in used]
         if any(name not in span for name in table):
             msg = f"the {self._sheet!r} sheet has no column {used!r} of its table"
-            raise ValueError(msg)
+            raise ReadError(msg)
         written = bool(self._above) or self._trim or self._strip  # the header as the sheet's own row writes it
         if written and used is None and span and span[0] != grid.columns[0]:
             # Headings read from the sheet's first column: a table that starts after cells of its top rows is refused.
@@ -253,7 +254,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
                 f"the {self._sheet!r} sheet's header row holds {grid.columns.index(span[-1]) + 1} columns,"
                 f" not the {len(span)} loaded"
             )
-            raise ValueError(msg)
+            raise ReadError(msg)
         cells = grid.select(table)
         if self._trim:  # as fastexcel's whitespace_as_null: a cell of only whitespace is empty
             cells = cells.with_columns(pl.when(pl.col(pl.String).str.strip_chars() != "").then(pl.col(pl.String)))
@@ -274,12 +275,12 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         )
         if not self._header and len(header) > len(columns):
             msg = f"the {self._sheet!r} sheet's table is {len(header)} columns wide, not {len(columns)}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         # A header-less sheet's last columns, empty all down, are no columns of its (calamine trims them): no values.
         columns, absent = columns[: len(header)], columns[len(header) :]
         if self._header and header != labels:
             msg = f"the {self._sheet!r} sheet's header (row {self._header_row}) {header} is not {labels}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         text = cells.slice(self._header_row).select(pl.nth(kept))
         text.columns = [column.field for column in columns]
         # By position, not label: an empty header cell is no name. A position is the sheet's column, which fastexcel
@@ -296,7 +297,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         empty = text.select(pl.all_horizontal(pl.all().is_null())).to_series()
         if not (self._gaps or self._blank_rows) and (at := _first(empty, self._row_one)) is not None:
             msg = f"the {self._sheet!r} sheet's row {at} is empty, and a table's rows run to the sheet's end"
-            raise ValueError(msg)
+            raise ReadError(msg)
         # Each column's cells under its label, which errors name, or its field's name where its header cell is empty.
         frame = pl.DataFrame(
             [
@@ -472,7 +473,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         """Return *sheet*'s every cell as text, a row per sheet row from row 1, a column per sheet column by place."""
         if sheet not in reader.sheet_names:
             msg = f"the workbook has no sheet {sheet!r}; its sheets are {reader.sheet_names!r}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return self._load(reader, sheet, skip_rows=0, dtypes="string", use_columns=None)
 
     def _completed(self, frame: pl.DataFrame, absent: list[_Column], stated: list[pl.Expr]) -> pl.DataFrame:
@@ -509,7 +510,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             frame = loaded.to_polars()  # fastexcel loads lazily
         except fastexcel.FastExcelError as e:  # a sheet fastexcel cannot read (a cut one)
             msg = f"the {sheet!r} sheet cannot be loaded as the table: {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
         frame.columns = [str(column.absolute_index) for column in loaded.selected_columns]
         return frame
 
@@ -540,7 +541,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             value = self._value(column, text, typed)
         except ValueError as e:
             msg = f"the {self._sheet!r} sheet's cell {column.label!r} is not its {column.field}: {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
         # An empty cell (none past the sheet's columns) loads untyped: no value of the field's type.
         dtype = _none_dtype(column.scalar) if value.dtype == pl.Null else value.dtype
         return pl.lit(value[0], dtype).alias(column.field)
@@ -604,7 +605,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             what = "whole number" if column.scalar is int else "number"
         if (at := _first((text.is_not_null() & wrong).fill_null(value=False), self._row_one)) is not None:
             msg = f"the {text.name!r} cell {text[at - self._row_one]!r} is not a {what}: row {at}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         values = pl.select(pl.when(text.is_not_null()).then(typed)).to_series()
         if (cast := _SHEET_CASTS.get(column.scalar)) is not None:
             values = values.cast(cast)
@@ -695,7 +696,7 @@ class NotedSheet[RowT: msgspec.Struct](SheetFile[RowT]):
                 f"the {self._sheet!r} sheet's row {at} holds a cell past its first column under its table, which ends"
                 f" at row {self._row_one + end}: only notes go there"
             )
-            raise ValueError(msg)
+            raise ReadError(msg)
         return end
 
 
@@ -716,7 +717,7 @@ class DatedSheet[RowT: msgspec.Struct](SheetFile[RowT]):
                 f"the {self._sheet!r} sheet's row {at} holds a cell under its table,"
                 " where only notes in its first column go"
             )
-            raise ValueError(msg)
+            raise ReadError(msg)
         return end
 
 
@@ -754,7 +755,7 @@ class SheetsFile[RowT: msgspec.Struct](File[RowT]):
         for name in names:
             if (match := self._sheets.fullmatch(name)) is None:
                 msg = f"the workbook's sheet {name!r} is not one of {self._sheets.pattern!r}"
-                raise ValueError(msg)
+                raise ReadError(msg)
             groups.append(match.groupdict())
         frames = []
         for name, group in zip(names, groups, strict=True):
@@ -762,7 +763,8 @@ class SheetsFile[RowT: msgspec.Struct](File[RowT]):
                 frame = self._each(name).frame_on(reader, body)
             except ValueError as e:
                 msg = f"the {name!r} sheet: {e}"
-                raise ValueError(msg) from e
+                # A sheet's reader is built here too: a misdeclared one stays a LayoutError, an empty sheet empty.
+                raise (type(e) if isinstance(e, ReadError | LayoutError) else ReadError)(msg) from e
             states = [
                 _stated(column, group[column.field], frame.height, f"{name!r} sheet's name") for column in self._stated
             ]
@@ -788,11 +790,11 @@ class TitledSheet[RowT: msgspec.Struct](SheetFile[RowT]):
         ]
         if len(rows) != len(self._titles):
             msg = f"the {self._sheet!r} sheet has {len(rows)} rows above its header, not its {len(self._titles)} titles"
-            raise ValueError(msg)
+            raise ReadError(msg)
         for number, (row, title) in enumerate(zip(rows, self._titles, strict=True), 1):
             if not title.fullmatch(row):
                 msg = f"the {self._sheet!r} sheet's row {number} {row[:200]!r} is not its title {title.pattern!r}"
-                raise ValueError(msg)
+                raise ReadError(msg)
 
 
 class PreambleSheet[RowT: msgspec.Struct](SheetFile[RowT]):
@@ -813,7 +815,7 @@ class PreambleSheet[RowT: msgspec.Struct](SheetFile[RowT]):
         # The sheet's rows from its first, and its first filled column: a table may open past column A.
         if not grid.width or (at := _first(grid.to_series(0) == label)) is None:
             msg = f"the {self._sheet!r} sheet has no row whose first cell is {label!r}, its header's"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return at
 
 
@@ -832,7 +834,7 @@ class OnlySheet[RowT: msgspec.Struct](SheetFile[RowT]):
     def _sheet_in(self, reader: fastexcel.ExcelReader) -> str:
         if len(names := reader.sheet_names) != 1:
             msg = f"the workbook holds the sheets {names!r}, not one"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return names[0]
 
 
@@ -855,7 +857,7 @@ def _sheet_named(reader: fastexcel.ExcelReader, sheet: str | None) -> str:
     if sheet is None:
         if len(reader.sheet_names) != 1:
             msg = f"the workbook holds the sheets {reader.sheet_names!r}, not one"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return reader.sheet_names[0]
     return sheet
 
@@ -864,12 +866,12 @@ def _text_grid(reader: fastexcel.ExcelReader, sheet: str, null_values: Sequence[
     """Return *sheet* of *reader* as :func:`sheet_grid` lays it out, and the sheet column (``A`` is 0) of its first."""
     if sheet not in reader.sheet_names:
         msg = f"the workbook has no sheet {sheet!r}; its sheets are {reader.sheet_names!r}"
-        raise ValueError(msg)
+        raise ReadError(msg)
     try:
         text = text_sheet(reader, sheet)
     except fastexcel.FastExcelError as e:
         msg = f"the workbook's {sheet!r} sheet will not load: {e}"
-        raise ValueError(msg) from e
+        raise ReadError(msg) from e
     first = int(text.columns[0].removeprefix("__UNNAMED__")) if text.width else 0
     text.columns = [str(at) for at in range(text.width)]
     cell = pl.col(pl.String)
@@ -939,19 +941,19 @@ class BiffSheet[RowT: msgspec.Struct](SheetText[RowT]):
         """
         if int.from_bytes(body[:2], "little") not in _BIFF_BOFS:
             msg = f"the body is not a BIFF3 or BIFF4 workbook: it opens {body[:4]!r}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         try:
             # A workbook with no CODEPAGE record reads its text as latin-1, as Excel did; xlrd's note of it is dropped.
             book = xlrd.open_workbook(file_contents=body, logfile=io.StringIO())
         # xlrd's checks of a corrupt record are its own error, struct's, a lookup's, a decode's or an assert.
         except (xlrd.XLRDError, struct.error, LookupError, ValueError, AssertionError) as e:
             msg = f"the body is not a readable BIFF3 or BIFF4 workbook: {e!r}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
         names = book.sheet_names()
         name = self._sheet if self._sheet is not None else names[0] if len(names) == 1 else None
         if name not in names:
             msg = f"the workbook holds the sheets {names!r}, not {'one' if self._sheet is None else repr(self._sheet)}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         sheet = book.sheet_by_name(name)
         empty = {xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK}
         first = next((at for at in range(sheet.ncols) if set(sheet.col_types(at)) - empty), sheet.ncols)

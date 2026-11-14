@@ -24,6 +24,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import _DTYPES, _NUL, _UNIT, File, _Column, _first, _none_dtype, _typed
+from flatread.errors import EmptyBodyError, LayoutError, ReadError
 
 __all__ = ["LongFile"]
 
@@ -82,7 +83,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         # per-field conversion here too, once a table has one.
         if field.name == self._row.__struct_fields__[-1] and (column.written is not None or column.flag is not None):
             msg = f"the value field {field.name!r} takes no Format or Flag"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         return column
 
     @typing.override
@@ -107,13 +108,13 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
     def _layout(self, header: Sequence[str]) -> Sequence[_Column]:
         if any(_NUL in cell for cell in header):
             msg = f"the header {list(header)!r} holds a NUL, which no heading does"
-            raise ValueError(msg)
+            raise ReadError(msg)
         # A header over several rows (``above``) joins its cells by U+001F, as a reader that joins a cell's parts
         # itself does (``_split_keys``: a GroupedSheet's group and label); any other header holding one is no table's.
         joined = self._joined_header() or self._split_keys
         if not joined and any(_UNIT in cell for cell in header):
             msg = f"the header {list(header)!r} holds a U+001F, which only a header over several rows holds"
-            raise ValueError(msg)
+            raise ReadError(msg)
         index, value = self._record(), self._columns[-1]
         # A header written over more than one row ends in its label, which names the column.
         tails = [cell.rpartition(_UNIT)[2] for cell in header]
@@ -122,7 +123,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
                 msg = (
                     f"the header opens {tails[: len(index)]!r}, not the record's {[column.label for column in index]!r}"
                 )
-                raise ValueError(msg)
+                raise ReadError(msg)
             places = dict(enumerate(index))
         else:
             places = {}
@@ -131,7 +132,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
                 found = [at for at, tail in enumerate(tails) if tail == column.label and (column.label or at == 0)]
                 if len(found) != 1:
                     msg = f"the header {list(header)!r} has no one {column.label!r} column"
-                    raise ValueError(msg)
+                    raise ReadError(msg)
                 places[found[0]] = column
         if unnamed := [
             key.field
@@ -139,18 +140,18 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
             if self._key_count > 1 and not self._repeats and key.field not in self._keys.groupindex
         ]:
             msg = f"the key fields {unnamed} are named by no group of {self._keys.pattern!r}, and no heading repeats"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         beside = {column.label: column for column in self._columns if column.field in self._beside}
         keyed = [cell for at, cell in enumerate(header) if at not in places and cell.rpartition(_UNIT)[2] not in beside]
         spacers = [cell for cell in keyed if self._spacers and not cell.rpartition(_UNIT)[2]]
         if stray := [label for label in keyed if label not in spacers and not self._keys.fullmatch(label)]:
             msg = f"the header's columns {stray!r} are not keys, which match {self._keys.pattern!r}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         named = [label for label in keyed if label not in spacers]
         clash = {column.field for column in self._columns} & set(named)
         if (not named and self._rows_required) or clash or (not self._repeats and len(set(named)) != len(named)):
             msg = f"the header {list(header)!r} names no key, or a column twice"
-            raise ValueError(msg)
+            raise ReadError(msg)
         # A spacer is named by its place, which no key's field is (a NUL); it holds nothing. A beside field stands
         # where its label does.
         return [
@@ -169,7 +170,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         wide = super()._read(body)
         if wide.is_empty() and self._bare_header_refused:  # rows with no value are an answer, a bare header is not
             msg = "the body is a header and no rows"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         count = self._key_count
         keys, value = self._columns[-count - 1 : -1], self._columns[-1]
         # The record's fields in the struct's order: its number (the reader's, first), its leading columns and those
@@ -185,7 +186,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
             is not None
         ):
             msg = f"a column with no heading holds a cell: row {at}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         labels = [name for name in wide.columns if name not in record and name not in stray]
         # The headings as written: a repeat's name is its heading, then a NUL.
         written = [name.partition(_NUL)[0] for name in labels]
@@ -213,7 +214,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
                 typed.append(_typed(key, text, "key"))
             except ValueError as e:
                 msg = f"the headers {written!r} name keys {text.to_list()!r}, not each a {key.field}: {e}"
-                raise ValueError(msg) from e
+                raise ReadError(msg) from e
         if not labels:  # a table whose columns hold no key: no value either
             return (
                 wide.select(record)
@@ -223,14 +224,14 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         for key, text, one in zip(keys, series, typed, strict=True):
             if one.null_count() and key.field in self._required:
                 msg = f"the headers {written!r} name keys {text.to_list()!r}, not each one {key.field} once"
-                raise ValueError(msg)
+                raise ReadError(msg)
         names = pl.DataFrame(typed)
         if names.n_unique() != len(names):
             shown = texts[0] if count == 1 else [match.groupdict() for match in matches]
             msg = (
                 f"the headers {written!r} name keys {shown!r}, not each one {', '.join(key.field for key in keys)} once"
             )
-            raise ValueError(msg)
+            raise ReadError(msg)
         # A heading can be any text but one with a NUL: the row's number and the heading's name are two of those.
         row, heading = _NUL, _NUL * 2
         unpivoted = wide.with_row_index(row).unpivot(

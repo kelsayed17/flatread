@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, override
 import pytest
 
 from flatread.archives import StreamedZip
+from flatread.errors import ReadError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -123,5 +124,5 @@ def _damaged(body: bytes, at: int, value: bytes) -> bytes:
     ],
 )
 async def test_a_zip_that_is_not_the_member_raises(body: bytes, zip_: StreamedZip | None, says: str) -> None:
-    with pytest.raises(ValueError, match=says):
+    with pytest.raises(ReadError, match=says):
         await _read(body, zip_)

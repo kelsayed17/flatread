@@ -66,6 +66,7 @@ from flatread.core import (
     _typed,
     check_ending,
 )
+from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
 from flatread.fields import Flag, Format
 
 __all__ = [
@@ -84,6 +85,10 @@ __all__ = [
 
 #: A UTF-8 byte order mark, which polars and the field count skip.
 _BOM: Final = codecs.BOM_UTF8
+
+
+#: A boolean's words where its field names no Flag: exactly these, as XML Schema writes them.
+_BOOLEAN_WORDS: Final = Flag("true", "false")
 
 
 #: What an error calls a field of each of them.
@@ -137,13 +142,14 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         names, others = named[: len(labels)], named[len(labels) :]
         self._names = dict(zip(names, (column.field for column in self._columns), strict=True))
         for column in self._columns:
-            if column.flag is not None:
-                self._flags[column.field] = column.flag
+            if column.flag is not None or column.scalar is bool:
+                # polars reads ``TRUE`` and ``tRuE`` as true: a boolean is read as text, then by its words.
+                self._flags[column.field] = column.flag or _BOOLEAN_WORDS
             elif column.scalar in _MOMENTS:
                 if column.written is None:
                     kind = _KINDS[column.scalar]
                     msg = f"the {kind} field {column.field!r} needs the Format its file writes it in"
-                    raise ValueError(msg)
+                    raise LayoutError(msg)
                 self._dates[column.field] = (_temporal(column.scalar, column.written), column.written)
         self._schema = dict(zip(names, map(self._dtype, self._columns), strict=True))
         # The columns no field reads: text under their own names, kept through every step to _read, which drops them.
@@ -235,9 +241,24 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
             _check_widths(body, self._separator, quoting=quote_char is not None, header=self._header)
             if not self._header and len(first := _header(body, self._separator, quote_char)) != len(schema):
                 msg = f"row 1 has {len(first)} fields, not the file's {len(schema)}"
-                raise ValueError(msg) from e
+                raise RaggedRowError(msg) from e
             self._check(body)  # its rows as wide as its header: a format's own check may name the cell polars refused
-            raise ValueError(str(e)) from e
+            try:  # the rows are as wide as the header: read as text, the cell polars refused is named by its row
+                mistyped = _mistyped(
+                    pl.read_csv(
+                        body,
+                        has_header=self._header,
+                        separator=self._separator,
+                        schema=dict.fromkeys(schema, pl.String),
+                        null_values=self._null_values,
+                        missing_columns=missing_columns,
+                        quote_char=quote_char,
+                    ),
+                    schema,
+                )
+            except pl.exceptions.PolarsError:
+                mistyped = None
+            raise ReadError(mistyped or str(e)) from e
         if layout is None or not self._repeats:
             return frame
         # A long table's repeated heading is read as polars names it (``Difference_duplicated_0``), which a heading may
@@ -249,12 +270,12 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
     def _read(self, body: bytes) -> pl.DataFrame:
         if not body or body.isspace():  # no copy of the body, as strip() would make
             msg = "the body is empty"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         if self._final_line_ending is not None:
             check_ending(body, final_line_ending=self._final_line_ending)
         if body.startswith((b"\n", b"\r\n"), len(_BOM) if body.startswith(_BOM) else 0):  # no copy of the body
             msg = "the body opens with a blank line, not its header"
-            raise ValueError(msg)
+            raise ReadError(msg)
         # A long table's key columns keep their labels, and its key and value fields have no column: not strict, and
         # a field without a column is not parsed.
         frame = self._table(body).rename(self._names, strict=False)
@@ -265,13 +286,19 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
                 closing = label == "" and self._closing_separator == "always"
                 what = "the line's closing separator is followed by" if closing else f"the {label!r} column holds"
                 msg = f"{what} {frame[name][at - 1]!r}, and it never holds a value: row {at}"
-                raise ValueError(msg)
+                raise ReadError(msg)
         frame = frame.drop(*self._unread_names, *self._blank_names, strict=False)
+        # Parsed under its label, which an error names, as every other cell's error does.
+        labels = {column.field: column.label for column in self._columns}
         frame = frame.with_columns(
-            _flagged(frame[name], flag) for name, flag in self._flags.items() if name in frame.columns
+            _flagged(frame[name].alias(labels.get(name, name)), flag).alias(name)
+            for name, flag in self._flags.items()
+            if name in frame.columns
         )
         frame = frame.with_columns(
-            _moment(frame[name], *parse) for name, parse in self._dates.items() if name in frame.columns
+            _moment(frame[name].alias(labels.get(name, name)), *parse).alias(name)
+            for name, parse in self._dates.items()
+            if name in frame.columns
         )
         if self._numbered is None:
             return frame
@@ -289,7 +316,7 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
             # names the row the count found
             _check_widths(body, self._separator, quoting=self._quoting(body) is not None, header=self._header)
             msg = "the body's separators are not as many as its rows, each as wide as the header, hold"
-            raise ValueError(msg)
+            raise RaggedRowError(msg)
         return frame
 
 
@@ -315,13 +342,13 @@ class HeadersCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         super().__init__(row, null_values=null_values, final_line_ending=final_line_ending, separator=separator)
         if stray := {label for header in self._headers for label in header} - self._names.keys():
             msg = f"the headers name {sorted(stray)}, which no field of {row.__name__} labels"
-            raise ValueError(msg)
+            raise LayoutError(msg)
 
     def _check_header(self, header: list[str]) -> None:
         """Refuse a *header* that is none of the file's: a column it lacks reads as null, so any column could go."""
         if tuple(header) not in self._headers:
             msg = f"the header {header!r} is none of the {len(self._headers)} the {self._row.__name__} file has had"
-            raise ValueError(msg)
+            raise ReadError(msg)
 
     @typing.override
     def _table(self, body: bytes) -> pl.DataFrame:
@@ -334,10 +361,10 @@ class HeadersCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         # A label written more often than its fields take it (two where one field has it) is a column twice.
         if any(name not in self._schema and label in self._schema for label, name in zip(header, names, strict=True)):
             msg = f"the header {header!r} names a column twice"
-            raise ValueError(msg)
+            raise ReadError(msg)
         if unknown := [label for label in header if label not in self._schema]:
             msg = f"the header names {unknown}, which no field of {self._row.__name__} labels"
-            raise ValueError(msg)
+            raise ReadError(msg)
         # Read under the header's own cells, so polars refuses a long row (a column the header leaves out would take
         # its cell) and the count finds a short one; then each column it leaves out is a column of nulls.
         frame = self._polars(body, schema={name: self._schema[name] for name in names})
@@ -345,7 +372,7 @@ class HeadersCsv[RowT: msgspec.Struct](CsvFile[RowT]):
             # names the row the count found
             _check_widths(body, self._separator, quoting=quote is not None)
             msg = "the body's separators are not as many as its rows, each as wide as the header, hold"
-            raise ValueError(msg)
+            raise RaggedRowError(msg)
         self._check(body)
         return frame.select(
             pl.col(name) if name in frame.columns else pl.lit(None, dtype).alias(name)
@@ -380,10 +407,10 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         self._labeled = dict(words)
         if len(self._labeled) != len(words):
             msg = f"two fields of {row.__name__} share a label: {sorted(word for word, _ in words)}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         if stray := set(self._carried) - self._names.keys():
             msg = f"the carried labels {sorted(stray)} are no field of {row.__name__}'s labels"
-            raise ValueError(msg)
+            raise LayoutError(msg)
 
     def _heading(self, cell: str) -> str:
         """Return the label a header *cell* writes: the cell, unless a format folds its headers' wording."""
@@ -396,19 +423,19 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
             body[: end if (end := body.find(b"\n")) >= 0 else len(body)].decode()
         except UnicodeDecodeError as e:
             msg = f"the header is not UTF-8: {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
         header = _header(body, self._separator, self._quoting(body))
         found = [(cell, self._labeled.get(self._heading(cell))) for cell in header]
         if unknown := [cell for cell, label in found if label is None]:
             msg = f"the header names {unknown}, which no field of {self._row.__name__} labels"
-            raise ValueError(msg)
+            raise ReadError(msg)
         named = {cell: label for cell, label in found if label is not None}
         if len(set(named.values())) != len(header):
             msg = f"the header {header!r} names a column twice"
-            raise ValueError(msg)
+            raise ReadError(msg)
         if missing := [label for label in self._carried if label not in named.values()]:
             msg = f"the header {header!r} lacks {missing}, which every one names"
-            raise ValueError(msg)
+            raise ReadError(msg)
         self._check(body)
         # Read under the header's own cells, in its order, so polars refuses a long row (an inserted column would
         # take its cell) and the count finds a short one: as fast as a fixed header.
@@ -417,7 +444,7 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
             # names the row the count found
             _check_widths(body, self._separator, quoting=self._quoting(body) is not None)
             msg = "the body's separators are not as many as its rows, each as wide as the header, hold"
-            raise ValueError(msg)
+            raise RaggedRowError(msg)
         frame = frame.rename(named)
         return frame.select(
             pl.col(label) if label in frame.columns else pl.lit(None, dtype).alias(label)
@@ -461,13 +488,13 @@ class TrailerCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         last = body[cut + 1 : end].removesuffix(b"\r").decode("utf-8", errors="replace")
         if cut < 0 or (match := self._trailer.fullmatch(last)) is None:
             msg = f"the last line {last!r} is not the file's trailer: the body was cut"
-            raise ValueError(msg)
+            raise ReadError(msg)
         # shortcut: the table is copied without its trailer, since polars 2.1 has no option that ends a read at a line
         # (``n_rows`` still parses the lines past it, and a trailer is no row); about one body's bytes at the peak.
         frame = super()._table(body[: cut + 1])
         if "count" in self._trailer.groupindex and int(match["count"]) != frame.height:
             msg = f"the trailer counts {match['count']} rows, and the body holds {frame.height}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         if not self._stated:
             return frame
         stated = frame.with_columns(
@@ -501,7 +528,7 @@ class SectionedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         super().__init__(row, null_values=null_values, final_line_ending=final_line_ending)
         if not 0 <= section < sections:
             msg = f"the file's {sections} tables have no table {section}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         self._which = section
         self._sections = sections
 
@@ -510,7 +537,7 @@ class SectionedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         starts = [match.start() for match in self._section.finditer(body)]
         if starts[:1] != [0] or len(starts) != self._sections:
             msg = f"the body has {len(starts)} tables, at bytes {starts}, not {self._sections} from the first byte"
-            raise ValueError(msg)
+            raise ReadError(msg)
         # shortcut: the table is copied, as a trailer's is: polars has no option that ends a read at a line
         return super()._table(body[starts[self._which] : (*starts, len(body))[self._which + 1]])
 
@@ -544,11 +571,11 @@ class SpilledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         super().__init__(row, null_values=null_values, final_line_ending=final_line_ending, separator=separator)
         if not self._header or self._quote_char is not None:
             msg = "a spilled field is read from a file with a header line that quotes nothing"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         columns = [column for column in self._columns if column.field == self._spilled]
         if not columns or columns[0].scalar is not str:
             msg = f"the spilled field {self._spilled!r} is no text field of {row.__name__}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         self._spilled_label = columns[0].label
         (self._spilled_name,) = (name for name, field in self._names.items() if field == self._spilled)
 
@@ -557,11 +584,11 @@ class SpilledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         header = _header(body, self._separator)
         if self._spilled_label not in header:
             msg = f"the header {header!r} lacks {self._spilled_label!r}, the label of the field that holds it"
-            raise ValueError(msg)
+            raise ReadError(msg)
         carrier = next((text for text in self._CARRIERS if text.encode() not in body), None)
         if carrier is None:
             msg = f"the body holds every character this reader carries the separator in a cell by: {self._CARRIERS!r}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         separator = self._separator.encode()
         at, width = header.index(self._spilled_label), len(header)
         lines = body.split(b"\n")
@@ -613,11 +640,11 @@ class TitledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         for number, title in enumerate(self._titles, 1):
             if (end := body.find(b"\n", at)) < 0:
                 msg = f"the body ends before line {number}, the file's title {title.pattern!r}"
-                raise ValueError(msg)
+                raise ReadError(msg)
             line = body[at:end].removesuffix(b"\r").decode("utf-8", errors="replace")
             if (match := title.fullmatch(line)) is None:
                 msg = f"line {number} {line[:200]!r} is not the file's title {title.pattern!r}"
-                raise ValueError(msg)
+                raise ReadError(msg)
             count = match["count"] if "count" in title.groupindex else count
             stated |= {group: text for group, text in match.groupdict().items() if text is not None}
             at = end + 1
@@ -626,7 +653,7 @@ class TitledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         frame = super()._table(body[at:])
         if count is not None and int(count) != frame.height:
             msg = f"the title counts {count} rows, and the body holds {frame.height}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         if not self._titled:
             return frame
         frame = frame.with_columns(
@@ -656,7 +683,7 @@ class PreambleCsv[RowT: msgspec.Struct](CsvFile[RowT]):
                 return super()._table(body[at:])  # shortcut: copied without its preamble, as TitledCsv's titles
             at = end + 1
         msg = f"no line opens with the header's first label {first!r}"
-        raise ValueError(msg)
+        raise ReadError(msg)
 
 
 class _TextCsv[RowT: msgspec.Struct](CsvFile[RowT]):
@@ -736,17 +763,17 @@ class CsvText[RowT: msgspec.Struct](GridFile[RowT]):
             text = body.decode("utf-8-sig")
         except UnicodeDecodeError as e:
             msg = f"the body is not UTF-8: {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
         if not text or text.isspace():
             msg = "the body is empty"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         try:
             rows = list(
                 csv.reader(io.StringIO(text, newline=""), delimiter=self._separator, strict=not self._misquoted)
             )
         except csv.Error as e:
             msg = f"the body is no delimited file: {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
         width = max(map(len, rows))
         names = [str(at) for at in range(width)]
         grid = pl.DataFrame(
@@ -756,9 +783,24 @@ class CsvText[RowT: msgspec.Struct](GridFile[RowT]):
         return grid.with_columns(pl.when((cell.str.strip_chars() != "") & ~cell.is_in(self._null_values)).then(cell))
 
 
+def _mistyped(text: pl.DataFrame, schema: Mapping[str, type[pl.DataType]]) -> str | None:
+    """Return what is wrong with the first cell of *text*, a table read as text, that is not its type in *schema*.
+
+    What polars' typed read refused, said as every reader says it: the cell, its column's label and its row.
+    """
+    for name, dtype in schema.items():
+        cells = text[name]
+        unread = cells.is_not_null() & cells.cast(dtype, strict=False).is_null()
+        if dtype is not pl.String and (at := _first(unread)) is not None:
+            what = "whole number" if dtype is pl.Int64 else "number"
+            return f"the {name!r} cell {cells[at - 1]!r} is not a {what}: row {at}"
+    return None  # shortcut: polars refused what every cast reads; its own message says what
+
+
 def _csv_dtype(column: _Column) -> type[pl.DataType]:
-    """Return the polars type a CSV reads *column* as: a flag, a date or a time as text, which is then parsed."""
-    return pl.String if column.flag is not None or column.written is not None else _DTYPES[column.scalar]
+    """Return the polars type a CSV reads *column* as: a boolean, a date or a time as text, which is then parsed."""
+    text = column.flag is not None or column.written is not None or column.scalar is bool
+    return pl.String if text else _DTYPES[column.scalar]
 
 
 def _polars_names(labels: Sequence[str]) -> list[str]:
@@ -783,7 +825,7 @@ def _header(body: bytes, separator: str, quote: str | None = '"') -> list[str]:
         (header,) = csv.reader([line.decode("utf-8", errors="replace")], delimiter=separator)
     except csv.Error as e:  # a line ending inside the first line: lines ended by CR alone
         msg = f"the header line is not one row of cells: {e}"
-        raise ValueError(msg) from e
+        raise ReadError(msg) from e
     return header
 
 
@@ -820,18 +862,18 @@ def _check_widths(body: bytes, separator: str, *, quoting: bool = True, header: 
             text = body.removeprefix(_BOM).decode("utf-8")
         except UnicodeDecodeError as e:
             msg = f"the body is not UTF-8: {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
         try:
             quote = csv.QUOTE_MINIMAL if quoting else csv.QUOTE_NONE
             reader = csv.reader(io.StringIO(text, newline=""), delimiter=separator, quoting=quote, strict=True)
             rows = [len(row) or 1 for row in reader]
         except csv.Error as e:
             msg = f"a quoted cell does not close: {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
         fields = pl.Series(rows, dtype=pl.Int64)
     else:
         fields = lines.str.count_matches(separator, literal=True) + 1
     if (at := _first(fields.slice(1) != fields[0])) is not None:
         first = "the header's" if header else "row 1's"
         msg = f"row {at + (not header)} has {fields[at]} fields, not {first} {fields[0]}"
-        raise ValueError(msg)
+        raise RaggedRowError(msg)

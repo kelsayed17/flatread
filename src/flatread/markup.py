@@ -20,7 +20,7 @@ import polars as pl
 from lxml import etree
 
 from flatread.core import TextFile
-from flatread.errors import EmptyBodyError, UnknownLayoutError
+from flatread.errors import EmptyBodyError, LayoutError, ReadError
 
 __all__ = ["NestedXml", "XmlFile", "parse_xml"]
 
@@ -29,7 +29,7 @@ def parse_xml(body: bytes) -> etree._Element:
     """Parse *body* as one well-formed XML document, strictly and hardened, returning its root.
 
     An empty or whitespace-only body raises :class:`~flatread.errors.EmptyBodyError`, and one that is not
-    well-formed XML :class:`~flatread.errors.UnknownLayoutError`. The parser is built per call: construction
+    well-formed XML :class:`~flatread.errors.ReadError`. The parser is built per call: construction
     measured 0.42 us against a multi-megabyte download, so sharing one buys nothing. Three of its four flags are lxml
     6.1's defaults, kept explicit so the security posture reads here rather than depending on a version's defaults:
 
@@ -48,7 +48,7 @@ def parse_xml(body: bytes) -> etree._Element:
         return etree.XML(body, parser)
     except etree.XMLSyntaxError as exc:
         msg = f"the body is not well-formed XML: {exc}"
-        raise UnknownLayoutError(msg) from exc
+        raise ReadError(msg) from exc
 
 
 class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
@@ -80,7 +80,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
         root = parse_xml(body)
         if root.tag != self._root:
             msg = f"the document's root is <{root.tag}>, not <{self._root}>"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return root
 
     def _rows(self, root: etree._Element) -> list[list[str | None]]:
@@ -91,7 +91,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
             tags = [child.tag for child in record]
             if record.tag != tag or tags != self._labels or any(len(child) for child in record):
                 msg = f"record {n} is <{record.tag}> of {tags!r}, not <{tag}> of leaf elements {self._labels!r}"
-                raise ValueError(msg)
+                raise ReadError(msg)
             cells.append([child.text for child in record])
         return cells
 
@@ -101,7 +101,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
         cells = self._rows(root)
         if not cells:
             msg = f"the <{self._root}> root holds no <{self._record}> record"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return pl.DataFrame(cells, schema=dict.fromkeys(self._labels, pl.String), orient="row")
 
 
@@ -141,7 +141,7 @@ class NestedXml[RowT: msgspec.Struct](XmlFile[RowT]):
                 )
             except etree.XPathSyntaxError as e:
                 msg = f"the record path {self._record!r} or a field's Label {self._labels!r} is no XPath: {e}"
-                raise ValueError(msg) from e
+                raise LayoutError(msg) from e
         return self._compiled[key]
 
     @typing.override
@@ -152,14 +152,14 @@ class NestedXml[RowT: msgspec.Struct](XmlFile[RowT]):
             records = [record for record in found if etree.iselement(record)] if isinstance(found, list) else []
             if not isinstance(found, list) or len(records) != len(found):
                 msg = f"the record path {self._record!r} finds {found!r}, not elements"
-                raise ValueError(msg)
+                raise ReadError(msg)
             return [
                 [_found(path(record), label, n) for path, label in zip(field_paths, self._labels, strict=True)]
                 for n, record in enumerate(records, 1)
             ]
         except etree.XPathEvalError as e:  # a prefix the namespaces do not bind
             msg = f"a path will not evaluate on the document: {e}"
-            raise ValueError(msg) from e
+            raise ReadError(msg) from e
 
 
 def _found(found: object, label: str, n: int) -> str | None:
@@ -168,14 +168,14 @@ def _found(found: object, label: str, n: int) -> str | None:
     if isinstance(found, list):
         if len(found) > 1:
             msg = f"record {n}'s {label!r} finds {len(found)} nodes, not one"
-            raise ValueError(msg)
+            raise ReadError(msg)
         node = found[0] if found else None
     if etree.iselement(node):
         if len(node):
             msg = f"record {n}'s {label!r} is <{node.tag}> holding elements, not text"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return node.findtext(".")  # its own text, as the stubs type it ("" for none)
     if node is None or isinstance(node, str):
         return node
     msg = f"record {n}'s {label!r} finds {node!r}, which is no text"
-    raise ValueError(msg)
+    raise ReadError(msg)

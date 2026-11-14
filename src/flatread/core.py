@@ -61,6 +61,7 @@ from typing import Final, Literal
 import msgspec
 import polars as pl
 
+from flatread.errors import EmptyBodyError, LayoutError, ReadError
 from flatread.fields import Cell, Flag, Format, Joined, Label, Shape, Span
 
 __all__ = ["Carried", "File", "GridFile", "Reshaped", "TextFile", "Thousands", "check_ending", "scalar_type"]
@@ -107,7 +108,7 @@ def _address(address: str) -> tuple[int, int]:
     """Return the sheet row (1-based) and column (``A`` is 0) of the cell Excel names *address* (``"I1"``)."""
     if (match := re.fullmatch(r"([A-Z]{1,3})([1-9][0-9]*)", address)) is None:
         msg = f"{address!r} is no cell, as Excel names one (``I1``)"
-        raise ValueError(msg)
+        raise LayoutError(msg)
     column = 0
     for letter in match[1]:
         column = column * 26 + ord(letter) - ord("A") + 1
@@ -118,7 +119,7 @@ def _check_above(above: int, header_row: int) -> None:
     """Refuse *above* rows heading a table's columns that do not fit over its header in row *header_row*."""
     if above and not 0 < above < header_row:
         msg = f"the {above} rows over the header do not fit above its row {header_row}"
-        raise ValueError(msg)
+        raise LayoutError(msg)
 
 
 def _stacked(rows: Sequence[Sequence[str | None]]) -> list[str]:
@@ -223,7 +224,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         self._row_one = row_one
         if stray := self._given.keys() - set(self._fields):
             msg = f"the format gives {sorted(stray)}, which are no fields of {row.__name__}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         fields = msgspec.structs.fields(row)
         columns = [self._column(field) for field in fields if field.name not in self._given]
         # A field written across two columns is read as two text columns, joined into its value by frame().
@@ -257,50 +258,50 @@ class File[RowT: msgspec.Struct](abc.ABC):
         aliases = named.alternatives if named is not None else ()
         if aliases and not self._by_name:
             msg = f"the field {field.name!r} names Label alternatives, which only a header read by name takes"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         if label is None:
             msg = f"the field {self._row.__name__}.{field.name} names no column: annotate it with a Label"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         scalar = scalar_type(field.type)
         written = self._format(scalar) if written is None else written
         if scalar not in _SCALARS:
             msg = f"the field {field.name!r} is a {getattr(scalar, '__name__', scalar)}, which no column reads"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         if written is not None and scalar not in _MOMENTS:
             msg = f"the field {field.name!r} is no date or time, so it takes no Format"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         if written is not None and written.time_zone is not None and scalar is not dt.datetime:
             msg = (
                 f"the date field {field.name!r} has no time, so its Format takes no zone"
                 if scalar is dt.date
                 else f"the time-of-day field {field.name!r} has no date, so its Format takes no zone"
             )
-            raise ValueError(msg)
+            raise LayoutError(msg)
         for written_as in () if written is None else (written.strptime, *written.alternatives):
             if scalar is dt.date and not _DAY.search(written_as):
                 _period(written_as)  # refuses a directive a period is not written with
             elif written is not None and written.end:
                 msg = f"the field {field.name!r} is no period, so its Format {written_as!r} has no end"
-                raise ValueError(msg)
+                raise LayoutError(msg)
             elif "%q" in written_as:
                 msg = f"the field {field.name!r} is no date, so its Format {written_as!r} writes no quarter"
-                raise ValueError(msg)
+                raise LayoutError(msg)
         if flag is not None and scalar is not bool:
             msg = f"the field {field.name!r} is no boolean, so it takes no Flag"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         if joined is not None and (written is None or span is not None):
             msg = f"the field {field.name!r} is Joined, so it is a date or time read by its Format, and has no Span"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         if shape is not None and scalar is not str:
             msg = f"the field {field.name!r} is no text, so it takes no Shape"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         return _Column(field.name, label, scalar, written, flag, span, aliases, joined=joined, shape=shape, cell=cell)
 
     def _cell_of(self, name: str, stated: Cell | None) -> tuple[int, int] | None:
         """Return the row and column of the cell that states field *name*, where it is a ``Cell``'s, or raise."""
         if stated is not None and not self._by_cell:
             msg = f"the field {name!r} is a Cell's, which only a sheet's reader reads"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         return None if stated is None else _address(stated.address)
 
     def _label(self, name: str) -> str | None:
@@ -351,7 +352,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
             frame = frame.select(name for name in self._fields if name in frame.columns)
         if frame.columns != self._fields:
             msg = f"the reader's columns {frame.columns} are not {self._row.__name__}'s fields {self._fields}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         # A text field's column may be an Enum of its Literal's values (Treasury's TIC tables type theirs so).
         if wrong := {
             name: str(dtype)
@@ -360,12 +361,12 @@ class File[RowT: msgspec.Struct](abc.ABC):
         }:
             typed = {name: str(self._dtypes[name]) for name in wrong}
             msg = f"the reader's {wrong} columns are not typed as {self._row.__name__}'s fields {typed}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         if self._defaults:
             frame = frame.with_columns(pl.col(name).fill_null(value) for name, value in self._defaults.items())
         if self._rows_required and frame.is_empty():
             msg = "the body is a header and no rows"
-            raise ValueError(msg)
+            raise EmptyBodyError(msg)
         self._check_cells(frame, self._required)
         for column in self._columns:
             if column.shape is None:
@@ -377,7 +378,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
                     f"the {column.label!r} cell {cells[at - self._row_one]!r} is not of its shape"
                     f" {column.shape.pattern!r}: row {at}"
                 )
-                raise ValueError(msg)
+                raise ReadError(msg)
         return frame
 
     def _join(self, frame: pl.DataFrame) -> pl.DataFrame:
@@ -389,7 +390,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
                 msg = (
                     f"row {at} holds one of the {column.label!r} and {joined.label!r} cells, a {field} written in both"
                 )
-                raise ValueError(msg)
+                raise ReadError(msg)
             text = pl.select(pl.concat_str(frame[field], frame[second], separator=joined.separator)).to_series()
             value = _moment(text.alias(column.label), _temporal(column.scalar, written), written, self._row_one)
             frame = frame.with_columns(value.alias(field)).drop(second)
@@ -412,7 +413,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
                 f"the {list(infinite)} columns hold NaN or an infinity, which is no number here:"
                 f" row {min(infinite.values())}"
             )
-            raise ValueError(msg)
+            raise ReadError(msg)
         if empty := {
             name: at for name in required if (at := _first(frame[name].is_null() & checked, self._row_one)) is not None
         }:
@@ -420,7 +421,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
                 f"the {list(empty)} columns have an empty cell, a short row or no column, and every cell holds a value:"
                 f" row {min(empty.values())}"
             )
-            raise ValueError(msg)
+            raise ReadError(msg)
 
     def rows(self, body: bytes) -> list[RowT]:
         """Read *body* into typed rows: :meth:`frame`'s rows, one struct a row."""
@@ -447,7 +448,7 @@ class Thousands[RowT: msgspec.Struct](File[RowT]):
         grouped = cells.str.contains(",", literal=True)
         if (at := _first((grouped & ~cells.str.contains(_THOUSANDS)).fill_null(value=False))) is not None:
             msg = f"the {column.label!r} cell {cells[at - 1]!r} is not a number grouped in thousands: row {at}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return cells.str.replace_all(",", "", literal=True)
 
 
@@ -467,7 +468,7 @@ class Carried[RowT: msgspec.Struct](File[RowT]):
         frame = super()._read(body)
         if stray := set(self._carried) - set(frame.columns):
             msg = f"the format carries {sorted(stray)} down, which are no fields of {self._row.__name__}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         return frame.with_columns(pl.col(*self._carried).forward_fill())
 
 
@@ -493,7 +494,7 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
         for column in self._columns:
             if column.scalar in _MOMENTS and column.written is None:
                 msg = f"the field {column.field!r} needs the Format its text is written in"
-                raise ValueError(msg)
+                raise LayoutError(msg)
         self._labels = [column.label for column in self._columns]
 
     @abc.abstractmethod
@@ -508,12 +509,12 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
         for label in (label for label in dropped if label in self._blank_columns):
             if (at := _first(text[label].str.strip_chars().fill_null("") != "")) is not None:
                 msg = f"the {label!r} column holds {text[label][at - 1]!r}, and it never holds a value: row {at}"
-                raise ValueError(msg)
+                raise ReadError(msg)
         text = text.drop(dropped)
         columns = self._columns if (layout := self._layout(text.columns)) is None else layout
         if text.columns != (labels := [column.label for column in columns]):
             msg = f"the header {text.columns} is not {labels}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         # A cell holding nothing, or only whitespace, holds no value, but for a field the format keeps as written.
         written = [column.label for column in columns if column.field in self._as_written]
         blank = pl.col(pl.String).exclude(*written) if written else pl.col(pl.String)
@@ -582,7 +583,7 @@ class GridFile[RowT: msgspec.Struct](TextFile[RowT]):
             return []
         if at - 1 - self._above < 0:
             msg = f"the header in row {at} has not the {self._above} rows over it that head its columns too"
-            raise ValueError(msg)
+            raise ReadError(msg)
         rows = [grid.row(row) for row in range(at - 1 - self._above, at)]
         if not self._above:
             header: list[str] = [cell or "" for cell in rows[-1]]
@@ -600,18 +601,18 @@ class GridFile[RowT: msgspec.Struct](TextFile[RowT]):
         # A stacked header names each column by its heading and label: two alike are no columns a format tells apart.
         if self._above and len(set(header)) != len(header):
             msg = f"the header {header} heads two columns alike, which no format of the grid tells apart"
-            raise ValueError(msg)
+            raise ReadError(msg)
         below = self._rows_below(grid, at)
         if (past := below.select(grid.columns[len(header) :])).width and past.null_count().sum_horizontal()[0] != (
             past.width * past.height
         ):
             msg = f"a row below the header {header} holds a cell past its last label, which no column of the table is"
-            raise ValueError(msg)
+            raise ReadError(msg)
         rows = below.select(grid.columns[: len(header)])
         # A label written twice is two columns, named by their place as fastexcel names them (``Rate``, ``Rate_1``).
         if len(set(header := _repeated(header, "{label}_{n}", 1))) != len(header):
             msg = f"the header {header} leaves two cells empty, which no format of the sheet reads"
-            raise ValueError(msg)
+            raise ReadError(msg)
         rows.columns = header
         if self._unread:
             rows = rows.select(label for label in header if label not in self._unread)
@@ -651,11 +652,11 @@ class TitledGrid[RowT: msgspec.Struct](GridFile[RowT]):
         alone = (first == self._title) & pl.all_horizontal(rest.is_null()) if grid.width > 1 else first == self._title
         if (title := _first(grid.select(alone.fill_null(value=False)).to_series(), 1)) is None:
             msg = f"no row is the title {self._title!r} alone"
-            raise ValueError(msg)
+            raise ReadError(msg)
         filled = grid.slice(title).select(~pl.all_horizontal(pl.all().is_null())).to_series()
         if (header := _first(filled, title + 1)) is None:
             msg = f"the title {self._title!r} has no table below it"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return header
 
 
@@ -722,7 +723,7 @@ def _typed(column: _Column, text: pl.Series, what_cell: str) -> pl.Series:
         what = "whole number" if column.scalar is int else "number"
     if (at := _first(text.is_not_null() & values.is_null())) is not None:
         msg = f"the {what_cell} {text[at - 1]!r} is not a {what}: row {at}"
-        raise ValueError(msg)
+        raise ReadError(msg)
     return values.alias(column.field)
 
 
@@ -810,7 +811,7 @@ def _decoded(body: bytes, encodings: Sequence[str], *, lossy: bool = False) -> s
     if lossy and tried:
         return body.decode(tried[-1], errors="replace")
     msg = f"the body is not {' or '.join(encodings)}: {error}"
-    raise ValueError(msg)
+    raise ReadError(msg)
 
 
 def _lines(body: bytes) -> pl.Series:
@@ -822,7 +823,7 @@ def _lines(body: bytes) -> pl.Series:
         lines = pl.read_csv(body, has_header=False, separator=_NUL, quote_char=None, schema={"line": pl.String})
     except pl.exceptions.PolarsError as e:
         msg = f"the body is not UTF-8: {e}"
-        raise ValueError(msg) from e
+        raise ReadError(msg) from e
     return lines["line"].fill_null("")
 
 
@@ -831,7 +832,7 @@ def _flagged(cells: pl.Series, flag: Flag, row_one: int = 1) -> pl.Series:
     values = cells.replace_strict({flag.true: True, flag.false: False}, default=None, return_dtype=pl.Boolean)
     if (at := _first(cells.is_not_null() & values.is_null(), row_one)) is not None:
         msg = f"the {cells.name!r} cell {cells[at - row_one]!r} is not {flag.true!r} or {flag.false!r}: row {at}"
-        raise ValueError(msg)
+        raise ReadError(msg)
     return values
 
 
@@ -850,7 +851,7 @@ def _strptime(cells: pl.Series, dtype: pl.Date | pl.Datetime | pl.Time, written_
         return cells.str.strptime(dtype, written_as, strict=False)
     except pl.exceptions.PolarsError as e:  # a local time a zone's clock change skips or repeats
         msg = f"the {cells.name!r} column holds a time that is no one moment in its zone: {e}"
-        raise ValueError(msg) from e
+        raise ReadError(msg) from e
 
 
 #: A directive writing a day: a date format without one writes a period (a year, a month, a quarter).
@@ -903,7 +904,7 @@ def _period(written_as: str) -> str:
             f"the date format {written_as!r} writes no day, so it writes a period: %Y (or %y) and at most one of"
             " %m, %-m, %b, %B or %q, besides literal text"
         )
-        raise ValueError(msg)
+        raise LayoutError(msg)
     return "".join(_PERIOD_PARTS[part] if n % 2 else re.escape(part) for n, part in enumerate(parts))
 
 
@@ -962,7 +963,7 @@ def _moment(cells: pl.Series, dtype: pl.Date | pl.Datetime | pl.Time, written: F
         msg = (
             f"the {cells.name!r} cell {cells[at - row_one]!r} is not a {what} written {' or '.join(formats)}: row {at}"
         )
-        raise ValueError(msg)
+        raise ReadError(msg)
     taken = (pl.when(ok).then(values) for values, ok in zip(parsed, exact, strict=True))
     return pl.select(pl.coalesce(taken)).to_series().alias(cells.name)
 
@@ -972,4 +973,4 @@ def check_ending(body: bytes, *, final_line_ending: bool) -> None:
     if body.endswith((b"\n", b"\r")) != final_line_ending:
         written = "always ends its last line" if final_line_ending else "never ends its last line"
         msg = f"the body's end is not the file's, which {written} with a line ending: it was cut"
-        raise ValueError(msg)
+        raise ReadError(msg)

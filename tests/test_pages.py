@@ -17,7 +17,7 @@ import polars as pl
 import pytest
 from lxml import etree
 
-from flatread.errors import EmptyBodyError, RaggedRowError, UnknownLayoutError
+from flatread.errors import EmptyBodyError, RaggedRowError, ReadError
 from flatread.fields import Flag, Format, Label, Link
 from flatread.layout import LongFile
 from flatread.markup import parse_xml
@@ -319,18 +319,16 @@ class TestTableFrame:
 
     def test_a_repeated_column_name_raises(self) -> None:
         # Until 2026-10-05 the second "A" cell overwrote the first in the row dict.
-        with pytest.raises(
-            UnknownLayoutError, match=r"^the table's header \['A', 'A', 'B'\] names \['A'\] more than once$"
-        ):
+        with pytest.raises(ReadError, match=r"^the table's header \['A', 'A', 'B'\] names \['A'\] more than once$"):
             self._frame("<table><tr><th>A</th><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td><td>3</td></tr></table>")
 
     def test_a_repeated_column_name_raises_with_no_data_rows(self) -> None:
-        with pytest.raises(UnknownLayoutError, match=r"names \['A'\] more than once$"):
+        with pytest.raises(ReadError, match=r"names \['A'\] more than once$"):
             self._frame("<table><tr><th>A</th><th>A</th></tr></table>")
 
     def test_a_table_inside_a_cell_raises(self) -> None:
         """Until 2026-11-06 the inner table's rows read as the outer one's."""
-        with pytest.raises(UnknownLayoutError, match=r"^the table under header \['A', 'B'\] holds another table$"):
+        with pytest.raises(ReadError, match=r"^the table under header \['A', 'B'\] holds another table$"):
             self._frame(
                 "<table><tr><th>A</th><th>B</th></tr>"
                 "<tr><td>1</td><td><table><tr><td>2</td><td>3</td></tr></table></td></tr></table>"
@@ -343,7 +341,7 @@ class TestTableFrame:
     def test_header_reads_a_table_holding_another_without_raising(self) -> None:
         table = self._table("<table><tr><th>A</th></tr><tr><td><table><tr><td>x</td></tr></table></td></tr></table>")
         assert table_header(table) == ["A"]
-        with pytest.raises(UnknownLayoutError, match=r"holds another table$"):
+        with pytest.raises(ReadError, match=r"holds another table$"):
             rows(table)
 
     def test_header_of_a_table_without_rows_is_none(self) -> None:
@@ -405,7 +403,7 @@ class TestBytesThatDeclareNoCharsetAreUtf8:
         assert cell_text(cells(doc)[0]) == self._CELL
 
     def test_undeclared_bytes_that_are_not_utf8_raise(self) -> None:
-        with pytest.raises(UnknownLayoutError, match=r"^the page declares no charset and byte 7 is not UTF-8$"):
+        with pytest.raises(ReadError, match=r"^the page declares no charset and byte 7 is not UTF-8$"):
             parse_html(f"<td>{self._CELL}</td>".encode("cp1252"))
 
     def test_a_charset_declared_past_the_first_1024_bytes_is_honored(self) -> None:
@@ -439,7 +437,7 @@ class TestBytesThatDeclareNoCharsetAreUtf8:
 
     def test_a_meta_tag_in_the_body_declares_nothing(self) -> None:
         markup = f"<html><head></head><body><meta charset='windows-1252'><td>{self._CELL}</td></body></html>"
-        with pytest.raises(UnknownLayoutError, match=r"^the page declares no charset and byte \d+ is not UTF-8$"):
+        with pytest.raises(ReadError, match=r"^the page declares no charset and byte \d+ is not UTF-8$"):
             parse_html(markup.encode("cp1252"))
 
     def test_a_byte_order_mark_is_a_declaration(self) -> None:
@@ -489,7 +487,7 @@ class TestParseXml:
     )
     def test_a_body_that_is_not_one_well_formed_document_raises(self, body: bytes) -> None:
         """No recovery: a cut-off body raises rather than reading as the elements before the cut."""
-        with pytest.raises(UnknownLayoutError, match=r"^the body is not well-formed XML: "):
+        with pytest.raises(ReadError, match=r"^the body is not well-formed XML: "):
             parse_xml(body)
 
     def test_an_internal_entity_is_not_expanded(self) -> None:
@@ -558,20 +556,20 @@ class TestAnHtmlFile:
     )
     def test_a_cell_not_its_fields_type_raises_naming_its_row(self, cell: dict[int, str], message: str) -> None:
         wrong = tuple(cell.get(i, value) for i, value in enumerate(_ROW))
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _HOLDINGS.rows(_page(_ROW, wrong))
 
     @pytest.mark.parametrize(
         ("body", "error", "message"),
         [
-            (b" \n", ValueError, r"^the body is empty$"),
-            (b"<p>no table</p>", ValueError, r"^the page holds 0 of the file's tables, not one$"),
-            (_page(_ROW, tables=2), ValueError, r"^the page holds 2 of the file's tables, not one$"),
-            (b"<table></table>", ValueError, r"^the table has no row$"),
-            (_page(header=("#", "Day")), ValueError, r"^the header \['#', 'Day'\] is not \['#', 'Date', "),
-            (_page(), ValueError, r"^the body is a header and no rows$"),
+            (b" \n", ReadError, r"^the body is empty$"),
+            (b"<p>no table</p>", ReadError, r"^the page holds 0 of the file's tables, not one$"),
+            (_page(_ROW, tables=2), ReadError, r"^the page holds 2 of the file's tables, not one$"),
+            (b"<table></table>", ReadError, r"^the table has no row$"),
+            (_page(header=("#", "Day")), ReadError, r"^the header \['#', 'Day'\] is not \['#', 'Date', "),
+            (_page(), ReadError, r"^the body is a header and no rows$"),
             (_page(_ROW[:4]), RaggedRowError, r"row 1 of the table under header .* has 4 cells"),
-            (_page(_ROW, header=("#", "#", "Asset Name", "Rate", "Held")), UnknownLayoutError, r"names \['#'\] more"),
+            (_page(_ROW, header=("#", "#", "Asset Name", "Rate", "Held")), ReadError, r"names \['#'\] more"),
             (
                 _page(("<table><tr><td>1</td></tr></table>", *_ROW[1:])),
                 ValueError,
@@ -614,7 +612,7 @@ class TestAnHtmlFile:
             Rate(dt.date(2025, 4, 24), "IBIT", 4.5),
             Rate(dt.date(2025, 4, 24), "GBTC", None),
         ]
-        with pytest.raises(ValueError, match=r"^the header's columns \['ibit'\] are not keys"):
+        with pytest.raises(ReadError, match=r"^the header's columns \['ibit'\] are not keys"):
             Rates(Rate).rows(_page(("04/24/2025", "4.5"), header=("Date", "ibit")))
 
 
@@ -648,7 +646,7 @@ class TestAnHtmlFilesLinks:
         ids=["no link", "two links", "no href"],
     )
     def test_a_cell_without_one_link_raises(self, cell: str, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             self._FILES.rows(self._page(cell))
 
     def test_a_link_is_its_own_anchor(self) -> None:
@@ -743,7 +741,7 @@ class TestHtmlRecords:
         ids=["empty", "no record", "no heading", "another heading", "a heading of none", "no cell", "no month"],
     )
     def test_a_page_of_another_shape_raises(self, body: bytes, message: str) -> None:
-        with pytest.raises(ValueError, match=message):
+        with pytest.raises(ReadError, match=message):
             _Meetings(_Meeting).rows(body)
 
     def test_a_records_link_must_be_one(self) -> None:
@@ -751,7 +749,7 @@ class TestHtmlRecords:
             "<h4>2026 meetings</h4>",
             '<div class="meeting"><div class="month">May</div><a href="/a">a</a><a href="/b">b</a></div>',
         )
-        with pytest.raises(ValueError, match=r"^record 1: its cell holds 2 links, not one"):
+        with pytest.raises(ReadError, match=r"^record 1: its cell holds 2 links, not one"):
             _Meetings(_Meeting).rows(body)
 
     def test_a_format_leaves_records_out(self) -> None:
@@ -778,7 +776,7 @@ class TestHtmlRecords:
 
     def test_an_empty_heading_is_found_beside_another_of_its_text(self) -> None:
         body = _meetings("<h4>2026 meetings</h4>", _meeting("May"), "<h4>2026 meetings</h4>")
-        with pytest.raises(ValueError, match=r"^the headings \['2026 meetings'\] head no record$"):
+        with pytest.raises(ReadError, match=r"^the headings \['2026 meetings'\] head no record$"):
             _Meetings(_Meeting).rows(body)
 
 
@@ -799,7 +797,7 @@ class TestAnHtmlFilesRepeatedLabels:
 
     def test_a_label_written_more_often_than_its_fields_raises(self) -> None:
         body = b"<table><tr><th>LONG</th><th>%</th><th>SHORT</th><th>%</th><th>%</th></tr></table>"
-        with pytest.raises(UnknownLayoutError, match=r"names \['%'\] more than once$"):
+        with pytest.raises(ReadError, match=r"names \['%'\] more than once$"):
             HtmlFile(_Shares).rows(body)
 
     def test_an_optional_field_with_no_element_holds_no_value(self) -> None:
