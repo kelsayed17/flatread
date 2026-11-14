@@ -93,7 +93,7 @@ class SdmxCsv[RowT: msgspec.Struct](HeadersCsv[RowT]):
     is a value, and a header alone is a table of no rows.
     """
 
-    _finite = False
+    _non_finite = (_OBS_VALUE.lower(),)
     _rows_required = False
 
     def __init__(self, row: type[RowT]) -> None:

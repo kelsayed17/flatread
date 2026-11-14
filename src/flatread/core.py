@@ -9,10 +9,10 @@ header writes twice is two fields, matched by place.
 
 **What every reader promises.** :class:`File` checks the frame a format reads: its columns are the struct's fields, in
 order, each typed as its field; there is at least one row (unless ``_rows_required`` is false); a float is finite
-(unless ``_finite`` is false); a null sits only where its field admits one; a ``Shape``'s text fullmatches. A body that
-fails raises :class:`~flatread.errors.ReadError` naming the first row; a struct or switch that describes no readable
-file raises :class:`~flatread.errors.LayoutError`, most when the reader is built. :meth:`File.rows` builds the structs
-from the checked frame by position, without a second check.
+(unless it is one of ``_non_finite``); a null sits only where its field admits one; a ``Shape``'s text fullmatches. A
+body that fails raises :class:`~flatread.errors.ReadError` naming the first row; a struct or switch that describes no
+readable file raises :class:`~flatread.errors.LayoutError`, most when the reader is built. :meth:`File.rows` builds the
+structs from the checked frame by position, without a second check.
 
 **Composition.** A reader is one class doing one thing, and a format is a subclass naming the pieces it needs, each
 overriding one step and calling the next: ``class _Volumes(TrailerCsv[Row], HeadersCsv[Row])``. The switches are
@@ -157,8 +157,9 @@ class File[RowT: msgspec.Struct](abc.ABC):
     body and every thread. A format subclasses a reader of this class's family and implements :meth:`_read`.
     """
 
-    #: Whether every float is finite: a format that writes ``NaN`` and infinities as values (SDMX) sets it false.
-    _finite: typing.ClassVar[bool] = True
+    #: The float fields that may hold ``NaN`` and infinities as values (SDMX's ``obs_value``); every other float field
+    #: is finite, and polars' reading of ``nan``, ``inf`` or an overflowing ``1e400`` as a float is refused there.
+    _non_finite: typing.ClassVar[Collection[str]] = ()
     #: Whether a header alone is no file: a format whose header with no rows is an empty answer (SDMX) sets it false,
     #: as does a file that states its row count (a trailer's), which then vouches for a table of none.
     _rows_required: typing.ClassVar[bool] = True
@@ -289,6 +290,15 @@ class File[RowT: msgspec.Struct](abc.ABC):
             raise LayoutError(msg)
         return None if stated is None else _address(stated.address)
 
+    def _stated_fields(self) -> frozenset[str]:
+        """Return the fields a piece states for every row, not read from the table's columns: none, unless one does.
+
+        A trailer's or a title's group, a zip member's or a sheet's name: each piece that states fields adds its own to
+        ``super()._stated_fields()``, and every piece that lays out the table's columns (a header's check, a long
+        table's record) leaves them out.
+        """
+        return frozenset()
+
     def _label(self, name: str) -> str | None:
         """Return the label of field *name*, which names no ``Label``: none, unless a format derives its labels."""
         del name
@@ -389,7 +399,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         One pass says whether any column fails; only then is each failing column's first row found.
         """
         checked = pl.lit(value=True) if among is None else pl.lit(among)
-        floats = [name for name, dtype in frame.schema.items() if dtype == pl.Float64] if self._finite else []
+        floats = [name for name, dtype in frame.schema.items() if dtype == pl.Float64 and name not in self._non_finite]
         tests = [
             *(("infinite", name, ~pl.col(name).is_finite() & checked) for name in floats),
             *(("empty", name, pl.col(name).is_null() & checked) for name in required),
