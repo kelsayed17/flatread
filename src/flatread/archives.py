@@ -34,7 +34,7 @@ import polars as pl
 from flatread.core import Column, File, _decoded, _second, _stated
 from flatread.errors import LayoutError, ReadError
 
-__all__ = ["StreamedZip", "Transcoded", "ZippedFile", "ZippedFiles", "ZippedOrBare", "zipped_member"]
+__all__ = ["StreamedZip", "Transcoded", "ZippedFile", "ZippedFiles", "ZippedOrBare", "zip_names", "zipped_member"]
 
 #: The most bytes a body's zip members may inflate to, in all: a body past it is refused, not read into memory.
 _INFLATED_MAX: Final = 1 << 30
@@ -216,6 +216,17 @@ class ZippedFiles[RowT: msgspec.Struct](File[RowT]):
                 part = part.with_columns(given)
                 parts.append(self._part(match, part.select(name for name in order if name in part.columns)))
         return pl.concat(parts)
+
+
+def zip_names(body: bytes) -> list[str]:
+    """Return the names of the zip *body*'s members, in the order its central directory lists them.
+
+    The zip is opened as every reader here opens one: a body that is no zip, will not open, or lists a name twice
+    raises ``ReadError``. For a format that picks its member by what the zip holds (the table's ``.xlsx``, else its
+    ``.csv``), then reads it by its exact name: ``zipped_member(body, re.compile(re.escape(name)))``.
+    """
+    with _unzipped(body, None) as archive:
+        return archive.namelist()
 
 
 def zipped_member(body: bytes, member: re.Pattern[str], members: int | None = None) -> tuple[str, bytes]:

@@ -909,6 +909,9 @@ class CsvText[RowT: msgspec.Struct](GridFile[RowT]):
 
     #: Whether a stray quote is text rather than an error: for a file whose prose notes misquote.
     _misquoted: typing.ClassVar[bool] = False
+    #: Whether every row but a blank line is as wide as the widest, a narrower one a damaged file: such a row raises
+    #: ``RaggedRowError``, naming it, where by default its missing cells are no value (a file of blocks of widths).
+    _full_rows: typing.ClassVar[bool] = False
 
     def __init__(
         self, row: type[RowT], *, header_row: int = 1, separator: str = ",", null_values: Sequence[str] = ()
@@ -935,6 +938,12 @@ class CsvText[RowT: msgspec.Struct](GridFile[RowT]):
             msg = f"the body is no delimited file: {e}"
             raise ReadError(msg) from e
         width = max(map(len, rows))
+        short = (
+            next((n for n, row in enumerate(rows, 1) if row and len(row) < width), None) if self._full_rows else None
+        )
+        if short is not None:
+            msg = f"row {short} has {len(rows[short - 1])} fields, not the widest row's {width}"
+            raise RaggedRowError(msg)
         names = [str(at) for at in range(width)]
         grid = pl.DataFrame(
             [[*row, *[None] * (width - len(row))] for row in rows], schema=dict.fromkeys(names, pl.String), orient="row"

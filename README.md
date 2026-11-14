@@ -105,7 +105,7 @@ install loads no HTML, PDF, XML or workbook library (the import-linter contracts
 | `flatread.reports` | a table laid out for print: `ReportFile`, `LongReport` | |
 | `flatread.layout` | a wide table read long: `LongFile` | |
 | `flatread.found` | a table whose header is found by its labels: `FoundTable`, `FoundCsv` | |
-| `flatread.archives` | a file in a zip or a legacy encoding: `ZippedFile`, `ZippedFiles`, `ZippedOrBare`, `StreamedZip`, `Transcoded`, `zipped_member` | |
+| `flatread.archives` | a file in a zip or a legacy encoding: `ZippedFile`, `ZippedFiles`, `ZippedOrBare`, `StreamedZip`, `Transcoded`, `zip_names`, `zipped_member` | |
 | `flatread.sheets` | xlsx and xls workbooks: `SheetFile` and a class per sheet shape, `SheetsFile`, `SheetText`, `BiffSheet`, `FoundSheet`, `sheet_grid` | `excel` |
 | `flatread.markup` | XML: `XmlFile`, `NestedXml`, `parse_xml` | `xml` |
 | `flatread.sdmx` | SDMX-CSV and SDMX-ML: `SdmxCsv`, `SdmxStructure`, `SdmxSeries`, `SdmxObservations` | `xml` |

@@ -12,10 +12,10 @@ import msgspec
 import polars as pl  # noqa: TC002 (the hooks' annotations, read at runtime)
 import pytest
 
-from flatread.archives import StreamedZip, Transcoded, ZippedFile, _zip64
+from flatread.archives import StreamedZip, Transcoded, ZippedFile, _zip64, zip_names, zipped_member
 from flatread.core import Carried, Reshaped
-from flatread.delimited import CsvFile, HeadersCsv, NamedCsv, SectionedCsv
-from flatread.errors import LayoutError, ReadError
+from flatread.delimited import CsvFile, CsvText, HeadersCsv, NamedCsv, SectionedCsv
+from flatread.errors import LayoutError, RaggedRowError, ReadError
 from flatread.fields import Label, Span
 from flatread.fixed import FixedWidthFile
 
@@ -122,3 +122,25 @@ def test_a_zipped_or_transcoded_format_without_its_switch_is_a_layout_error() ->
         LayoutError, match=r"^the Misencoded format's encoding 'no-such-codec' is no codec Python reads$"
     ):
         Misencoded(_Row)
+
+
+def test_a_zips_names_are_listed_and_a_member_read_by_its_exact_name() -> None:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr("t.xlsx", b"x")
+        archive.writestr("t.csv", b"Name,Count\na,1\n")
+    assert zip_names(out.getvalue()) == ["t.xlsx", "t.csv"]
+    assert zipped_member(out.getvalue(), re.compile(re.escape("t.csv"))) == ("t.csv", b"Name,Count\na,1\n")
+    with pytest.raises(ReadError, match=r"^the body is not a zip"):
+        zip_names(b"not a zip")
+
+
+class _Full(CsvText[_Row]):
+    _full_rows = True
+
+
+def test_a_csv_text_of_full_rows_refuses_a_narrower_one() -> None:
+    assert _Full(_Row).rows(b"Name,Count\na,1\n\nb,2\n") == [_Row("a", 1), _Row("b", 2)]  # a blank line is no row
+    assert CsvText(_Row).rows(b"Name,Count,\na,1,\nb,2\n") == [_Row("a", 1), _Row("b", 2)]
+    with pytest.raises(RaggedRowError, match=r"^row 3 has 2 fields, not the widest row's 3$"):
+        _Full(_Row).rows(b"Name,Count,\na,1,\nb,2\n")
