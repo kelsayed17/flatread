@@ -61,7 +61,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
     ) -> None:
         """Lay out a report of *row*: each field a group of the format's row, or one its framing states.
 
-        Raises ``ValueError`` for a group named for no field of *row*, a field both a row's cell and stated, or what
+        Raises ``LayoutError`` for a group named for no field of *row*, a field both a row's cell and stated, or what
         :class:`TextFile` refuses.
         """
         super().__init__(row)

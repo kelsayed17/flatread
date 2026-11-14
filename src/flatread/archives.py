@@ -35,7 +35,7 @@ class Transcoded[RowT: msgspec.Struct](File[RowT]):
     """A file written in a legacy encoding (EIA's Windows-1252), read as UTF-8 by the reader the format lists after it.
 
     A format subclasses it with its reader and names :attr:`_encodings`; a body that none of them decodes raises
-    ``ValueError``. :attr:`_eof` is a byte the file ends with after its last line (DOS's end-of-file mark), dropped.
+    ``ReadError``. :attr:`_eof` is a byte the file ends with after its last line (DOS's end-of-file mark), dropped.
     """
 
     #: The codecs the body may be written in, tried in order (SEC's: ``("utf-8", "latin-1")``); each format's subclass
@@ -59,7 +59,7 @@ class ZippedFile[RowT: msgspec.Struct](File[RowT]):
     A format subclasses it with its reader and names the member: :attr:`_member`, the regex the member's whole name
     matches, folders and all (``(?:.*/)?x\.csv`` finds ``x.csv`` in any folder), and :attr:`_members`, how many members
     the zip holds where the format fixes it. A body that is no zip, a zip of another count, no member or several
-    matching, and a member that will not inflate raise ``ValueError``, naming the zip's members.
+    matching, and a member that will not inflate raise ``ReadError``, naming the zip's members.
     """
 
     #: The regex the member's whole name matches; each format's subclass (or its constructor, SEC's) sets it.
@@ -103,7 +103,7 @@ class ZippedFiles[RowT: msgspec.Struct](File[RowT]):
     file's name writes), a field no column holds, which takes no ``Label``; its text is typed as the field (a date by
     its ``Format``). Only a reader that lays out its columns (:meth:`File._layout`: a CSV, a sheet) reads a member
     without the stated fields. :meth:`_part` checks a part against its name. A zip of no member, a member that will not
-    inflate, and what :class:`ZippedFile` refuses raise ``ValueError``.
+    inflate, and what :class:`ZippedFile` refuses raise ``ReadError``.
     """
 
     #: The regex every member's whole name matches; each format's subclass sets it.
@@ -153,7 +153,7 @@ def zipped_member(body: bytes, member: re.Pattern[str], members: int | None = No
     """Return the name and inflated bytes of the one member of the zip *body* whose whole name matches *member*.
 
     For a zip whose member is no table (treasury's ``cslt.zip`` of one ``cslt.json``); :class:`ZippedFile` reads a
-    table's. *members*, :attr:`ZippedFile._members`. Raises ``ValueError`` as :class:`ZippedFile` does.
+    table's. *members*, :attr:`ZippedFile._members`. Raises ``ReadError`` as :class:`ZippedFile` does.
     """
     with _unzipped(body, members) as archive:
         names = archive.namelist()
@@ -165,7 +165,7 @@ def zipped_member(body: bytes, member: re.Pattern[str], members: int | None = No
 
 
 def _unzipped(body: bytes, members: int | None) -> zipfile.ZipFile:
-    """Open *body* as a zip of *members* members (any number for ``None``), or raise ValueError naming them."""
+    """Open *body* as a zip of *members* members (any number for ``None``), or raise ReadError naming them."""
     try:
         archive = zipfile.ZipFile(io.BytesIO(body))
     except zipfile.BadZipFile as e:
@@ -179,7 +179,7 @@ def _unzipped(body: bytes, members: int | None) -> zipfile.ZipFile:
 
 
 def _inflated(archive: zipfile.ZipFile, name: str) -> bytes:
-    """Return the zip's member *name* inflated, or raise ValueError for one past the cap or that will not inflate."""
+    """Return the zip's member *name* inflated, or raise ReadError for one past the cap or that will not inflate."""
     # zipfile inflates no more than the declared size, so checking it bounds the read
     if (size := archive.getinfo(name).file_size) > _INFLATED_MAX:
         msg = f"the zip's {name!r} inflates to {size} bytes, over {_INFLATED_MAX}"
@@ -281,7 +281,7 @@ class StreamedZip:
     descriptor, where it has one), so a damaged member raises after its text. A reader splits the text into what it
     reads (FINRA's line blocks) or joins it for a reader of whole bodies (SEC's CSVs). A body that is no zip, a zip cut
     short (a download stopped), a member another method compressed, and a zip with no member matching raise
-    ``ValueError``.
+    ``ReadError``.
     """
 
     #: Whether the zip holds the member alone: a member after it raises (FINRA's monthly files).

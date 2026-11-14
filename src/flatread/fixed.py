@@ -39,7 +39,7 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
 
         Every line of the table is as long as the last span's end, and a character outside every span is a space. A
         date or time field gives the :class:`~flatread.fields.Format` it is written in.
-        *final_line_ending* is :class:`CsvFile`'s. Raises ``ValueError`` for a field without a ``Span`` (but a stated
+        *final_line_ending* is :class:`CsvFile`'s. Raises ``LayoutError`` for a field without a ``Span`` (but a stated
         one), a stated field that is none of *row*'s, no span, spans out of order or overlapping, a date or time field
         without a ``Format``, or what :class:`File` refuses.
         """

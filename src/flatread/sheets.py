@@ -1,49 +1,38 @@
-"""A workbook sheet's table read natively into its row struct's fields, by fastexcel (an Excel 3 or 4 workbook by xlrd).
+"""A workbook sheet's table read into its row struct's fields, by fastexcel (an Excel 3 or 4 workbook by xlrd).
 
-:class:`SheetFile` is a clean table on one sheet of a workbook: its header in one row (row 1, or below titles), then a
-row per record to the sheet's end, nothing outside the header's columns. fastexcel loads the sheet twice, as text and
-typed by the struct's fields, because a typed load coerces without a word: a text cell is null as a number, ``1.5``
-truncates to ``1`` as a whole number, a plain number reads as a date (a plain table whose every column holds one kind
-of cell, its field's, is read from one strict load, which types a column by all its cells and refuses a mix). So a
-whole number is loaded as a float and
-checked whole, a date field without a ``Format`` must hold date cells and a time-of-day field time cells (one with a
-``Format`` holds text, parsed as :class:`CsvFile` parses it), and any cell whose text is not a value of its column
-raises, naming the sheet's own row, unless it is one of the sheet's words for none (``null_values``: ``#N/A``). An
-empty row inside the table raises, unless the format's sheet leaves gaps (``_gaps``: dropped) or numbers its rows by
-place (``_blank_rows``: kept, a row of no values); an empty string is no value. A typed load keeps every digit of a
-number, which a text load rounds to nine decimals. A header cell may be empty over a real column (a date column under
-no label): its field's ``Label`` is ``""``, and the cell must be empty, as fastexcel reports it (it names the column
-itself, ``__UNNAMED__n``); columns are matched by position, so a sheet may have several, and a label written twice is
-two fields (fastexcel names the second ``Rate_1``). A :class:`PaddedSheet` strips its text cells' spaces before they are
-typed (SF Fed's Stata months, ``' 1988m1'``); a :class:`NumberTextSheet` reads a number written as a text cell
-from its text (``' 471.21'``), composed after it.
-:class:`NotedSheet` is a sheet table with notes under it (a ``Source:`` line, a ``Notes:`` heading and its lines, a
-blank row and disclosures): the table ends at its first row with nothing past its first column, and below it only the
-first column holds anything, the notes, which are dropped. A :class:`TitledSheet`'s header sits below title rows, each
-matching its regex, and a :class:`PreambleSheet`'s below a preamble of any length: its header is the first row whose
-first cell is its first label. :class:`BesideSheet` is a sheet table with more beside it (a second list, a note,
-work columns): only the table's own columns are loaded, the first ones or those its ``_columns_at`` names (a table
-right of another, or across a spacer). A format whose sheet has no header sets ``_header`` false, as a CSV's does:
-its rows, under ``header_row``, are read by position.
-:class:`DatedSheet` is a table of dated rows that runs while its first column holds date cells (a
-week with no value yet is still a row), with notes below it. :class:`SheetsFile` reads every sheet of a workbook, each
-by a reader of its own, a sheet a year, the year stated from the sheet's name. A sheet may head its columns from rows
-right above its header row (``_above``, how many: a heading carries right over the columns with no cell of their
-own), allow blank rows inside its table (``_gaps``, dropped, or ``_blank_rows``, kept as rows of no values where a
-table numbers its rows by place), read a cell of only whitespace as empty (``_trim``) and a header cell stripped
-(``_strip``); either of the last two reads the header from the sheet's own rows, as written, so a table below blank
-rows or after a column the top rows fill is refused, and a heading written twice is twice.
+:class:`SheetFile` is a clean table on one named sheet: its header in one row (``header_row``, Excel's numbering),
+then a row per record to the sheet's end, nothing outside the header's columns. Errors name the sheet's own rows.
 
-:class:`SheetText` is a sheet's grid of text cells (each cell's text, a number with every digit) and :class:`BiffSheet`
-an Excel 3 or 4 workbook's, cut as a :class:`~flatread.core.GridFile` cuts its table. Over a sheet read
-long, a :class:`CellHeaderSheet` reads a header of date cells as their text, so a date is a key, and a
-:class:`GroupedSheet` reads keys under group headings, the group and the label both keys.
+**How a sheet is read.** fastexcel's typed load coerces without a word (a text cell is null as a number, ``1.5``
+truncates to ``1`` as a whole number, a plain number reads as a date), so a table is loaded twice: as text, which says
+what each cell holds, and typed by the struct's fields. A whole number is loaded as a float and checked whole; a date
+field without a ``Format`` must hold date cells, and with one, text in that format; a cell whose text is not a value
+of its column raises, unless it is one of the sheet's ``null_values`` (``#N/A``). A plain table, every column of one
+kind, its field's, is read from one strict load instead (``tests/test_sheet_loads.py`` pins the load counts). A typed
+load keeps every digit of a number, which a text load rounds to nine decimals.
 
-fastexcel's ``dtypes="string"`` load rounds a number cell to 9 decimal places: ``13442.008862616791`` in the XML
-comes back as ``13442.008862617`` and ``1e-10`` as ``0`` (measured on fastexcel 0.21.0, the latest, 2026-11-09), so a
-decoder that types the text loses the rest. :func:`_text_sheet` loads the sheet a second time as floats and, for each
-cell whose text reads as a different number, takes the float's shortest round-trip form instead. Text cells
-(``'1.50'`` stays ``1.50``), dates and numbers the text already holds exactly stay as the text load writes them.
+**The switches** of :class:`SheetFile`: ``_header`` (false: no header row, fields by position), ``_gaps`` (an empty
+row inside the table is dropped) or ``_blank_rows`` (kept, a row of no values), ``_trim`` (a cell of only whitespace
+is empty), ``_strip`` (header cells stripped), ``_above`` (rows over the header that head its columns too). A header
+cell may be empty over a real column: its field's ``Label`` is ``""``.
+
+**The sheet shapes**, each composed before the reader it changes:
+
+* :class:`PaddedSheet`: text cells padded with spaces, stripped before they are typed;
+* :class:`NumberTextSheet`: numbers written as text cells as well as number cells;
+* :class:`NotedSheet`: notes under the table, which ends at its first row with nothing past column A;
+* :class:`DatedSheet`: a table that runs while its first column holds date cells, notes under it;
+* :class:`TitledSheet`: title rows over the header, each matching its regex;
+* :class:`PreambleSheet`: a preamble of any length, the header the first row opening with its first label;
+* :class:`BesideSheet`: more beside the table, only its own columns loaded;
+* :class:`OnlySheet`: a workbook of one sheet whose name varies;
+* :class:`CellHeaderSheet` and :class:`GroupedSheet`: headers read long (date cells as keys; keys under group
+  headings).
+
+:class:`SheetsFile` reads every sheet of a workbook, each by a reader of its own (a sheet a year). :class:`SheetText`
+cuts a table from a sheet's grid of text cells (:func:`sheet_grid`, each number with every digit) for a sheet too
+irregular for :class:`SheetFile`, and :class:`BiffSheet` from an Excel 3 or 4 workbook's. :class:`FoundSheet` is a
+:class:`~flatread.found.FoundTable` on a workbook's first sheet.
 """
 
 import datetime as dt
@@ -150,7 +139,7 @@ _ONE_LOAD_HOOKS: Final = (
 
 
 def _workbook(body: bytes) -> fastexcel.ExcelReader:
-    """Return the workbook *body*, open, or raise ValueError for a body that is no workbook."""
+    """Return the workbook *body*, open, or raise ReadError for a body that is no workbook."""
     try:
         return fastexcel.read_excel(body)
     except fastexcel.FastExcelError as e:
@@ -212,7 +201,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         Each field names its column with a :class:`~flatread.fields.Label`. A date or time field without a
         :class:`~flatread.fields.Format` holds the sheet's date cells; with one, text written in that
         format. *null_values* are the sheet's text for no value (``#N/A``, ``NA``). Errors name the sheet's own rows.
-        Raises ``ValueError`` where the :attr:`_above` rows do not fit over *header_row*.
+        Raises ``LayoutError`` where the :attr:`_above` rows do not fit over *header_row*.
         """
         super().__init__(row, row_one=header_row + 1)
         _check_above(self._above, header_row)
@@ -502,7 +491,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     ) -> pl.DataFrame:
         """Load *sheet* by fastexcel from sheet row *skip_rows* + 1, its columns named by place (``"0"`` is ``A``).
 
-        fastexcel's own failure is a ValueError.
+        fastexcel's own failure is a ReadError.
         """
         try:
             loaded = reader.load_sheet(
@@ -845,7 +834,7 @@ def sheet_grid(body: bytes, sheet: str | None = None, *, null_values: Sequence[s
     The grid :class:`SheetText` cuts: a row per sheet row from row 1, a column per sheet column from the first filled
     one, named ``"0"``, ``"1"``, ...; a number with every digit it holds (fastexcel's text load rounds to nine
     decimals), a blank cell or one of *null_values* no value. A body that is no workbook, a workbook without *sheet*,
-    or one of several sheets when *sheet* is ``None``, raises ValueError.
+    or one of several sheets when *sheet* is ``None``, raises ReadError.
 
     Example: ``docs/examples/sheet_text.txt``.
     """
@@ -854,7 +843,7 @@ def sheet_grid(body: bytes, sheet: str | None = None, *, null_values: Sequence[s
 
 
 def _sheet_named(reader: fastexcel.ExcelReader, sheet: str | None) -> str:
-    """Return *sheet*, or for ``None`` the name of *reader*'s one sheet; raise ValueError for a workbook of several."""
+    """Return *sheet*, or for ``None`` the name of *reader*'s one sheet; raise ReadError for a workbook of several."""
     if sheet is None:
         if len(reader.sheet_names) != 1:
             msg = f"the workbook holds the sheets {reader.sheet_names!r}, not one"
@@ -938,7 +927,7 @@ class BiffSheet[RowT: msgspec.Struct](SheetText[RowT]):
     def _biff_grid(self, body: bytes) -> pl.DataFrame:
         """Return the sheet's grid as :meth:`SheetText._grid` does: a column per sheet column from its first filled one.
 
-        Raises ValueError for a body that is no BIFF3 or BIFF4 workbook, one xlrd cannot read, or no such sheet.
+        Raises ReadError for a body that is no BIFF3 or BIFF4 workbook, one xlrd cannot read, or no such sheet.
         """
         if int.from_bytes(body[:2], "little") not in _BIFF_BOFS:
             msg = f"the body is not a BIFF3 or BIFF4 workbook: it opens {body[:4]!r}"

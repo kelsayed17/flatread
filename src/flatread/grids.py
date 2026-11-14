@@ -49,7 +49,7 @@ class GridFile[RowT: msgspec.Struct](TextFile[RowT]):
     def __init__(self, row: type[RowT], *, header_row: int = 1, null_values: Sequence[str] = ()) -> None:
         """Lay out a table of *row* under its header in row *header_row* of the grid (the file's own, from 1).
 
-        Raises ``ValueError`` where the :attr:`_above` rows do not fit over *header_row*, or what :class:`TextFile`
+        Raises ``LayoutError`` where the :attr:`_above` rows do not fit over *header_row*, or what :class:`TextFile`
         refuses.
         """
         super().__init__(row)

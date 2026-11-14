@@ -1,21 +1,20 @@
-"""What the page decoders share: an HTML page parsed leniently, its tables and a cell's text.
+"""HTML pages read into their row struct's fields: a page's table, or records that are elements.
 
-A provider whose endpoint serves an HTML page rather than JSON or a file (Farside's ETF flow table, Yahoo's earnings
-calendar, the Fed's FOMC calendar, the Senate eFD search results, CFTC's swaps-report archive, Cboe's daily market
-statistics, Treasury's allotment page) parses it through this module, the one place that builds a
+**The readers** are :class:`HtmlFile`, a page's one table read into its row struct, and :class:`HtmlRecords`,
+records that are elements a CSS selector finds (a calendar's meeting rows, a list of links), each field the one
+element its ``Label`` selects, under headings that may state fields (a panel's year). A format that reads a page its
+own way overrides a hook (:meth:`HtmlFile._grid`, :meth:`_HtmlText._value`) with the helpers below: :func:`parse_html`,
+:func:`table_header`, :func:`table_cells`, :func:`table_frame`, :func:`cell_text`, :func:`text`, :func:`href`.
+
+Both read a cell as its text, or as its link's ``href`` for a :class:`~flatread.fields.Link` field, and a format reads
+one its own way through ``_value``; fields that share a cell (SEC's ``File`` cell: its link's text, its notes and its
+``href``) each key their own column. Both type the cells as :class:`~flatread.core.TextFile` does.
+
+**The parser.** Scrapling runs over lxml, and only this module loads it, the one place that builds a
 :class:`scrapling.parser.Selector`, with the settings below.
 
-**The native readers** are :class:`HtmlFile`, a page's table read into its row struct, and :class:`HtmlRecords`,
-records that are elements a CSS selector finds (Treasury's links, the FOMC calendar's meeting rows), each field the one
-element its ``Label`` selects, under headings that may state fields (a panel's year). Both read a cell as its text, or
-as its link's ``href`` for a :class:`~flatread.fields.Link` field, and a format reads one its own way
-through ``_value``; fields that share a cell (SEC's ``File`` cell: its link's text, its notes and its ``href``) each key
-their own column. Both type the cells as :class:`~flatread.core.TextFile` does.
-
-**The parser.** Scrapling runs over lxml, and only this module loads it.
-
-**The errors** are :mod:`flatread.errors`'s: a table whose header names a column twice, or that holds another table,
-raises :class:`~flatread.errors.ReadError`, and a row with more or fewer cells than its header
+**The errors**: a table whose header names a column twice, or that holds another table, raises
+:class:`~flatread.errors.ReadError`, and a row with more or fewer cells than its header
 :class:`~flatread.errors.RaggedRowError` naming the row (:func:`table_frame`).
 
 Scrapling parses with libxml2's lenient HTML parser (through lxml), which recovers from the malformed markup these
@@ -24,7 +23,7 @@ that way: Scrapling has no XML parser, and its HTML parse of an XML index lowerc
 silently keeps half of a truncated body (measured 2026-10-05). :func:`~flatread.markup.parse_xml`
 parses one strictly with ``lxml.etree`` (the House Clerk's FD index, the ECB's dataflow list).
 
-**Five Scrapling defaults would change what these decoders return**, so this module sets each one explicitly. Measured
+**Five Scrapling defaults would change what these readers return**, so this module sets each one explicitly. Measured
 2026-10-05 against the lxml code this replaced; every expected value in ``tests/test_pages.py`` pins that code's
 output. The first three are the parse's, which :func:`parse_html` does itself with Scrapling's lxml settings and hands
 to ``Selector`` as its root:
@@ -247,7 +246,7 @@ def table_cells(table: Element, columns: list[str]) -> tuple[list[list[Element]]
     """Return *table*'s rows after the first as their cells under *columns* (from :func:`table_header`).
 
     Returns one list of cell elements per ``<tr>`` with cells, and each row's 1-based place among the ``<tr>`` after
-    the header, the ``numbers=`` :func:`~flatread.cells.read_table` names a row by. A ``<tr>`` with no cells is no row
+    the header, which an error names a row by. A ``<tr>`` with no cells is no row
     (Farside's live flow table carries one). Two shapes are refused rather than read, because reading either loses data
     silently:
 
@@ -339,7 +338,8 @@ class _HtmlText[RowT: msgspec.Struct](TextFile[RowT]):
     def _value(self, cell: Element, column: _Column) -> str:
         """Return the text *column* reads from *cell*: its link's ``href`` for a ``Link`` field, else its text.
 
-        A format reads a cell its own way by overriding it; a ``ValueError`` it raises is prefixed with the cell.
+        A format reads a cell its own way by overriding it; a ``ValueError`` it raises is a ``ReadError`` naming the
+        cell.
         """
         return href(cell) if column.field in self._links else cell_text(cell)
 

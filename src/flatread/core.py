@@ -1,52 +1,33 @@
-"""The base every reader composes on: a file read into its row struct's fields, as a DataFrame or as typed rows.
+"""The base every reader composes on: a body read into its row struct's fields, as a DataFrame or as typed rows.
 
-A :class:`File` is one file's reader, abstract over its format: a subclass reads a body into a DataFrame of its row
-struct's fields (:meth:`~File._read`), and :class:`File` checks that frame and turns it into typed rows, by position.
-The struct lays the file out: each field names its column in ``Annotated`` metadata
-(:mod:`flatread.fields`: a ``Label``, a date or time's ``Format``, a boolean's ``Flag``), in the file's
-order, and each column takes its field's type (``str``, ``int``, ``float``, ``bool``, a date, a time of day, a date and
-time; a ``Literal`` or ``NewType`` by its base). A label the header writes twice (OCC's two ``Filler`` columns) is two
-fields, matched by place. The checks: the columns are the struct's fields, in order; there is at least one row; a float
-is finite (polars reads ``NaN`` and ``inf`` as floats, and no file means them as numbers); a null sits only where the
-field admits ``None``. Each error names the first row it found. A provider's decoders build one per file and wrap its
-two reads, ``body_reader(FILE.rows)`` and ``body_reader(FILE.frame)``.
+**The row struct.** A reader is built from a msgspec struct whose fields, in the file's order, name their columns in
+``Annotated`` metadata (:mod:`flatread.fields`): a ``Label`` (the header's text), and for a date or time its
+``Format``, for a boolean its ``Flag``. Each column takes its field's type: ``str``, ``int``, ``float``, ``bool``, a
+date, a time of day, a date and time; a ``Literal`` or ``NewType`` reads as its base. A field that admits ``None``
+may be empty; a field with a default takes it where its file holds no value; any other empty cell raises. A label the
+header writes twice is two fields, matched by place.
 
-**Modular.** Each reader is one class doing one thing, and a format is its own small subclass naming the pieces it
-needs, each setting a piece's class attribute. The pieces compose, each overriding one step (``_table``) and calling the
-next: FINRA's short volume is ``class _ShortVolumeCsv(TrailerCsv, HeadersCsv)``, IBKR's FTP files ``class
-_FtpCsv(TitledCsv, TrailerCsv)``. A format adds its own checks the same way: ``_label`` derives a label for a field
-without a ``Label`` (ECB's, upper-cased) and ``_format`` a date or time's ``Format`` (SEC's, one per data set),
-``_check`` refuses what the format knows is not its file once its rows are as wide as its header (SDMX's values), and
-two class switches drop a check it does not want:
-``_finite`` (SDMX writes ``NaN`` and ``INF``) and ``_rows_required`` (a header alone is an empty answer). A field with
-a default takes it where its file holds no value (SEC writes ``inlineXBRL`` only on an inline document: absent, false).
-A field the reader states for every row, not its file (the code of the table read, Z.1's ``F1``), is *given*: a
-format's constructor sets ``_given`` before :class:`File`'s, the field takes no column, and every reader fills it. A
-text field's :class:`~flatread.fields.Shape` is the regex each of its cells fullmatches, checked in every
-reader.
+**What every reader promises.** :class:`File` checks the frame a format reads: its columns are the struct's fields, in
+order, each typed as its field; there is at least one row (unless ``_rows_required`` is false); a float is finite
+(unless ``_finite`` is false); a null sits only where its field admits one; a ``Shape``'s text fullmatches. A body that
+fails raises :class:`~flatread.errors.ReadError` naming the first row; a struct or switch that describes no readable
+file raises :class:`~flatread.errors.LayoutError`, most when the reader is built. :meth:`File.rows` builds the structs
+from the checked frame by position, without a second check.
 
-:class:`TextFile` is a table whose cells are text, a format reading a body into them (:meth:`~TextFile._cells`, a
-String frame under its header's labels) and :class:`TextFile` typing each as a CSV's cell is, strictly: a whole number
-or a number trimmed, a boolean ``true`` or ``false`` or its ``Flag``'s words, a date or time by its ``Format``; a cell
-holding nothing or only whitespace is no value. A ``Format`` may name *alternatives*, other formats the column is
-written in cell by cell (a file that pads its dates but for a few): each cell must be exactly one. A date's ``Format``
-without a day writes a period, in every reader: ``%Y`` and one of ``%m``, ``%-m`` (unpadded), ``%b``, ``%B`` (a
-month's name) or ``%q`` (the quarter, 1 to 4), so ``Format("%Y:Q%q")`` reads ``2022:Q4`` and ``Format("%Ym%-m")``
-``2011m9``, each its first day; ``%y`` writes the year in two digits, as ``strptime`` reads them, and ``end=True`` reads
-a period as its last day. In every reader, too, a date written across two columns (a month's name and its year, a year
-and its quarter) is one field: its ``Label`` names the first column and a ``Joined`` marker the second, and the two
-cells, joined, are read by its ``Format``.
+**Composition.** A reader is one class doing one thing, and a format is a subclass naming the pieces it needs, each
+overriding one step and calling the next: ``class _Volumes(TrailerCsv[Row], HeadersCsv[Row])``. The switches are
+underscored class attributes a subclass sets (``_header = False``); the hooks are underscored methods it overrides
+(:meth:`File._label` derives a label for a field without one, :meth:`File._format` a ``Format``). Two pieces here
+compose with any reader of text cells: :class:`Thousands` reads ``1,782,319`` as its number, and :class:`Carried` fills
+a group's label, printed on its first row only, down to the rows below. :class:`Reshaped` reshapes the frame another
+reader made, and :class:`TextFile` is the base of every reader whose cells are text.
 
-:class:`GridFile` is a table cut from a grid of text cells, which its source reads from the body: :class:`SheetText`
-a sheet's (each cell's text, a number with every digit), :class:`BiffSheet` an Excel 3 or 4 workbook's, and
-:class:`CsvText` a delimited file's, as the ``csv`` module reads it (ragged rows, a line break inside a quoted cell).
-Its header is one row, under the rows right above it that head its columns as a sheet's do (``_above``), and every
-filled row below it is the table's; a format cuts another shape itself (``_table``).
-
-:class:`Thousands` cleans a text reader's numbers grouped in thousands (``1,782,319``), composed before it
-(``class _Volumes(Thousands[RowT], ReportFile[RowT])``), and :class:`Carried` fills a group's label, printed on its
-first row only, down to the rows below, for any reader. :func:`_scalar_type` is a field's scalar, as every reader types
-it, and :func:`check_ending` refuses a body cut at a row boundary.
+**Text cells** are typed strictly, as a CSV's are: a whole number or a number (trimmed), ``true`` or ``false`` or a
+``Flag``'s words, a date or time exactly as its ``Format`` writes it. A cell holding nothing or only whitespace is no
+value. A ``Format`` may name *alternatives*, each cell exactly one of them. A date ``Format`` without a day writes a
+period: ``%Y`` (or ``%y``) and one of ``%m``, ``%-m``, ``%b``, ``%B`` or ``%q`` (a quarter, 1 to 4), so ``%Y:Q%q``
+reads ``2022:Q4``, the quarter's first day, or its last with ``end=True``. A date written across two columns is one
+field, its second column named by :class:`~flatread.fields.Joined`.
 """
 
 import abc
@@ -170,7 +151,11 @@ class _Column(typing.NamedTuple):
 
 
 class File[RowT: msgspec.Struct](abc.ABC):
-    """A file's reader, read two ways: :meth:`frame`, a DataFrame of its row struct's fields, and :meth:`rows`."""
+    """A file's reader, read two ways: :meth:`frame`, a DataFrame of its row struct's fields, and :meth:`rows`.
+
+    Build one per file shape, at import, and share it: a reader holds no state between reads, so one serves every
+    body and every thread. A format subclasses a reader of this class's family and implements :meth:`_read`.
+    """
 
     #: Whether every float is finite: a format that writes ``NaN`` and infinities as values (SDMX) sets it false.
     _finite: typing.ClassVar[bool] = True
@@ -205,7 +190,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         """Lay out a file of *row*: each field's column, from its ``Annotated`` metadata (see the module).
 
         *row_one* is the number the file's first row under its header takes in errors: 1, or a sheet's own row.
-        Raises ``ValueError`` for a field without a ``Label`` (unless the format derives one), a ``Format`` on a field
+        Raises ``LayoutError`` for a field without a ``Label`` (unless the format derives one), a ``Format`` on a field
         that is no date or time or with a zone on a date, or a field of a type no column reads.
         """
         self._row = row
@@ -336,13 +321,14 @@ class File[RowT: msgspec.Struct](abc.ABC):
 
     @abc.abstractmethod
     def _read(self, body: bytes) -> pl.DataFrame:
-        """Read *body* into a frame of the row struct's fields, in order, typed as each field, or raise ValueError."""
+        """Read *body* into a frame of the row struct's fields, in order, typed as each field, or raise ReadError."""
 
     def frame(self, body: bytes) -> pl.DataFrame:
         """Read *body* into a DataFrame of the row struct's fields, one row per row of the file, in order.
 
-        Raises ``ValueError`` for what the format refuses, and for a reader whose columns are not the fields or not
-        typed as them (``'2'`` in an ``int`` field), which :meth:`rows` would build structs of unchecked.
+        Raises :class:`~flatread.errors.ReadError` for a body the format refuses, naming where, and
+        :class:`~flatread.errors.LayoutError` for a reader whose columns are not the fields or not typed as them
+        (``'2'`` in an ``int`` field), which :meth:`rows` would build structs of unchecked. Both are ``ValueError``.
         """
         frame = self._join(self._read(body))
         if self._given:
@@ -427,7 +413,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
             raise ReadError(msg)
 
     def rows(self, body: bytes) -> list[RowT]:
-        """Read *body* into typed rows: :meth:`frame`'s rows, one struct a row."""
+        """Read *body* into typed rows: :meth:`frame`'s rows, one struct a row, raising as :meth:`frame` does."""
         # By position: frame() checked its columns are the struct's fields, in order, already typed. A column a list
         # each, zipped by map in C: about twice as fast as polars' iter_rows.
         return list(map(self._row, *(column.to_list() for column in self.frame(body).iter_columns()), strict=True))
@@ -491,7 +477,7 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
     def __init__(self, row: type[RowT]) -> None:
         """Lay out a table of *row*: each field names its column with a :class:`~flatread.fields.Label`.
 
-        Raises ``ValueError`` for a date or time field without the :class:`~flatread.fields.Format` its
+        Raises ``LayoutError`` for a date or time field without the :class:`~flatread.fields.Format` its
         text is written in, or what :class:`File` refuses.
         """
         super().__init__(row)
@@ -503,7 +489,7 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
 
     @abc.abstractmethod
     def _cells(self, body: bytes) -> pl.DataFrame:
-        """Read *body* into a String frame of its cells, one column per header label, in order, or raise ValueError."""
+        """Read *body* into a String frame of its cells, one column per header label, in order, or raise ReadError."""
 
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
@@ -620,7 +606,7 @@ class Reshaped[RowT: msgspec.Struct](File[RowT]):
 
 
 def _decoded(body: bytes, encodings: Sequence[str], *, lossy: bool = False) -> str:
-    """Return *body* as text in the first of *encodings* that decodes it, or raise ``ValueError``.
+    """Return *body* as text in the first of *encodings* that decodes it, or raise ``ReadError``.
 
     ``utf-16`` decodes only a body opening with its byte-order mark. With *lossy*, a byte the last encoding does not
     decode is U+FFFD.
@@ -719,7 +705,7 @@ _PERIOD_PARTS: Final = {
 
 
 def _period(written_as: str) -> str:
-    """Return the pattern a period written *written_as* fullmatches, or raise ValueError for a format it is not.
+    """Return the pattern a period written *written_as* fullmatches, or raise LayoutError for a format it is not.
 
     polars reads no month written without its day unless padded, and no quarter: a period is read by its pattern.
     """

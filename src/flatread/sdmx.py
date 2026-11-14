@@ -21,7 +21,7 @@ A data message is parsed hardened as every XML reader here is: no entity resolve
 libxml2's size limits kept. Every part of a series must be one its format reads: its annotations, then observations,
 each of its three attributes alone; a series holding anything else, a data set holding anything but series, a value
 that is not a number, a status off its code list or a period not written in the format's date format raises
-``ValueError``, naming the file.
+``ReadError``, naming the file.
 """
 
 import contextlib
@@ -99,7 +99,7 @@ class SdmxCsv[RowT: msgspec.Struct](HeadersCsv[RowT]):
     def __init__(self, row: type[RowT]) -> None:
         """Lay out an SDMX-CSV of *row*, each field its column upper-cased, in the file's order.
 
-        Raises ``ValueError`` for a struct with no ``obs_value``, the column every SDMX-CSV holds.
+        Raises ``LayoutError`` for a struct with no ``obs_value``, the column every SDMX-CSV holds.
         """
         if _OBS_VALUE.lower() not in row.__struct_fields__:
             msg = f"{row.__name__} has no obs_value field, which every SDMX-CSV holds"
@@ -150,7 +150,7 @@ class SdmxStructure[RowT: msgspec.Struct](NestedXml[RowT]):
     def __init__(self, row: type[RowT], structure: Structure) -> None:
         """Lay out *row*'s records, each one of the message's *structure* (``codes``), as the version writes them.
 
-        Raises ``ValueError`` for a kind of structure the version's messages do not list, or what
+        Raises ``LayoutError`` for a kind of structure the version's messages do not list, or what
         :class:`~flatread.markup.NestedXml` refuses.
         """
         records = _RECORDS[self._version]
@@ -245,7 +245,7 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
     def _each(self, body: bytes) -> Iterator[tuple[str, etree._Element]]:
         """Yield the message's name and each series of the data set read, every part checked; each is cleared after.
 
-        Raises ``ValueError`` for a message that is not well-formed, whose root is not ``_root``, with a series
+        Raises ``ReadError`` for a message that is not well-formed, whose root is not ``_root``, with a series
         outside a data set, a data set holding anything but series, a series holding anything but its annotations
         and observations, and for a message holding no series of the data set.
         """

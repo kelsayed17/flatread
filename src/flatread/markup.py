@@ -74,7 +74,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
         return f"{{{self._namespaces[prefix]}}}{local}" if colon else name
 
     def _document(self, body: bytes) -> etree._Element:
-        """Parse *body* into its root element, hardened, and check the root is the format's, or raise ValueError."""
+        """Parse *body* into its root element, hardened, and check the root is the format's, or raise ReadError."""
         # shortcut: the whole tree is held, about 15-20 times the body; fine for tables of a few MB, a large one would
         # want lxml's iterparse, clearing each record as it is read.
         root = parse_xml(body)
@@ -119,7 +119,7 @@ class NestedXml[RowT: msgspec.Struct](XmlFile[RowT]):
     def __init__(self, row: type[RowT], *, root: str, record: str) -> None:
         """Lay out *row*'s records at the XPath *record* below the root element *root* (see the class).
 
-        Raises ``ValueError`` for a path that is no XPath, or what :class:`XmlFile` refuses.
+        Raises ``LayoutError`` for a path that is no XPath, or what :class:`XmlFile` refuses.
         """
         super().__init__(row, root=root, record=record)
         self._compiled: dict[tuple[tuple[str, str], ...], tuple[etree.XPath, list[etree.XPath]]] = {}

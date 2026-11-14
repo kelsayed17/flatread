@@ -2,13 +2,13 @@
 
 * :class:`CsvFile`, the clean delimited file (RFC 4180): a header, then rows exactly as wide, ``"`` its quoting,
   nothing around them. polars' ``read_csv`` reads it with the struct's ``schema``, which refuses another column or a
-  cell that is not its type, raised as ``ValueError`` (polars' errors are not), which ``body_reader`` turns into
-  ``ResponseParseError``. Every row's width is counted in the bytes after the read (polars pads a short row with
-  nulls), and a bad one named. A date or time column is parsed by its ``Format``, each cell exactly as the format
-  writes it (polars' ``%Y`` alone takes ``71`` as the year 71); a flag by its words; an empty cell, quoted or not, is
-  no value. Its options are the file's own: ``null_values`` (``NA``, ``--``), ``separator``, ``final_line_ending``.
-  A format whose file writes no header (OCC's day's directory) sets ``_header`` false: every line is a row, its cells
-  the fields by position, which need no ``Label``.
+  cell that is not its type; the refusal is a :class:`~flatread.errors.ReadError` naming the cell and its row. Every
+  row's width is counted in the bytes after the read (polars pads a short row with nulls), and a bad one named. A date
+  or time column is parsed by its ``Format``, each cell exactly as the format writes it (polars' ``%Y`` alone takes
+  ``71`` as the year 71); a boolean by its words, ``true`` and ``false`` or its ``Flag``'s; an empty cell, quoted or
+  not, is no value. Its options are the file's own: ``null_values`` (``NA``, ``--``), ``separator``,
+  ``final_line_ending``. A format whose file writes no header (OCC's day's directory) sets ``_header`` false: every
+  line is a row, its cells the fields by position, which need no ``Label``.
 * :class:`HeadersCsv`, a file published under more than one header (EIA's BALANCE files, ECB's ``ACTION``): a body's
   header must be one of ``_headers``, and a field it lacks reads as null.
 * :class:`TrailerCsv`, a file whose last line is a trailer (FINRA's record count, Nasdaq's time stamp): it must match
@@ -128,7 +128,7 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         ``false`` without one). *null_values* are the file's tokens for no value, ``read_csv``'s own.
         *final_line_ending* is whether the file always ends its last line with a line ending, so a body that ends
         otherwise was cut at a row boundary, which reads whole otherwise; ``None`` leaves it unchecked. *separator* is
-        the one character between a row's cells (``|`` for CPC's tables). Raises ``ValueError`` for a field without a
+        the one character between a row's cells (``|`` for CPC's tables). Raises ``LayoutError`` for a field without a
         ``Label``, a date or time field without a ``Format``, a ``Format`` on another field or with a zone on a date, a
         ``Flag`` on a field that is no boolean, or a field of a type no column reads.
         """
@@ -208,7 +208,7 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
     ) -> pl.DataFrame:
         """Read *body* with ``read_csv``, its cells as the layout's columns, or *schema*'s (its header's, in order).
 
-        polars' error is raised as ``ValueError``, naming the row where a row's width is what polars refused. A long
+        polars' error is raised as a ``ReadError``, naming the row where a row's width is what polars refused. A long
         table's columns are the ones its header lays out (:meth:`File._layout`).
         """
         quote_char = self._quoting(body)
@@ -550,7 +550,7 @@ class SpilledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     kept. The place is the body's header's, so a header in any order is read right. A row as wide as the header, and
     any narrower, are read as any CSV's rows are. The format must quote nothing (``_quote_char = None``), name a text
     field with a ``Label`` the header writes as it is (not a field a trailer states), and have a header line. Raises
-    ``ValueError`` at construction for a field that is not a text field, a quoted or headerless format, and when
+    ``LayoutError`` at construction for a field that is not a text field, a quoted or headerless format, and when
     reading for a header without the field's label.
     """
 

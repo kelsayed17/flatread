@@ -85,7 +85,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
 
     @abc.abstractmethod
     def _lines(self, body: bytes) -> list[list[str]]:
-        """Return *body*'s lines, each its cells as text, or raise ValueError."""
+        """Return *body*'s lines, each its cells as text, or raise ReadError."""
 
     @staticmethod
     def _blank(line: Sequence[str]) -> bool:

@@ -1,13 +1,16 @@
 # Reader examples
 
-Each section below is one reader piece, or one of its switches, shown on a small excerpt of a real recorded file
-that needs it: the excerpt's file and its recording (a cassette in prism-clients, where every excerpt was taken), the
-piece that reads it (linked to its module) and the prism-clients provider class that uses it, then the excerpt itself. Near-twins link each other and say the difference in one line.
+Each section below is one reader, or one of its switches, shown on a short excerpt of a real file that needs it: the
+excerpt's file and where it was recorded (a cassette in prism-clients, where every excerpt was taken), the reader that
+reads it (linked to its module) and the prism-clients class that uses it, then the excerpt itself. Near-twins link
+each other and say the difference in one line. [`README.md`](../../README.md) introduces the row struct, the markers
+and how the readers compose.
 
 The files keep the recording's bytes. Here each is shown as text: CRLF as LF, and a byte-order mark and DOS's
 end-of-file byte dropped. Workbooks, PDFs and zips are text renderings: a sheet's rows are `<row>: cell | cell`,
 numbered as the sheet numbers them, a text cell quoted where its type matters. `tests/test_reader_examples.py` checks
-that every link here resolves and that each block matches its file.
+that every link here resolves, that each block matches its file, and that every reader and switch a heading names is
+one flatread has.
 
 ## Delimited files
 

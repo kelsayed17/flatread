@@ -14,7 +14,7 @@ each column's edge on its header line (:meth:`~LaidOutPdf._edges`), rows by the 
 a format's measurements: ``_row_gap``, ``_slack`` (how far left of its label a cell may start), ``_baseline``.
 
 The text layer is hardened as the other readers are: an empty body, bytes pdfminer cannot read and a PDF with no text
-layer (a scanned paper filing, which would read as a table of no rows) raise ``ValueError``. pdfminer is imported
+layer (a scanned paper filing, which would read as a table of no rows) raise ``ReadError``. pdfminer is imported
 here, not in :mod:`flatread`, which every CSV reader loads.
 """
 
@@ -82,7 +82,7 @@ class PdfFile[RowT: msgspec.Struct](TextFile[RowT]):
 
     @abc.abstractmethod
     def _records(self, lines: Sequence[PdfLine]) -> Sequence[Sequence[str | None]]:
-        """Read the records out of a PDF's *lines*: each its fields' text cells, in order, or raise ValueError."""
+        """Read the records out of a PDF's *lines*: each its fields' text cells, in order, or raise ReadError."""
 
     @typing.override
     def _cells(self, body: bytes) -> pl.DataFrame:
@@ -178,7 +178,7 @@ def _joined(segments: Sequence[PdfLine]) -> PdfLine:
 def text_layer(body: bytes) -> list[PdfLine]:
     """Return each page's lines, page by page, in the order each page draws them.
 
-    An empty body, bytes pdfminer cannot read, and a PDF with no text layer raise ``ValueError``. ``create_pages``, not
+    An empty body, bytes pdfminer cannot read, and a PDF with no text layer raise ``ReadError``. ``create_pages``, not
     ``get_pages``, which logs a warning for every PDF carrying the "do not extract" flag, as the House's do.
     """
     if not body:
