@@ -1,0 +1,17 @@
+# members: [Content_Types].xml, _rels/.rels, xl/workbook.xml, xl/_rels/workbook.xml.rels, xl/worksheets/sheet1.xml, xl/worksheets/sheet2.xml, xl/theme/theme1.xml, xl/styles.xml, xl/sharedStrings.xml, docMetadata/LabelInfo.xml, docProps/core.xml, docProps/app.xml
+# sheet: Current Municipal Advisor Infor
+# columns: A | F | J
+1: Current Municipal Advisor Information Report |  |
+2: Report as 11/01/2026 |  |
+3: Registrant Name | File Number | CIK
+4: &PARTNERS | 867-01682 | 0000107136
+5: 22Beacon, Inc. | 867-02770 | 0002069882
+
+# members: ma 030121.xlsx
+# sheet: Current Municipal Advisor Infor
+# columns: A | B | C
+1: Current Municipal Advisor Information Report |  |
+2: Report as of: 3/1/2021 |  |
+3: Registrant Name | File Number | CIK
+4: 30 Three Sixty Public Finance, Inc. | 867-02350 | 0001733578
+5: A. M. Peche & Associates LLC | 867-00111 | 0001613201

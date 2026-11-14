@@ -1,0 +1,8 @@
+# sheet: Monthly Index
+# columns: B | C | D | E | F | G | H | I | J | K | L
+1: 'Enterprise 11th District COFI Replacement Index' |  |  |  |  |  |  |  |  |  | 'View Notice and Disclaimer'
+2: 'Index Month' | 'Index Year' | 'Index Value' | 'Date of Publication' |  |  |  |  |  |  |
+3: 'January' | 2022 | 0.00219 | 'February 28, 2022' |  |  |  |  |  |  |
+4: 'February' | 2022 | 0.00242 | 'March 31, 2022' |  |  |  |  |  |  |
+58: 'August' | 2026 | 0.02838 | 'September 30, 2026' |  |  |  |  |  |  |
+59: 'September' | 2026 | 0.02898 | 'October 30, 2026' |  |  |  |  |  |  |

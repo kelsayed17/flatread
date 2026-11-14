@@ -1,0 +1,10 @@
+# sheet: TALF Material Investors
+# columns: A | B | C | D | E
+1: TERM ASSET-BACKED SECURITIES LOAN FACILITY TALF.BORROWER DATA: a.o. 12.31.2023* |  |  |  | 
+2: Borrower Number | Subscription Date | Borrower | Material Investor(s) in the Borrower | Material Investor(s) State/Country of Incorporation or Formation
+3: 1 | 06/17/2020 | MacKay Shields TALF 2.0 Opportunities Master Fund LP | Oxford University Press Group Pension Scheme | United Kingdom
+4: 1 | 06/17/2020 | MacKay Shields TALF 2.0 Opportunities Master Fund LP | HF Fund LP | FL
+5: 1 | 06/17/2020 | MacKay Shields TALF 2.0 Opportunities Master Fund LP | MacKay Shields TALF 2.0 Opportunities Feeder Fund (Cayman) LP | Cayman Islands
+6: 1 | 06/17/2020 | MacKay Shields TALF 2.0 Opportunities Master Fund LP | MacKay Shields TALF 2.0 Opportunities Feeder Fund (Cayman-GBP Hedged) LP | Cayman Islands
+374:  |  |  |  | 
+375: *Note: This report includes information regarding material investors, as provided to the Federal Reserve by TALF Agents on or before the as of date for the report. This information may be updated or revised in future reports. |  |  |  | 

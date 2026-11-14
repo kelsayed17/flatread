@@ -1,0 +1,23 @@
+# members: G20_HIST.xsd, G20_OWNED.xsd, G20_TERMS.xsd, G20_data.xml, G20_struct.xml, frb_common.xsd
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<message:MessageGroup xmlns:message="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/message" xmlns:common="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/common" xmlns:frb="http://www.federalreserve.gov/structure/compact/common" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/message SDMXMessage.xsd http://www.federalreserve.gov/structure/compact/common frb_common.xsd">
+  <frb:DataSet id="TERMS" xmlns:kf="http://www.federalreserve.gov/structure/compact/G20_TERMS" xsi:schemaLocation="http://www.federalreserve.gov/structure/compact/G20_TERMS G20_TERMS.xsd">
+    <kf:Series CATEGORY="NEWCAR" CURRENCY="USD" FREQ="129" LOANTERM="AMTFIN" SERIES_NAME="DTCTLVENM_N.M" UNIT="Months" UNIT_MULT="1">
+      <frb:Annotations>
+        <common:Annotation>
+          <common:AnnotationType>Short Description</common:AnnotationType>
+          <common:AnnotationText>Average maturity of new car loans at finance companies, amount of finance weighted, not seasonally adjusted</common:AnnotationText>
+        </common:Annotation>
+        <common:Annotation>
+          <common:AnnotationType>Long Description</common:AnnotationType>
+          <common:AnnotationText>Average maturity of new car loans at finance companies, amount of finance weighted, not seasonally adjusted</common:AnnotationText>
+        </common:Annotation>
+      </frb:Annotations>
+      <frb:Obs OBS_STATUS="A" OBS_VALUE="62.01" TIME_PERIOD="2008-03-31" />
+      <frb:Obs OBS_STATUS="ND" OBS_VALUE="-9999" TIME_PERIOD="2008-04-30" />
+      <frb:Obs OBS_STATUS="ND" OBS_VALUE="-9999" TIME_PERIOD="2008-05-31" />
+      <frb:Obs OBS_STATUS="A" OBS_VALUE="61.63" TIME_PERIOD="2008-06-30" />
+      <frb:Obs OBS_STATUS="ND" OBS_VALUE="-9999" TIME_PERIOD="2008-07-31" />
+    </kf:Series>
+  </frb:DataSet>
+</message:MessageGroup>

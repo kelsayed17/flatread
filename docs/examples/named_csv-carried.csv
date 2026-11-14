@@ -1,0 +1,4 @@
+survey_date,question_no,question_desc,response_option,agg_type,agg_desc_1,all
+'January 2026',Q3,"If the discount window is only open for parts of the day on Sundays and weekday holidays, what do you consider are the most important hours to request and receive loans?",8:00 a.m. ET to noon ET,count,,6
+'January 2026',Q3,"If the discount window is only open for parts of the day on Sundays and weekday holidays, what do you consider are the most important hours to request and receive loans?",Noon ET to 4:00 p.m. ET,count,,9
+'January 2026',Q3,"If the discount window is only open for parts of the day on Sundays and weekday holidays, what do you consider are the most important hours to request and receive loans?",4:00 p.m. ET to end of day for Fedwire Funds (7:00 p.m. ET),count,,11

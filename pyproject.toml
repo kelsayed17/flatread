@@ -1,13 +1,13 @@
 [project]
 name = "flatread"
-version = "4.0.0"
-description = "Declare a provider's table once as a class; read its body on one native polars path, exactly, or fail loudly."
+version = "5.0.0"
+description = "Read a provider's published files (CSV, workbooks, fixed-width, XML, HTML, PDF, SDMX) into typed rows, exactly, or fail loudly."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Khaled Elsayed" }]
 requires-python = ">=3.14"
-keywords = ["csv", "delimited", "parsing", "polars", "msgspec", "excel", "zip", "pdf", "data-quality"]
+keywords = ["csv", "delimited", "parsing", "polars", "msgspec", "excel", "zip", "xml", "html", "pdf", "sdmx", "data-quality"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -26,8 +26,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# flatread.sheets: Excel sheets, through fastexcel (calamine)
-excel = ["fastexcel>=0.21", "polars[calamine]>=2.0"]
+# Each extra brings one format family's parsers; a module of another family never imports them (the import-linter
+# contracts below), so a CSV-only consumer installs none.
+# flatread.sheets, and flatread.found, which reads a found sheet through it: xlsx through fastexcel (calamine),
+# legacy .xls through xlrd.
+excel = ["fastexcel>=0.21", "polars[calamine]>=2.0", "xlrd>=2.0.2"]
+# flatread.markup and flatread.sdmx: XML through lxml's strict etree.
+xml = ["lxml>=6.1.1"]
+# flatread.pages: HTML pages, Scrapling over lxml's lenient libxml2 parser.
+html = ["lxml>=6.1.1", "scrapling>=0.4.15"]
+# flatread.pdf: a PDF's text layer, through pdfminer.six.
+pdf = ["pdfminer.six>=20260107"]
 
 [project.urls]
 Repository = "https://github.com/kelsayed17/flatread"
@@ -44,7 +53,7 @@ flatread = ["py.typed"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--import-mode=importlib --snapshot-default-extension=syrupy.extensions.json.JSONSnapshotExtension"
+addopts = "--import-mode=importlib"
 asyncio_mode = "auto"
 asyncio_default_test_loop_scope = "session"
 asyncio_default_fixture_loop_scope = "session"
@@ -52,17 +61,16 @@ asyncio_default_fixture_loop_scope = "session"
 [dependency-groups]
 # The tests and the gates in .github/workflows/ci.yml.
 dev = [
-    "flatread[excel]",  # the suite reads sheets too
+    "flatread[excel,xml,html,pdf]",  # the suite reads every format
+    "lxml-stubs>=0.5.1",  # lxml ships no type stubs
     "pytest>=9.0.3",
-    "pytest-asyncio>=0.24.0",  # asyncio_mode = "auto" above
+    "pytest-asyncio>=0.24.0",  # asyncio_mode = "auto" above: StreamedZip reads async chunks
     "pytest-cov>=7.1.0",
-    "syrupy>=6.1.1",  # snapshot assertions
     "ruff>=0.16.7",
     "ty>=0.0.86",
     "deptry>=0.25.1",  # [tool.deptry]: the dependencies against what src/ imports
     "import-linter>=2.15",  # [tool.importlinter]: the module layers
     "typos>=1.51.1",
-    "pytest-codspeed>=5.0.3",
 ]
 
 [tool.uv]
@@ -119,12 +127,12 @@ runtime-evaluated-base-classes = ["msgspec.Struct"]
 ban-relative-imports = "all"
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
-"syrupy.extensions.json.JSONSnapshotExtension".msg = "JSON is syrupy's default extension (addopts): assert `value == snapshot`."
 "__future__.annotations".msg = "Python 3.14 defers every annotation (PEP 649); the future import would stringify them again."
 
 [tool.ruff.lint.per-file-ignores]
-# The benchmark is a script over a prism-clients checkout: it prints a table, and its layouts are class settings.
-"benchmarks/**" = ["D1", "INP001", "RUF012", "T201", "S101", "PT018"]
+# Python 3.14 evaluates an annotation when it is read, so a name imported only under TYPE_CHECKING breaks
+# inspect.signature on the public API (tests/test_signatures_resolve.py): src keeps its imports at runtime.
+"src/**" = ["TC001", "TC002", "TC003"]
 "tests/**" = [
     # Docstrings are required in src; a test's name says what it checks.
     "D1", "D205",
@@ -145,10 +153,6 @@ ban-relative-imports = "all"
     # A layout's settings are class attributes; flatread reads them, never mutates them.
     "RUF012",
 ]
-
-[tool.ty.src]
-# The benchmark imports prism-clients' readers, which only its own checkout has.
-exclude = ["benchmarks"]
 
 [tool.ty.environment]
 python-version = "3.14"
@@ -175,21 +179,63 @@ DEP002 = ["tzdata"]
 
 [tool.importlinter]
 root_packages = ["flatread"]
+# The format parsers are named in the contracts below, so the graph holds the external packages too.
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
-# flatread's modules in layers: the utilities over the format bases, over the Layout base, over the shared core, over
-# cell typing and archives, over the errors. A module imports only from the layers below it, and siblings (|) not from
-# each other.
-name = "flatread is layered"
+# A module per format family, each importing only the ones below it: fields < core < layout, archives
+# < delimited | sheets | fixed | markup < reports, found < pages | pdf | sdmx, and errors under them all. layout reads a
+# stacked header through File._joined_header, so it never imports sheets.
+name = "The readers are layered by format family"
 type = "layers"
+containers = ["flatread"]
 layers = [
-    "flatread.check | flatread.scaffold",
-    "flatread.delimited | flatread.sheets | flatread.records | flatread.fixed",
-    "flatread.layout",
-    "flatread.core",
-    "flatread.cells | flatread.archives",
-    "flatread.errors",
+    "pages | pdf | sdmx",
+    "reports | found",
+    "delimited | sheets | fixed | markup",
+    "layout | archives",
+    "core",
+    "fields",
+    "errors",
 ]
+
+[[tool.importlinter.contracts]]
+# A CSV, sheet or fixed-width reader never loads the HTML, PDF or XML parsers: its consumer need not install their
+# extras, nor pay for them at import. Root packages only: import-linter 2.15 refuses an external subpackage (lxml.html).
+name = "The plain-text and sheet readers load no HTML, PDF or XML parser"
+type = "forbidden"
+source_modules = [
+    "flatread.archives",
+    "flatread.core",
+    "flatread.delimited",
+    "flatread.errors",
+    "flatread.fields",
+    "flatread.fixed",
+    "flatread.layout",
+    "flatread.sheets",
+]
+forbidden_modules = ["lxml", "pdfminer", "scrapling"]
+
+[[tool.importlinter.contracts]]
+# Only a workbook's readers load the workbook libraries (the excel extra): sheets, and found's FoundSheet, which reads
+# through it.
+name = "Only the workbook readers load fastexcel and xlrd"
+type = "forbidden"
+source_modules = [
+    "flatread.archives",
+    "flatread.core",
+    "flatread.delimited",
+    "flatread.errors",
+    "flatread.fields",
+    "flatread.fixed",
+    "flatread.layout",
+    "flatread.markup",
+    "flatread.pages",
+    "flatread.pdf",
+    "flatread.reports",
+    "flatread.sdmx",
+]
+forbidden_modules = ["fastexcel", "xlrd"]
 
 [tool.typos.default]
 locale = "en-us"
@@ -197,6 +243,9 @@ locale = "en-us"
 [tool.typos.default.extend-words]
 # A publisher's token for a value not published ("ND", no data), not a misspelling.
 ND = "ND"
+# The first letters of "café" before its escaped é (b"caf\xe9"), the cp1252 byte a test decodes.
+caf = "caf"
 
 [tool.typos.files]
-extend-exclude = ["uv.lock", "tests/fixtures/"]
+# The examples keep a recorded file's bytes, the publisher's own words and abbreviations (PADD, Infor, Consol).
+extend-exclude = ["uv.lock", "docs/examples/"]

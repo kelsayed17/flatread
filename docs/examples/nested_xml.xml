@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<?xml-stylesheet type="text/xsl" href="/rss/styles/shared_xsl_stylesheet_v2.xml"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>EDGAR ONLINE INC (0001080224) (Filer)</title>
+      <link>http://www.sec.gov/Archives/edgar/data/1080224/000127528705001434/0001275287-05-001434-index.htm</link>
+      <description>8-K</description>
+      <pubDate>Mon, 25 Apr 2005 15:15:09 EDT</pubDate>
+      <edgar:xbrlFiling xmlns:edgar="http://www.sec.gov/Archives/edgar">
+        <edgar:companyName>EDGAR ONLINE INC</edgar:companyName>
+        <edgar:formType>8-K</edgar:formType>
+        <edgar:filingDate>04/25/2005</edgar:filingDate>
+        <edgar:cikNumber>0001080224</edgar:cikNumber>
+        <edgar:accessionNumber>0001275287-05-001434</edgar:accessionNumber>
+        <edgar:fileNumber>001-32194</edgar:fileNumber>
+        <edgar:acceptanceDatetime>20050425151509</edgar:acceptanceDatetime>
+        <edgar:period>20050425</edgar:period>
+        <edgar:assistantDirector>2 &amp; 3</edgar:assistantDirector>
+        <edgar:assignedSic>7389</edgar:assignedSic>
+        <edgar:fiscalYearEnd>1204</edgar:fiscalYearEnd>
+        <edgar:xbrlFiles>
+          <edgar:xbrlFile edgar:sequence="1" edgar:file="eo2425.txt" edgar:type="8-K" edgar:size="5282" edgar:description="" edgar:url="http://www.sec.gov/Archives/edgar/data/1080224/000127528705001434/eo2425.txt" />
+          <edgar:xbrlFile edgar:sequence="2" edgar:file="eo2425ex991.txt" edgar:type="EX-99.1" edgar:size="4469" edgar:description="" edgar:url="http://www.sec.gov/Archives/edgar/data/1080224/000127528705001434/eo2425ex991.txt" />
+          <edgar:xbrlFile edgar:sequence="3" edgar:file="edgr-2004_10k.xml" edgar:type="EX-100.INS" edgar:size="25257" edgar:description="" edgar:url="http://www.sec.gov/Archives/edgar/data/1080224/000127528705001434/edgr-2004_10k.xml" />
+        </edgar:xbrlFiles>
+      </edgar:xbrlFiling>
+    </item>
+  </channel>
+</rss>

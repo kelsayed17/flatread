@@ -1,0 +1,9 @@
+# sheet: Current Municipal Advisor Infor
+# columns: A | B | C | D | E | F | G | H | I | J
+1: Current Municipal Advisor Information Report |  |  |  |  |  |  |  |  |
+2: Report as 11/01/2026 |  |  |  |  |  |  |  |  |
+3: Registrant Name |  |  |  |  | File Number |  |  |  | CIK
+4: &PARTNERS |  |  |  |  | 867-01682 |  |  |  | 0000107136
+5: 22Beacon, Inc. |  |  |  |  | 867-02770 |  |  |  | 0002069882
+6: 30 Three Sixty Public Finance, Inc. |  |  |  |  | 867-02350 |  |  |  | 0001733578
+413: Zomermaand Financial Advisory Services, L.L.C. |  |  |  |  | 867-00384 |  |  |  | 0001589157

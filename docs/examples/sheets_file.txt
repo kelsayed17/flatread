@@ -1,0 +1,12 @@
+# sheets: 'ngsstats 2026 (2021-2025)', 'ngsstats 2025 (2020-2024)', 'ngsstats 2024 (2019-2023)', 'ngsstats 2023 (2018-2022)', 'ngsstats 2022 (2017-2021)', 'ngsstats 2021 (2016-2020)', 'ngsstats 2020 (2015-2019)', 'ngsstats 2019 (2014-2018)', 'ngsstats 2018 (2013-2017)', 'ngsstats 2017 (2012-2016)', 'ngsstats 2016 (2011-2015)', 'ngsstats 2015 (2010-2014) '
+# sheet: ngsstats 2026 (2021-2025)
+# columns: A | B | C | D
+2:  | 5-Year Average (2021-2025) |  |
+3: Report Date |  East | Midwest | Mountain
+4: 2026-01-02 00:00:00 | 745 | 891 | 200
+5: 2026-01-09 00:00:00 | 705 | 842 | 190
+# sheet: ngsstats 2015 (2010-2014) 
+2:  | 5-Year Average (2010-2014) |  |
+3: Report Date |  East | Midwest | Mountain
+4: 2015-01-02 00:00:00 | 755 | 867 | 187
+5: 2015-01-09 00:00:00 | 706 | 807 | 178

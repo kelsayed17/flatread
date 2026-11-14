@@ -1,0 +1,23 @@
+Deadline and Release Dates for the Survey of Professional Forecasters
+True deadline and news release dates for surveys prior to 1990:Q2 are not known.
+
+
+Survey         True Deadline Date       News Release Date
+
+1990 Q2             8/23/90*            8/31/90*
+     Q3             8/23/90             8/31/90
+     Q4             11/22/90            11/28/90
+2017 Q1             2/7/17              2/10/17
+     Q2             5/9/17              5/12/17
+     Q3		    8/8/17		8/11/17
+     Q4		    11/7/17		11/13/17	
+
+2026 Q1             3/2/26**            3/6/26** 
+     Q2             5/12/26             5/15/26
+     Q3             8/11/26             8/14/26
+
+*The 1990Q2 survey was not taken in real time, because the Philadelphia Fed had not yet 
+ taken over the survey. Forecasters were asked to provide dated forecasts from May 1990.
+
+**The 2026Q1, 2019Q1, 2013Q4, and 1996Q1 surveys were all delayed because of federal government 
+ shutdowns, which in turn delayed the release of government statistical data.

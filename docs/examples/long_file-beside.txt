@@ -1,0 +1,6 @@
+# sheet: TrackingArchives
+# columns: A | B | C | AB | AF | AG | AH | AI | AJ
+1: Forecast Date | Quarter being forecasted | PCE | GDP Nowcast | Advance Estimate From BEA | Publication Date of Advance Estimate | Days until advance estimate | Forecast Error | Data releases
+2: 2014-05-01 00:00:00 | 2014-06-30 00:00:00 | 4.5371 | 3.8686 | 3.950188 | 2014-07-30 00:00:00 | 90 | 0.081588 | Initial nowcast
+3: 2014-05-02 00:00:00 | 2014-06-30 00:00:00 | 4.5536 | 4.1857 | 3.950188 | 2014-07-30 00:00:00 | 89 | -0.235512 | M3 Manufacturing, Employment situation
+4: 2014-05-06 00:00:00 | 2014-06-30 00:00:00 | 4.4035 | 4.049973102 | 3.950188 | 2014-07-30 00:00:00 | 85 | -0.099785102 | International trade

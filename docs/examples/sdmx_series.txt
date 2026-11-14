@@ -1,0 +1,20 @@
+# members: DSR_data.xml, DSR_DSR.xsd, DSR_struct.xml, frb_common.xsd
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<message:MessageGroup xmlns:message="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/message" xmlns:common="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/common" xmlns:frb="http://www.federalreserve.gov/structure/compact/common" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/message SDMXMessage.xsd http://www.federalreserve.gov/structure/compact/common frb_common.xsd">
+  <frb:DataSet id="DSR" xmlns:kf="http://www.federalreserve.gov/structure/compact/DSR_DSR" xsi:schemaLocation="http://www.federalreserve.gov/structure/compact/DSR_DSR DSR_DSR.xsd">
+    <kf:Series CURRENCY="NA" DEBT="TOTAL" FREQ="162" SERIES_NAME="DSR_RATIO" TYPE="DSR" UNIT="Percent" UNIT_MULT="1">
+      <frb:Annotations>
+        <common:Annotation>
+          <common:AnnotationType>Short Description</common:AnnotationType>
+          <common:AnnotationText>Debt service ratio, seasonally adjusted</common:AnnotationText>
+        </common:Annotation>
+        <common:Annotation>
+          <common:AnnotationType>Long Description</common:AnnotationType>
+          <common:AnnotationText>Debt service ratio, seasonally adjusted</common:AnnotationText>
+        </common:Annotation>
+      </frb:Annotations>
+      <frb:Obs OBS_STATUS="A" OBS_VALUE="14.799802" TIME_PERIOD="2005-03-31" />
+      <frb:Obs OBS_STATUS="A" OBS_VALUE="14.828576" TIME_PERIOD="2005-06-30" />
+    </kf:Series>
+  </frb:DataSet>
+</message:MessageGroup>

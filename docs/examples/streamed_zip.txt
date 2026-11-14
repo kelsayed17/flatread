@@ -1,0 +1,31 @@
+FINRA's monthly short-sale zip for the TRF Chicago, April 2019 (FNQCsh201904.zip, 494,707 bytes), as StreamedZip
+reads it forward: each record's bytes in hex, then what they hold. The deflated data is shown as the text it inflates to.
+
+offset 0, the local file header (30 bytes, then the name):
+  50 4b 03 04              signature PK\3\4
+  14 00                    version needed: 2.0
+  08 08                    flags 0x0808: bit 3, CRC-32 and sizes in a data descriptor; bit 11, a UTF-8 name
+  08 00                    method 8, deflated
+  57 18 a7 4e              time and date written
+  00 00 00 00              CRC-32 0, stated in the descriptor
+  00 00 00 00              deflated size 0, stated in the descriptor
+  00 00 00 00              text size 0, stated in the descriptor
+  10 00                    name length 16
+  00 00                    extra field length 0
+  FNQCsh201904.txt         the name
+
+offset 46, the deflated data (494,561 bytes), inflating to 2,061,704 bytes of text:
+  MarketCenter|Symbol|Date|Time|ShortType|Size|Price|LinkIndicator|
+  B|BA|20190403|09:30:26|S|20|389.770000||
+  B|TSLA|20190410|09:30:48|S|100|278.000000||
+  ...
+  48745                    the record count, then a line end
+
+offset 494,607, the data descriptor (16 bytes):
+  50 4b 07 08              signature PK\7\8 (optional)
+  de f5 2b e7              CRC-32 of the text, checked once it ends
+  e1 8b 07 00              deflated size 494,561
+  88 75 1f 00              text size 2,061,704, checked once it ends
+
+offset 494,623, the central directory (84 bytes: one header, then the end record), opening:
+  50 4b 01 02              signature PK\1\2: the member's end, and (FINRA's: alone) the zip's last member

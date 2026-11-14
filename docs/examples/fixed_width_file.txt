@@ -1,0 +1,23 @@
+U.S. DOMESTICALLY CHARTERED COMMERCIAL BANKS,
+RANKED by CONSOLIDATED ASSETS
+As of June 30, 2026
+
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+Bank Name / Holding Co       Nat'lRank   Bank ID  Bank Headquarters     Charter    Consol     Domestic      Pct         Pct       Domestic   Foreign    IBF 
+Name                                                                               Assets      Assets     Domestic   Cumulative   Branches   Branches       
+                                                                                   (Mil $)     (Mil $)     Assets      Assets                               
+--------------------------- ----------- --------- -------------------- --------- ----------- ----------- ---------- ------------ ---------- ---------- -----
+JPMORGAN CHASE BK NA /           1       852218   COLUMBUS, OH            NAT     4,091,315   2,877,877      70          16         5137        31       Y  
+JPMORGAN CHASE & CO                                                                                                                                         
+
+BANK OF AMER NA / BANK OF        2       480228   CHARLOTTE, NC           NAT     2,654,645   2,488,356      94          27         3593        20       Y  
+AMER CORP                                                                                                                                                   
+EMIGRANT MERCANTILE BK /       3765      3268173  NEW YORK, NY            NMB         3           3         100         100          0          0        N  
+NEW YORK PRIV B&TR CORP                                                                                                                                     
+------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+ 
+Summary:
+
+Total number of banks: 3765
+Total assets (millions): Consolidated: $25,182,894 | Domestic: $22,528,407

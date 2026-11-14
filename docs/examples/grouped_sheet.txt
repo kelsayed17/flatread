@@ -1,0 +1,11 @@
+# sheet: Quarterly- Price Change
+# columns: A | B | C | D | E | F | G | H | I | J | K
+1: 'Quarterly Question:  Looking back, by about what percent did you change prices over the last 12 months?\n    	                                  Looking ahead, by about what percent do you expect to change prices over the next 12 months?' |  |  |  |  |  |  |  |  |  |
+2: 'Note: This quarterly question officially started in February 2024. The results prior to that were results collected through our Special Questions Series.' |  |  |  |  |  |  |  |  |  |
+3:  |  | 'Realization (Past 12 months, Percentage)' |  |  |  |  | 'Expectations (Next 12 months, Percentage)' |  |  |
+4: 'Date' | 'N' | 'Mean' | 'Median' | 'Variance' | 'Mode' |  | 'Mean' | 'Median' | 'Variance' | 'Mode'
+5: 2020-12-11 00:00:00 | 204 | 5.1 | 2 |  |  |  | 1.6 | 0 |  |
+6: 2021-04-09 00:00:00 | 199 | 4.5 | 3 |  |  |  | 2.83 | 3 |  |
+7: 2021-07-09 00:00:00 | 175 | 9.6 | 3 |  |  |  | 2.8 | 4 |  |
+22: 'May 15, 2026' | 430 | 3.687057154 | 3 | 22.245830793 | 5 |  | 4.137887005 | 3 | 13.142631046 | 5
+23: 2026-08-15 00:00:00 | 512 | 4.521911803 | 4 | 29.998912359 | 5 |  | 3.705411975 | 3 | 14.277803999 | 5

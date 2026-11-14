@@ -1,0 +1,5 @@
+Symbol|CompanyName
+AAOX|Tradr 2X Long AAOI Daily ETF
+AMPU|Defiance Daily Target 2X Long AMPX ETF
+APLX|Tradr 2X Long APLD Daily ETF
+20261106030225

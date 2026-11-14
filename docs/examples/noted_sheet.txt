@@ -1,0 +1,9 @@
+# sheet: Appendix E
+# columns: A | B | C | D | E | F | G | H | I
+5: 'Tables' | 'Region' | 'Petroleum product' | 'Supply type' | 'Units' | 'Week ending' | 'Published' | 'Corrected' | 'Difference'
+6: '6, 9' | 'Midwest (PADD 2)' | 'Propane/Propylene' | 'Stocks' | 'Million barrels' | 2023-11-10 00:00:00 | 26.947 | 26.419 | -0.528
+7: '6, 9' | 'Midwest (PADD 2)' | 'Propane/Propylene' | 'Stocks' | 'Million barrels' | 2023-11-17 00:00:00 | 26.574 | 25.879 | -0.695
+22: '1, 9' | 'U.S.' | 'Propane/Propylene' | 'Product Supplied' | 'Thousand barrels per day' | 2023-12-08 00:00:00 | 1200 | 1719 | 519
+23: '1, 9' | 'U.S.' | 'Propane/Propylene' | 'Product Supplied' | 'Thousand barrels per day' | 2023-12-15 00:00:00 | 1231 | 1231 | 0
+24: 'Source: U.S. Energy Information Administration' |  |  |  |  |  |  |  |
+25: 'Note: Published PADD 2 propane/propylene stocks are overstated for weeks ending November 10, 2023, through December 15, 2023. The stock error also affects calculated quantities of PADD 2 and U.S. stock change and product supplied for propane/propylene, total petroleum, and other oils. U.S. propane/propylene stocks and product supplied for the impacted weeks are provided in this table for comparison.' |  |  |  |  |  |  |  |

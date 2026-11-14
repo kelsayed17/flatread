@@ -1,0 +1,8 @@
+# sheet: chart5_coreCPI_granularCont_MoM
+# columns: A | B | C | D | BS
+1:  | 'date' | 'Total: Core CPI MoM' | 'Core Goods: Alcoholic beverages at home' | 'notes'
+2: '1' | 2013-01-01 00:00:00 | ' 0.217499' | ' 0.000543' | 'The "Total" column is in percent, all other columns in percentage points.'
+3: '2' | 2013-02-01 00:00:00 | ' 0.146407' | ' 0.003192' | 'Seasonally adjusted.'
+4: '3' | 2013-03-01 00:00:00 | ' 0.096745' | ' 0.001711' | 'Contributions might not add up to total inflation due to approximation errors.'
+165: '164' | 2026-08-01 00:00:00 | ' 0.289796' | '-0.000008' | ''
+166: '165' | 2026-09-01 00:00:00 | '' | ' 0.000164' | ''

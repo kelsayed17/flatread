@@ -1,0 +1,15 @@
+# members: DSR_data.xml, DSR_DSR.xsd, DSR_struct.xml, frb_common.xsd
+<?xml version="1.0"?>
+<message:Structure xmlns:message="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/message" xmlns:structure="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/structure" xmlns:common="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/common" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/message SDMXMessage.xsd">
+  <message:CodeLists>
+    <structure:CodeList id="CL_OBS_STATUS" agency="FRB">
+      <structure:Name>Observation Status</structure:Name>
+      <structure:Code value="A">
+        <structure:Description>Normal</structure:Description>
+      </structure:Code>
+      <structure:Code value="NA">
+        <structure:Description>Not available</structure:Description>
+      </structure:Code>
+    </structure:CodeList>
+  </message:CodeLists>
+</message:Structure>

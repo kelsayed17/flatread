@@ -1,0 +1,11 @@
+Disclaimer:,,,,,,
+,,,,,,
+,,,,,,
+FORWARD_XM:  Forward-looking term rates derived from end-of-day SOFR futures prices,,,,,,
+REALIZED_XM: Compound average term rates derived from realized daily SOFR rates,,,,,,
+,,,,,,
+,,,,,,
+DATE,FORWARD_1M,FORWARD_3M,FORWARD_6M,REALIZED_1M,REALIZED_3M,REALIZED_6M
+05-12-2021,0.02,0.03,0.03,,,
+05-11-2021,0.02,0.03,0.04,,,
+05-10-2021,0.02,0.03,0.04,,,

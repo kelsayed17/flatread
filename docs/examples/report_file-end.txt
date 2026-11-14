@@ -1,0 +1,25 @@
+                                                                                                                                                
+ THE OPTIONS CLEARING CORPORATION - CHICAGO, ILLINOIS                             SYSTEM DATE 11/06/26    TIME 21:44:33    PAGE     1           
+ EQUITY FLEX OPEN INTEREST REPORT                                               ACTIVITY DATE 11/06/26    PROGRAM ID BV2C0210   V005            
+                                                                                                                                                
+ MARK PRICES NOTED ON THIS REPORT ARE DERIVED BY THE CORPORATION FROM FACTORS                                                                   
+ AND DATA DEEMED PERTINENT WHENEVER APPROPRIATE CLOSING PRICES IN FLEX                                                                          
+ OPTIONS ARE NOT AVAILABLE.                                                                                                                     
+                                                                                                                                                
+                   EXPIRATION  STRIKE        MARK     OPEN                                                                                      
+      SYMBOL  P/C  MO DAY  YR  PRICE         PRICE    INTEREST                                                                                  
+                                                                                                                                                
+ American Airlines Group, Inc.                                                                                                                  
+      1AAL     C   11 06 2026  00016 250      0.0000     10680                                                                                  
+      1AAL     C   11 23 2026  00017 260      0.0078     10150                                                                                  
+ State Street Utilities Select                                                                                                                  
+      4XLU     C   11 20 2026  00040 000      3.2893     30977                                                                                  
+      4XLU     C   11 20 2026  00044 000      0.3100     30978                                                                                  
+                                                                                                                                                
+                          ***  CLASS TOTALS  ***         61955                                                                                  
+                                                                                                                                                
+                                                                                                                                                
+                       ***  GRAND TOTALS ***          68206805                                                                                  
+                                                                                                                                                
+                      ***** END OF REPORT *****                                                                                                 
+                                                                                                                                                
