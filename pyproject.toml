@@ -1,6 +1,6 @@
 [project]
 name = "flatread"
-version = "5.0.0"
+version = "6.0.0"
 description = "Read a provider's published files (CSV, workbooks, fixed-width, XML, HTML, PDF, SDMX) into typed rows, exactly, or fail loudly."
 readme = "README.md"
 license = "MIT"
