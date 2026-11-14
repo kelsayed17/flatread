@@ -56,7 +56,8 @@ and share it: it holds no state between reads.
 time's `strptime` format, its zone, its alternatives; `%q` writes a quarter), `Flag` (a boolean's words), `Joined` (a
 date written across two columns), `Shape` (a regex every text cell fullmatches), `Span` (a fixed-width column's
 place), `Cell` (a sheet cell stating a field for every row) and `Link` (an HTML cell's `href`). A field that admits
-`None` may be empty; any other empty cell raises.
+`None` may be empty, and a field with a default takes it where its cell is empty; any other empty cell raises. A
+`Literal` field holds one of its values, typed as they are.
 
 **A file's quirks are switches**: underscored class attributes a subclass sets, documented on each reader. The readers
 compose by inheritance, each piece overriding one step and calling the next, so a quirk is a class:
@@ -123,9 +124,20 @@ Every error a read raises is one of two kinds, both `ValueError`s:
   cell, the line or the member. `EmptyBodyError` (nothing to read) and `RaggedRowError` (a row wider or narrower than
   its header) are the two kinds worth telling apart.
 - `flatread.errors.LayoutError`: the reader is declared wrong (a date field with no `Format`, spans that overlap, a
-  switch naming a field the struct lacks). Most are raised when the reader is built.
+  switch left unset or naming a field the struct lacks, pieces composed in an order that cannot read). It is raised
+  when the reader is built; only a few show at the first read (an inner reader whose columns are not the fields).
 
-Catch `ReadError` to handle bad data, and let a `LayoutError` fail loudly.
+Catch `ReadError` to handle bad data, and let a `LayoutError` fail loudly. No other exception escapes a read: a
+parser's own error, or its panic (polars' and calamine's are `BaseException`s), is a `ReadError`.
+
+**Hostile bodies.** A read is bounded by its body: a zip member inflates to at most 1 GiB in all, a PDF's streams
+decode to at most 128 MiB and its forms nest 16 deep, an SDMX message holds at most 1 MiB outside its series, and an
+`.xls` sheet spans at most 2^23 cells. Past a bound the read raises `ReadError`, before it holds the rest.
+
+**Known limits**, each kept because closing it would slow the read it guards (measured, in the code's `shortcut:`
+comments): a CSV number cell with leading whitespace (`" 5"`) or a float that underflows (`1e-400`) reads as polars
+reads it; a sheet's text cell written exactly as a number (`"2"`) reads as that number; and an `.xlsx` whose cells
+stand far apart is loaded as dense as calamine builds it.
 
 ## From 5.0
 
@@ -140,6 +152,22 @@ Catch `ReadError` to handle bad data, and let a `LayoutError` fail loudly.
   fields it lacks (`((), ("shares",))`), so a label is written once, in the struct. A lacked field must admit `None`.
 - `NamedCsv._carried` is gone: a header must name the column of every field that holds a value on every row, which
   the struct says; `_required_fields` names any other field whose column every header names.
+- The pieces compose in any order where they can (`HeadersCsv` before or after `PaddedCsv` or `TitledCsv`), and an
+  order that cannot read is a `LayoutError` when built: list `LongFile` before `Carried`, and every piece before the
+  CSV or fixed-width reader that ends the read. A field a trailer, title or zip member's name states is stated to
+  every piece (`File._stated_fields()`), so `ZippedFiles` composes with `HeadersCsv`, `NamedCsv` and `LongFile`.
+- A switch is checked when the reader is built (`File._check_switches()`): one left unset, a regex group naming no
+  field, a `Shape` polars cannot compile, an unknown zone, a `Format` that writes what its field cannot hold, `%z`.
+  A constructor that sets a switch (`_keys`, `_member`) sets it before calling `super().__init__()`.
+- Stricter reads: an HTML number, date or boolean cell is one text run (`5.3<sup>1</sup>` raises, not `5.31`); a cut
+  HTML page, a page's bytes that are not its declared charset, a title or trailer that is not UTF-8, and a `FoundCsv`
+  line narrower than its header raise; a sheet's text cell in a number or boolean field raises; `%y` reads 69 as
+  1969, as `strptime` does; `PaddedCsv` strips a cell before matching its tokens; `SectionedCsv` matches where a
+  line begins; an SDMX-CSV's floats are finite but `obs_value`'s (`File._non_finite`).
+- An error names the file's own row in every grid reader, and the header's label, not the field.
+- `null_values=` is every text reader's constructor argument (XML, HTML, PDF, report, found, fixed-width).
+- `SdmxData._member` is `_zipped_member` (it streams the member; `ZippedFile` composes too). `row_one` left
+  `File.__init__`. The hooks' column, `flatread.core.Column`, is public.
 - Renamed switches: `ReportFile._header` → `_header_lines`,
   `ReportFile._end` → `_last_line`; `LongReport._key` → `_key_field`; `HtmlFile._table` → `_table_selector`;
   `HtmlRecords._record`, `_heading`, `_stated` → `_record_selector`, `_heading_selector`, `_heading_pattern`;
