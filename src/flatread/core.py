@@ -3,31 +3,39 @@
 **The row struct.** A reader is built from a msgspec struct whose fields, in the file's order, name their columns in
 ``Annotated`` metadata (:mod:`flatread.fields`): a ``Label`` (the header's text), and for a date or time its
 ``Format``, for a boolean its ``Flag``. Each column takes its field's type: ``str``, ``int``, ``float``, ``bool``, a
-date, a time of day, a date and time; a ``Literal`` or ``NewType`` reads as its base. A field that admits ``None``
-may be empty; a field with a default takes it where its file holds no value; any other empty cell raises. A label the
-header writes twice is two fields, matched by place.
+date, a time of day, a date and time; a ``NewType`` reads as its base, and a ``Literal`` as its values' type (whole
+numbers or text) holding only its values. A field that admits ``None`` may be empty; a field with a default takes it
+where its file holds no value; any other empty cell raises. A label the header writes twice is two fields, matched by
+place.
 
 **What every reader promises.** :class:`File` checks the frame a format reads: its columns are the struct's fields, in
 order, each typed as its field; there is at least one row (unless ``_rows_required`` is false); a float is finite
-(unless it is one of ``_non_finite``); a null sits only where its field admits one; a ``Shape``'s text fullmatches. A
-body that fails raises :class:`~flatread.errors.ReadError` naming the first row; a struct or switch that describes no
-readable file raises :class:`~flatread.errors.LayoutError`, most when the reader is built. :meth:`File.rows` builds the
-structs from the checked frame by position, without a second check.
+(unless it is one of ``_non_finite``); a null sits only where its field admits one; a ``Shape``'s text fullmatches; a
+``Literal``'s cell is one of its values. A body that fails raises :class:`~flatread.errors.ReadError` naming the column
+by its label and the first row that fails, by the file's own number where the reader knows it (a sheet's row, a grid's,
+blank rows counted), else by its place under the header from 1; a panic of polars' or fastexcel's Rust code on a body is
+a ``ReadError`` too. A struct or switch that describes no readable file raises
+:class:`~flatread.errors.LayoutError`, most when the reader is built. :meth:`File.rows` builds the structs from the
+checked frame by position, without a second check.
 
 **Composition.** A reader is one class doing one thing, and a format is a subclass naming the pieces it needs, each
 overriding one step and calling the next: ``class _Volumes(TrailerCsv[Row], HeadersCsv[Row])``. The switches are
-underscored class attributes a subclass sets (``_header = False``); the hooks are underscored methods it overrides
+underscored class attributes a subclass sets (``_header = False``), a required one left unset a ``LayoutError`` when the
+reader is built (:meth:`File._check_switches`); the hooks are underscored methods it overrides
 (:meth:`File._label` derives a label for a field without one, :meth:`File._format` a ``Format``). Two pieces here
 compose with any reader of text cells: :class:`Thousands` reads ``1,782,319`` as its number, and :class:`Carried` fills
 a group's label, printed on its first row only, down to the rows below. :class:`Reshaped` reshapes the frame another
 reader made, and :class:`TextFile` is the base of every reader whose cells are text.
 
 **Text cells** are typed strictly, as a CSV's are: a whole number or a number (trimmed), ``true`` or ``false`` or a
-``Flag``'s words, a date or time exactly as its ``Format`` writes it. A cell holding nothing or only whitespace is no
-value. A ``Format`` may name *alternatives*, each cell exactly one of them. A date ``Format`` without a day writes a
-period: ``%Y`` (or ``%y``) and one of ``%m``, ``%-m``, ``%b``, ``%B`` or ``%q`` (a quarter, 1 to 4), so ``%Y:Q%q``
-reads ``2022:Q4``, the quarter's first day, or its last with ``end=True``. A date written across two columns is one
-field, its second column named by :class:`~flatread.fields.Joined`.
+``Flag``'s words, a date or time exactly as its ``Format`` writes it. In a :class:`TextFile` (an XML, HTML, PDF, report,
+found or grid table) a cell holding nothing or only whitespace is no value, and so is one of the reader's
+*null_values*, but in a field the format keeps as written (``_as_written``). A ``Format`` may name *alternatives*, each
+cell exactly one of them. A two-digit year, ``%y``, reads as ``strptime`` reads it: ``69`` to ``99`` the 1900s, ``00``
+to ``68`` the 2000s. A date ``Format`` without a day writes a period: ``%Y`` (or ``%y``) and one of ``%m``, ``%-m``,
+``%b``, ``%B`` or ``%q`` (a quarter, 1 to 4), so ``%Y:Q%q`` reads ``2022:Q4``, the quarter's first day, or its last
+with ``end=True``. A date written across two columns is one field, its second column named by
+:class:`~flatread.fields.Joined`.
 """
 
 import abc
@@ -45,7 +53,7 @@ import polars as pl
 from flatread.errors import EmptyBodyError, LayoutError, ReadError
 from flatread.fields import Cell, Flag, Format, Joined, Label, Shape, Span
 
-__all__ = ["Carried", "File", "Reshaped", "TextFile", "Thousands"]
+__all__ = ["Carried", "Column", "File", "Reshaped", "TextFile", "Thousands"]
 
 #: The NUL character, which no line of text holds: the separator polars splits a body's lines on.
 _NUL: Final = chr(0)
@@ -68,16 +76,44 @@ def _bare(annotation: object) -> object:
     return typing.get_args(annotation)[0] if typing.get_origin(annotation) is typing.Annotated else annotation
 
 
-def _scalar_type(annotation: object) -> object:
-    """Return a field's scalar: ``float`` for ``float | None``, a ``NewType``'s base, ``str`` for a ``Literal``."""
+def _base(annotation: object) -> object:
+    """Return a field's type without its ``Annotated`` metadata, its ``None`` and its ``NewType``.
+
+    ``float`` for ``Annotated[float | None, ...]``. A union of two types besides ``None`` raises ``LayoutError``: a
+    column holds one.
+    """
     annotation = _bare(annotation)
     if isinstance(annotation, types.UnionType) or typing.get_origin(annotation) is typing.Union:
-        (annotation,) = (arm for arm in typing.get_args(annotation) if arm is not types.NoneType)
+        arms = [arm for arm in typing.get_args(annotation) if arm is not types.NoneType]
+        if len(arms) != 1:
+            msg = f"the type {annotation} is a union of {arms}, and a column holds one type"
+            raise LayoutError(msg)
+        (annotation,) = arms
     if isinstance(annotation, typing.NewType):
-        return _scalar_type(annotation.__supertype__)
-    if typing.get_origin(annotation) is Literal:
-        return str
+        return _base(annotation.__supertype__)
     return annotation
+
+
+def _literal(annotation: object) -> tuple[object, ...] | None:
+    """Return the values a field of type *annotation* takes where it is a ``Literal``'s, else ``None``."""
+    base = _base(annotation)
+    return typing.get_args(base) if typing.get_origin(base) is Literal else None
+
+
+def _scalar_type(annotation: object) -> object:
+    """Return a field's scalar: ``float`` for ``float | None``, a ``NewType``'s base, a ``Literal``'s values' type.
+
+    A ``Literal`` is of whole numbers alone (``Literal[1, 2]``, an ``int``) or of text alone (``Literal["A", "B"]``, a
+    ``str``); one of booleans, of both or of any other value raises ``LayoutError``.
+    """
+    base = _base(annotation)
+    if (values := _literal(base)) is None:
+        return base
+    for scalar in (int, str):
+        if all(type(value) is scalar for value in values):
+            return scalar
+    msg = f"the Literal {list(values)} is not of whole numbers alone nor of text alone, which a column reads"
+    raise LayoutError(msg)
 
 
 def _none_dtype(scalar: object) -> pl.DataType | type[pl.DataType]:
@@ -116,10 +152,27 @@ def _stacked(rows: Sequence[Sequence[str | None]]) -> list[str]:
     return [_UNIT.join(cell or "" for cell in cells) for cells in zip(*stacked, rows[-1], strict=True)]
 
 
-def _first(mask: pl.Series, row_one: int = 1) -> int | None:
-    """Return the row number where *mask* is first true, its first row numbered *row_one*, or ``None``."""
+def _found(mask: pl.Series, row_one: int | pl.Series = 1) -> tuple[int, int] | None:
+    """Return the place (from 0) where *mask* is first true and the number an error names its row by, or ``None``.
+
+    *row_one* numbers the rows: the first row's number, the rest after it, or each row's own (a grid's, whose blank
+    rows are skipped), as :meth:`File._rows_of` gives them.
+    """
     at = mask.arg_true()
-    return int(at[0]) + row_one if at.len() else None
+    if not at.len():
+        return None
+    place = int(at[0])
+    return place, place + row_one if isinstance(row_one, int) else int(row_one[place])
+
+
+def _first(mask: pl.Series, row_one: int | pl.Series = 1) -> int | None:
+    """Return the number of the row where *mask* is first true, its rows numbered by *row_one* (:func:`_found`)."""
+    return None if (found := _found(mask, row_one)) is None else found[1]
+
+
+def _fullmatching(shape: Shape) -> str:
+    """Return the regex polars fullmatches a ``Shape``'s cell with: its pattern, anchored at both ends of the text."""
+    return f"^(?:{shape.pattern})$"
 
 
 #: The scalars a column reads: a field of any other type has no column.
@@ -130,11 +183,14 @@ _SCALARS: Final = frozenset({str, int, float, bool, dt.date, dt.datetime, dt.tim
 _MOMENTS: Final = frozenset({dt.date, dt.datetime, dt.time})
 
 
-class _Column(typing.NamedTuple):
-    """A field's column: the field, its label, its scalar, how a date or time reads, a boolean's words, its Span.
+class Column(typing.NamedTuple):
+    """A field's column as a reader lays it out, what a format's hooks are handed (``_clean``, ``_value``, ``_layout``).
 
-    *aliases* are its label's alternatives, the other words a header read by name writes it in; *joined* the second
-    column of a field written across two (:class:`~flatread.fields.Joined`).
+    *field* is the struct field's name and *label* the header text that names its column; *scalar* the type a cell is
+    read as (``str``, ``int``, ``float``, ``bool``, a date or time); *written* its ``Format``, *flag* its ``Flag``,
+    *span* its ``Span``. *aliases* are its label's alternatives, the other words a header read by name writes it in;
+    *joined* the second column of a field written across two (:class:`~flatread.fields.Joined`). A hook reads it and
+    may return a copy (``column._replace(label=...)``); a reader never needs one built by hand.
     """
 
     field: str
@@ -148,6 +204,64 @@ class _Column(typing.NamedTuple):
     #: A :class:`~flatread.fields.Cell` field's cell: its sheet row (1-based) and column (``A`` is 0).
     cell: tuple[int, int] | None = None
     shape: Shape | None = None
+    #: A ``Literal`` field's values, the only ones its cells hold.
+    literal: tuple[object, ...] | None = None
+
+
+#: A directive writing a zone in the cell (``%z``, ``%:z``, ``%Z``), not a literal ``%`` before a ``z``.
+_ZONE_DIRECTIVE: Final = re.compile(r"(?<!%)(?:%%)*%[#:]*[zZ]")
+
+
+def _check_written(name: str, dtype: pl.Date | pl.Datetime | pl.Time, written_as: str) -> None:
+    """Refuse *written_as*, field *name*'s ``Format`` for *dtype*, where it is no format polars reads and writes it in.
+
+    Asked of polars itself, on a sample of *dtype*: a date's format writing a time (``%H:%M``), a time of day's writing
+    a year, a directive chrono lacks. A zone written in the cell (``%z``, ``%Z``) is refused too: polars reads ``%z``
+    as UTC whatever the field's zone, and ``%Z`` as no zone at all, so no such cell would be read as written.
+    """
+    what = "date" if dtype == pl.Date else "time of day" if dtype == pl.Time else "time"
+    if _ZONE_DIRECTIVE.search(written_as):
+        msg = (
+            f"the field {name!r}'s Format {written_as!r} writes a zone in its cells, which no {what} is read in"
+            " exactly: a file that writes its times in one zone names it in the Format's time_zone"
+        )
+        raise LayoutError(msg)
+    if isinstance(dtype, pl.Datetime) and dtype.time_zone is not None:
+        try:
+            pl.Series([None], dtype=dtype)
+        except pl.exceptions.PolarsError as e:
+            msg = f"the field {name!r}'s Format names the zone {dtype.time_zone!r}, which is no zone polars knows"
+            raise LayoutError(msg) from e
+    zone = dtype.time_zone if isinstance(dtype, pl.Datetime) else None
+    sample = (
+        pl.date(2000, 1, 2)
+        if dtype == pl.Date
+        else pl.time(3, 4, 5)
+        if dtype == pl.Time
+        else pl.datetime(2000, 1, 2, 3, 4, 5, time_zone=zone)
+    )
+    try:
+        pl.Series([None], dtype=pl.String).str.strptime(dtype, written_as, strict=False)
+        pl.select(sample.dt.strftime(written_as))
+    except pl.exceptions.PolarsError as e:
+        reason = str(e).partition("\n")[0]
+        msg = f"the field {name!r}'s Format {written_as!r} is no {what} polars reads and writes: {reason}"
+        raise LayoutError(msg) from e
+
+
+def _check_formats(name: str, scalar: object, written: Format) -> None:
+    """Refuse a format of field *name*'s ``Format`` *written* that no *scalar* is written in (see :class:`File`)."""
+    for written_as in (written.strptime, *written.alternatives):
+        if scalar is dt.date and not _DAY.search(written_as):
+            _period(written_as)  # refuses a directive a period is not written with
+        elif written.end:
+            msg = f"the field {name!r} is no period, so its Format {written_as!r} has no end"
+            raise LayoutError(msg)
+        elif "%q" in written_as:
+            msg = f"the field {name!r} is no date, so its Format {written_as!r} writes no quarter"
+            raise LayoutError(msg)
+        else:
+            _check_written(name, _temporal(scalar, written), written_as)
 
 
 class File[RowT: msgspec.Struct](abc.ABC):
@@ -163,9 +277,11 @@ class File[RowT: msgspec.Struct](abc.ABC):
     #: Whether a header alone is no file: a format whose header with no rows is an empty answer (SDMX) sets it false,
     #: as does a file that states its row count (a trailer's), which then vouches for a table of none.
     _rows_required: typing.ClassVar[bool] = True
-    #: Whether a long table's heading may repeat (a CSV's ``Difference`` under each week): a CSV then reads it by its
-    #: heading, a NUL and its number, and a key may name the column's place (:class:`LongFile`'s ``_key_count``), an
-    #: ``int`` counted from 1 among the keys. Without it, a repeat keeps polars' name (``Difference_duplicated_0``).
+    #: Whether a heading may be written more than once in a long table's header (a CSV's ``Difference`` over each
+    #: week), for :class:`~flatread.layout.LongFile`. A CSV then names the column of each repeat by its heading, a NUL
+    #: and its count, so the repeats stay apart, and a key field may be the place of its column among the keys, counted
+    #: from 1 (an ``int``, where ``_key_count`` names several keys). Without it, a CSV names a repeat as polars does
+    #: (``Difference_duplicated_0``), which no key matches.
     _repeats: typing.ClassVar[bool] = False
     #: Whether the format finds a column by its label in the header, so a ``Label`` may name alternatives.
     _by_name: typing.ClassVar[bool] = False
@@ -186,13 +302,18 @@ class File[RowT: msgspec.Struct](abc.ABC):
     #: one raises, and each is then dropped. A delimited file's and a text table's readers check them (Nasdaq's
     #: ``Filler`` columns, Yahoo's ``Follow`` buttons); a column :attr:`_unread` drops may hold anything.
     _blank_columns: typing.ClassVar[Collection[str]] = ()
+    #: The number the file's first row under its header takes in errors, the rows below it counted on: 1, unless a
+    #: reader that knows its rows' own numbers sets it (a sheet's reader: the sheet row under its header).
+    _row_one: int = 1
 
-    def __init__(self, row: type[RowT], *, row_one: int = 1) -> None:
+    def __init__(self, row: type[RowT]) -> None:
         """Lay out a file of *row*: each field's column, from its ``Annotated`` metadata (see the module).
 
-        *row_one* is the number the file's first row under its header takes in errors: 1, or a sheet's own row.
-        Raises ``LayoutError`` for a field without a ``Label`` (unless the format derives one), a ``Format`` on a field
-        that is no date or time or with a zone on a date, or a field of a type no column reads.
+        Raises ``LayoutError`` for a field without a ``Label`` (unless the format derives one); a ``Format`` on a field
+        that is no date or time, with a zone on a date, naming a zone polars does not know, writing a zone in its cells
+        (``%z``, ``%Z``), or that polars does not read and write the field's type in (a date's ``%H:%M``); a ``Shape``
+        polars' regex engine does not compile (a look-around); a field of a type no column reads, a ``Literal``
+        neither all whole numbers nor all text among them; or a switch a piece refuses (:meth:`_check_switches`).
         """
         self._row = row
         self._fields = list(row.__struct_fields__)
@@ -207,7 +328,6 @@ class File[RowT: msgspec.Struct](abc.ABC):
             for field in msgspec.structs.fields(row)
             if types.NoneType not in typing.get_args(_bare(field.type)) and field.name not in self._defaults
         ]
-        self._row_one = row_one
         if stray := self._given.keys() - set(self._fields):
             msg = f"the format gives {sorted(stray)}, which are no fields of {row.__name__}"
             raise LayoutError(msg)
@@ -229,8 +349,29 @@ class File[RowT: msgspec.Struct](abc.ABC):
         self._dtypes = {
             column.field: _DTYPES.get(column.scalar) or _temporal(column.scalar, column.written) for column in columns
         } | self._given_types
+        # The columns frame() checks the cells of beyond their type: a Shape's text, a Literal's values.
+        self._bounded = [column for column in columns if column.shape is not None or column.literal is not None]
+        # An error names a column by its label, its field's (a Joined field's first).
+        self._labeled = {column.field: column.label for column in columns}
+        self._check_switches()
 
-    def _column(self, field: msgspec.structs.FieldInfo) -> _Column:
+    def _check_switches(self) -> None:  # noqa: B027 (a hook each piece with switches extends)
+        """Refuse a switch the format leaves unset or sets to describe no file: none, unless a piece has switches.
+
+        Called once :class:`File` has laid out the struct's columns; each piece that has switches checks its own and
+        calls ``super()._check_switches()``.
+        """
+
+    def _rows_of(self, height: int) -> int | pl.Series:
+        """Return how an error numbers the rows of a frame of *height* rows read from the body, as :func:`_found` takes.
+
+        The first row's number, the rest after it (:attr:`_row_one`), unless a reader knows each row's own number in
+        the file and the frame is its table (a grid's, whose blank rows are skipped: :class:`TextFile`).
+        """
+        del height
+        return self._row_one
+
+    def _column(self, field: msgspec.structs.FieldInfo) -> Column:
         metadata = typing.get_args(field.type)[1:] if typing.get_origin(field.type) is typing.Annotated else ()
         named = next((meta for meta in metadata if isinstance(meta, Label)), None)
         written = next((meta for meta in metadata if isinstance(meta, Format)), None)
@@ -248,7 +389,11 @@ class File[RowT: msgspec.Struct](abc.ABC):
         if label is None:
             msg = f"the field {self._row.__name__}.{field.name} names no column: annotate it with a Label"
             raise LayoutError(msg)
-        scalar = _scalar_type(field.type)
+        try:
+            scalar = _scalar_type(field.type)
+        except LayoutError as e:
+            msg = f"the field {field.name!r}: {e}"
+            raise LayoutError(msg) from e
         written = self._format(scalar) if written is None else written
         if scalar not in _SCALARS:
             msg = f"the field {field.name!r} is a {getattr(scalar, '__name__', scalar)}, which no column reads"
@@ -263,15 +408,8 @@ class File[RowT: msgspec.Struct](abc.ABC):
                 else f"the time-of-day field {field.name!r} has no date, so its Format takes no zone"
             )
             raise LayoutError(msg)
-        for written_as in () if written is None else (written.strptime, *written.alternatives):
-            if scalar is dt.date and not _DAY.search(written_as):
-                _period(written_as)  # refuses a directive a period is not written with
-            elif written is not None and written.end:
-                msg = f"the field {field.name!r} is no period, so its Format {written_as!r} has no end"
-                raise LayoutError(msg)
-            elif "%q" in written_as:
-                msg = f"the field {field.name!r} is no date, so its Format {written_as!r} writes no quarter"
-                raise LayoutError(msg)
+        if written is not None:
+            _check_formats(field.name, scalar, written)
         if flag is not None and scalar is not bool:
             msg = f"the field {field.name!r} is no boolean, so it takes no Flag"
             raise LayoutError(msg)
@@ -281,7 +419,16 @@ class File[RowT: msgspec.Struct](abc.ABC):
         if shape is not None and scalar is not str:
             msg = f"the field {field.name!r} is no text, so it takes no Shape"
             raise LayoutError(msg)
-        return _Column(field.name, label, scalar, written, flag, span, aliases, joined=joined, shape=shape, cell=cell)
+        if shape is not None:
+            try:  # polars' regex engine, which checks it, has no look-around and no \Z
+                pl.Series([""]).str.contains(_fullmatching(shape))
+            except pl.exceptions.PolarsError as e:
+                reason = str(e).partition("\nThis error occurred")[0]
+                msg = f"the field {field.name!r}'s Shape {shape.pattern!r} is no regex polars compiles: {reason}"
+                raise LayoutError(msg) from e
+        return Column(
+            field.name, label, scalar, written, flag, span, aliases, joined, cell, shape, _literal(field.type)
+        )
 
     def _cell_of(self, name: str, stated: Cell | None) -> tuple[int, int] | None:
         """Return the row and column of the cell that states field *name*, where it is a ``Cell``'s, or raise."""
@@ -297,7 +444,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         ``super()._stated_fields()``, and every piece that lays out the table's columns (a header's check, a long
         table's record) leaves them out.
         """
-        return frozenset()
+        return frozenset[str]()
 
     def _label(self, name: str) -> str | None:
         """Return the label of field *name*, which names no ``Label``: none, unless a format derives its labels."""
@@ -308,7 +455,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         """Return whether a header cell joins the rows over it by U+001F: no, unless a reader stacks its header."""
         return False
 
-    def _layout(self, header: Sequence[str]) -> Sequence[_Column] | None:
+    def _layout(self, header: Sequence[str]) -> Sequence[Column] | None:
         """Return the columns a body whose header is *header* is read as: ``None``, the struct's, unless a long table.
 
         A :class:`LongFile` lays out a column per key its header names.
@@ -321,7 +468,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         del scalar
         return None
 
-    def _clean(self, cells: pl.Series, column: _Column) -> pl.Series:
+    def _clean(self, cells: pl.Series, column: Column) -> pl.Series:
         """Return *column*'s text *cells* as its type reads them: as written, unless a piece cleans them.
 
         Only a reader that reads its cells as text (a :class:`TextFile`, a padded or grouped CSV) calls it.
@@ -339,8 +486,20 @@ class File[RowT: msgspec.Struct](abc.ABC):
         Raises :class:`~flatread.errors.ReadError` for a body the format refuses, naming where, and
         :class:`~flatread.errors.LayoutError` for a reader whose columns are not the fields or not typed as them
         (``'2'`` in an ``int`` field), which :meth:`rows` would build structs of unchecked. Both are ``ValueError``.
+        A panic of polars' or fastexcel's Rust code (pyo3's ``PanicException``, which is no ``Exception``) on a body
+        is a ``ReadError`` too, so a caller catching ``Exception`` catches every failed read.
         """
-        frame = self._join(self._read(body))
+        try:
+            return self._checked(self._join(self._read(body)))
+        except BaseException as e:
+            # pyo3's PanicException is a BaseException no module of polars' or fastexcel's exports: named alone.
+            if type(e).__name__ != "PanicException":
+                raise
+            msg = f"the body made the reader's Rust code panic, as no file of the format does: {e}"
+            raise ReadError(msg) from e
+
+    def _checked(self, frame: pl.DataFrame) -> pl.DataFrame:
+        """Return the frame :meth:`_read` read, its given fields and defaults set, checked as :meth:`frame` promises."""
         if self._given:
             frame = frame.with_columns(
                 pl.lit(value, self._given_types[name]).alias(name) for name, value in self._given.items()
@@ -364,17 +523,19 @@ class File[RowT: msgspec.Struct](abc.ABC):
             msg = "the body is a header and no rows"
             raise EmptyBodyError(msg)
         self._check_cells(frame, self._required)
-        for column in self._columns:
-            if column.shape is None:
-                continue
+        for column in self._bounded:
             cells = frame[column.field]
-            wrong = ~cells.str.contains(f"^(?:{column.shape.pattern})$").fill_null(value=True)
-            if (at := _first(wrong, self._row_one)) is not None:
-                msg = (
-                    f"the {column.label!r} cell {cells[at - self._row_one]!r} is not of its shape"
-                    f" {column.shape.pattern!r}: row {at}"
-                )
-                raise ReadError(msg)
+            bounds = []
+            if column.shape is not None:
+                fits = cells.str.contains(_fullmatching(column.shape))
+                bounds.append((fits, f"of its shape {column.shape.pattern!r}"))
+            if column.literal is not None:
+                bounds.append((cells.is_in(column.literal), f"one of its values {list(column.literal)!r}"))
+            for fits, what in bounds:
+                if (found := _found(~fits.fill_null(value=True), self._rows_of(frame.height))) is not None:
+                    place, row = found
+                    msg = f"the {column.label!r} cell {cells[place]!r} is not {what}: row {row}"
+                    raise ReadError(msg)
         return frame
 
     def _join(self, frame: pl.DataFrame) -> pl.DataFrame:
@@ -382,13 +543,15 @@ class File[RowT: msgspec.Struct](abc.ABC):
         for field, (column, joined, written) in self._joined.items():
             second = _second(field)
             half = frame[field].is_null() != frame[second].is_null()
-            if (at := _first(half, self._row_one)) is not None:
+            rows = self._rows_of(frame.height)
+            if (at := _first(half, rows)) is not None:
                 msg = (
-                    f"row {at} holds one of the {column.label!r} and {joined.label!r} cells, a {field} written in both"
+                    f"row {at} holds one of the {column.label!r} and {joined.label!r} cells, which write one value"
+                    " together: both hold it, or neither"
                 )
                 raise ReadError(msg)
             text = pl.select(pl.concat_str(frame[field], frame[second], separator=joined.separator)).to_series()
-            value = _moment(text.alias(column.label), _temporal(column.scalar, written), written, self._row_one)
+            value = _moment(text.alias(column.label), _temporal(column.scalar, written), written, rows)
             frame = frame.with_columns(value.alias(field)).drop(second)
         return frame
 
@@ -396,7 +559,8 @@ class File[RowT: msgspec.Struct](abc.ABC):
         """Refuse a float in *frame* that is not finite (unless the format writes them) or a null in *required*.
 
         With *among*, a mask of *frame*'s rows, only those rows are checked (a long table's records that hold values).
-        One pass says whether any column fails; only then is each failing column's first row found.
+        One pass says whether any column fails; only then is each failing column's first row found. An error names
+        each column by its label (a column no field labels, a long table's key, by its name).
         """
         checked = pl.lit(value=True) if among is None else pl.lit(among)
         floats = [name for name, dtype in frame.schema.items() if dtype == pl.Float64 and name not in self._non_finite]
@@ -408,9 +572,10 @@ class File[RowT: msgspec.Struct](abc.ABC):
             return
         anywhere = frame.select(test.any().alias(str(at)) for at, (_, _, test) in enumerate(tests)).row(0)
         failed: dict[str, dict[str, int]] = {"infinite": {}, "empty": {}}
+        rows = self._rows_of(frame.height)
         for (kind, name, test), failing in zip(tests, anywhere, strict=True):
-            if failing and (at := _first(frame.select(test).to_series(), self._row_one)) is not None:
-                failed[kind][name] = at
+            if failing and (at := _first(frame.select(test).to_series(), rows)) is not None:
+                failed[kind][self._labeled.get(name, name)] = at
         if infinite := failed["infinite"]:
             row = min(infinite.values())
             msg = f"the {list(infinite)} columns hold NaN or an infinity, which is no number here: row {row}"
@@ -441,13 +606,15 @@ class Thousands[RowT: msgspec.Struct](File[RowT]):
     """
 
     @typing.override
-    def _clean(self, cells: pl.Series, column: _Column) -> pl.Series:
+    def _clean(self, cells: pl.Series, column: Column) -> pl.Series:
         cells = super()._clean(cells, column)
         if column.scalar not in {int, float}:
             return cells
         grouped = cells.str.contains(",", literal=True)
-        if (at := _first((grouped & ~cells.str.contains(_THOUSANDS)).fill_null(value=False))) is not None:
-            msg = f"the {column.label!r} cell {cells[at - 1]!r} is not a number grouped in thousands: row {at}"
+        wrong = (grouped & ~cells.str.contains(_THOUSANDS)).fill_null(value=False)
+        if (found := _found(wrong, self._rows_of(cells.len()))) is not None:
+            place, row = found
+            msg = f"the {column.label!r} cell {cells[place]!r} is not a number grouped in thousands: row {row}"
             raise ReadError(msg)
         return cells.str.replace_all(",", "", literal=True)
 
@@ -457,17 +624,39 @@ class Carried[RowT: msgspec.Struct](File[RowT]):
 
     Each of :attr:`_carried`'s fields, where a row leaves it empty, is the row's above. It reads by the reader listed
     after it (``class _ByClass(Carried[RowT], ReportFile[RowT])``); a carried field still empty, on the table's first
-    row, is refused as any empty cell is.
+    row, is refused as any empty cell is. A :class:`~flatread.layout.LongFile` checks the cells it reads before
+    anything after it fills them, so it is listed before this piece (``class _Long(LongFile[RowT], Carried[RowT],
+    CsvFile[RowT])``). Raises ``LayoutError``, when built, for :attr:`_carried` unset or empty, naming a field that is
+    not the struct's or one its reader gives, or composed before a ``LongFile``.
     """
 
-    #: The fields a group's first row writes and the rows below it leave empty.
+    #: The fields a group's first row writes and the rows below it leave empty; a format's subclass sets them.
     _carried: typing.ClassVar[Collection[str]]
+
+    @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
+        if not getattr(self, "_carried", ()):
+            msg = f"{type(self).__name__} is Carried, so it names _carried, the fields it carries down"
+            raise LayoutError(msg)
+        if stray := set(self._carried) - set(self._fields) | set(self._carried) & self._given.keys():
+            msg = f"the format carries {sorted(stray)} down, which are no fields of {self._row.__name__} its file holds"
+            raise LayoutError(msg)
+        # core lies under flatread.layout, so LongFile is known here by its name alone.
+        mro = type(self).__mro__
+        after = {f"{cls.__module__}.{cls.__qualname__}" for cls in mro[mro.index(Carried) :]}
+        if "flatread.layout.LongFile" in after:
+            msg = (
+                f"{type(self).__name__} lists Carried before LongFile, which checks the cells before Carried fills"
+                " them: list LongFile first, then Carried, then the reader"
+            )
+            raise LayoutError(msg)
 
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
         frame = super()._read(body)
         if stray := set(self._carried) - set(frame.columns):
-            msg = f"the format carries {sorted(stray)} down, which are no fields of {self._row.__name__}"
+            msg = f"the format carries {sorted(stray)} down, which its reader reads no column of"
             raise LayoutError(msg)
         return frame.with_columns(pl.col(*self._carried).forward_fill())
 
@@ -477,18 +666,27 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
 
     A format reads a body into its text cells (:meth:`_cells`), and each is typed as a CSV's cell is: a whole number
     or a number trimmed, a boolean ``true`` or ``false`` or its ``Flag``'s words, a date or time by its ``Format``. A
-    cell holding nothing or only whitespace is no value, except in a field the format names in :attr:`_as_written`,
-    whose cells are kept as the format read them (an empty name SEC's index writes is ``""``).
+    cell holding nothing or only whitespace is no value, and so is a cell that is, once cleaned (:meth:`_clean`), one
+    of the reader's *null_values*; neither holds for a field the format names in :attr:`_as_written`, whose cells are
+    kept as the format read them (an empty name SEC's index writes is ``""``).
+
+    An error names a row by its place among the table's rows, the first under the header row 1, unless the format's
+    :meth:`_cells` notes each row's own number in the file (:meth:`_number_rows`: a grid's, whose blank rows it skips).
     """
 
     #: The fields whose text is kept as written, whitespace and empty text included; a format's subclass sets them.
     _as_written: typing.ClassVar[Collection[str]] = ()
+    #: Whether this reader is the copy :meth:`frame` reads one body with, which notes its rows' numbers.
+    _reading: bool = False
+    #: The number in the file of each row of the cells :meth:`_cells` last read on this copy, where it noted them.
+    _row_numbers: pl.Series | None = None
 
-    def __init__(self, row: type[RowT]) -> None:
+    def __init__(self, row: type[RowT], *, null_values: Collection[str] = ()) -> None:
         """Lay out a table of *row*: each field names its column with a :class:`~flatread.fields.Label`.
 
-        Raises ``LayoutError`` for a date or time field without the :class:`~flatread.fields.Format` its
-        text is written in, or what :class:`File` refuses.
+        *null_values* are the format's words for no value (``n.a.``, ``ND``): a cell that is one, once cleaned, holds
+        none. Raises ``LayoutError`` for a date or time field without the :class:`~flatread.fields.Format` its text is
+        written in, or what :class:`File` refuses.
         """
         super().__init__(row)
         for column in self._columns:
@@ -496,6 +694,30 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
                 msg = f"the field {column.field!r} needs the Format its text is written in"
                 raise LayoutError(msg)
         self._labels = [column.label for column in self._columns]
+        self._null_values = list(null_values)
+
+    @typing.override
+    def frame(self, body: bytes) -> pl.DataFrame:
+        # A copy of this reader reads the body, so the rows' numbers it notes are this read's alone: the reader is
+        # shared, by every thread.
+        reading = object.__new__(type(self))
+        vars(reading).update(vars(self), _reading=True)
+        return super(TextFile, reading).frame(body)
+
+    def _number_rows(self, numbers: pl.Series) -> None:
+        """Note *numbers*, the number in the file of each row of the cells :meth:`_cells` is reading, errors' rows.
+
+        A source that skips rows (a grid's blank ones) calls it from :meth:`_cells`; on the reader a read's copy is
+        made from, outside a read, it does nothing.
+        """
+        if self._reading:
+            self._row_numbers = numbers
+
+    @typing.override
+    def _rows_of(self, height: int) -> int | pl.Series:
+        numbers = self._row_numbers
+        # A frame of another height is no table the source numbered (a zip's parts concatenated, a long table).
+        return numbers if numbers is not None and numbers.len() == height else super()._rows_of(height)
 
     @abc.abstractmethod
     def _cells(self, body: bytes) -> pl.DataFrame:
@@ -504,11 +726,13 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
         text = self._cells(body)
+        rows = self._rows_of(text.height)
         unread = {*self._unread, *self._blank_columns} - set(self._labels)
         dropped = [label for label in text.columns if label in unread]
         for label in (label for label in dropped if label in self._blank_columns):
-            if (at := _first(text[label].str.strip_chars().fill_null("") != "")) is not None:
-                msg = f"the {label!r} column holds {text[label][at - 1]!r}, and it never holds a value: row {at}"
+            if (found := _found(text[label].str.strip_chars().fill_null("") != "", rows)) is not None:
+                place, row = found
+                msg = f"the {label!r} column holds {text[label][place]!r}, and it never holds a value: row {row}"
                 raise ReadError(msg)
         text = text.drop(dropped)
         columns = self._columns if (layout := self._layout(text.columns)) is None else layout
@@ -522,8 +746,8 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
         typed = []
         for column in columns:
             cells = self._clean(text[column.label], column)
-            cells = cells if column.field in self._as_written else cells.replace("", None)
-            typed.append(_typed(column, cells, f"{column.label!r} cell"))
+            cells = cells if column.field in self._as_written else cells.replace(["", *self._null_values], None)
+            typed.append(_typed(column, cells, f"{column.label!r} cell", rows))
         return pl.DataFrame(typed)
 
 
@@ -531,27 +755,31 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
 _BOOLEANS: Final = {"true": True, "false": False}
 
 
-def _typed(column: _Column, text: pl.Series, what_cell: str) -> pl.Series:
-    """Return *column*'s values from its cells' *text*, strictly, refusing one that is not its type, naming its row."""
+def _typed(column: Column, text: pl.Series, what_cell: str, row_one: int | pl.Series = 1) -> pl.Series:
+    """Return *column*'s values from its cells' *text*, strictly, refusing one that is not its type, naming its row.
+
+    *row_one* numbers the rows, as :func:`_found` takes it.
+    """
     if column.written is not None:
-        return _moment(text, _temporal(column.scalar, column.written), column.written).alias(column.field)
+        return _moment(text, _temporal(column.scalar, column.written), column.written, row_one).alias(column.field)
     if column.scalar is str:
         return text.alias(column.field)
     if column.flag is not None:
-        return _flagged(text, column.flag).alias(column.field)
+        return _flagged(text, column.flag, row_one).alias(column.field)
     if column.scalar is bool:
         values = text.replace_strict(_BOOLEANS, default=None, return_dtype=pl.Boolean)
         what = "true or false"
     else:
         values = text.str.strip_chars().cast(_DTYPES[column.scalar], strict=False)
         what = "whole number" if column.scalar is int else "number"
-    if (at := _first(text.is_not_null() & values.is_null())) is not None:
-        msg = f"the {what_cell} {text[at - 1]!r} is not a {what}: row {at}"
+    if (found := _found(text.is_not_null() & values.is_null(), row_one)) is not None:
+        place, row = found
+        msg = f"the {what_cell} {text[place]!r} is not a {what}: row {row}"
         raise ReadError(msg)
     return values.alias(column.field)
 
 
-def _stated(column: _Column, text: str | None, rows: int, what_cell: str) -> pl.Series:
+def _stated(column: Column, text: str | None, rows: int, what_cell: str) -> pl.Series:
     """Return *column*'s value on each of *rows* rows, from the *text* its file states once, typed as :func:`_typed`.
 
     The one step for every value a file states for many rows: a trailer's or a title's group, a member's or a sheet's
@@ -565,12 +793,12 @@ def _second(field: str) -> str:
     return f"{field}+"
 
 
-def _parts(column: _Column) -> list[_Column]:
+def _parts(column: Column) -> list[Column]:
     """Return the columns *column*'s field is read from: itself, or a ``Joined`` field's two, each read as text."""
     if column.joined is None:
         return [column]
     first = column._replace(scalar=str, written=None, joined=None)
-    return [first, _Column(_second(column.field), column.joined.label, str, None, None, None)]
+    return [first, Column(_second(column.field), column.joined.label, str, None, None, None)]
 
 
 def _repeated(labels: Sequence[str], name: str, first: int, *, empties: bool = False) -> list[str]:
@@ -651,11 +879,12 @@ def _lines(body: bytes) -> pl.Series:
     return lines["line"].fill_null("")
 
 
-def _flagged(cells: pl.Series, flag: Flag, row_one: int = 1) -> pl.Series:
-    """Read *cells* as booleans by *flag*'s words, refusing a cell that is neither."""
+def _flagged(cells: pl.Series, flag: Flag, row_one: int | pl.Series = 1) -> pl.Series:
+    """Read *cells* as booleans by *flag*'s words, refusing a cell that is neither, its row numbered by *row_one*."""
     values = cells.replace_strict({flag.true: True, flag.false: False}, default=None, return_dtype=pl.Boolean)
-    if (at := _first(cells.is_not_null() & values.is_null(), row_one)) is not None:
-        msg = f"the {cells.name!r} cell {cells[at - row_one]!r} is not {flag.true!r} or {flag.false!r}: row {at}"
+    if (found := _found(cells.is_not_null() & values.is_null(), row_one)) is not None:
+        place, row = found
+        msg = f"the {cells.name!r} cell {cells[place]!r} is not {flag.true!r} or {flag.false!r}: row {row}"
         raise ReadError(msg)
     return values
 
@@ -669,13 +898,30 @@ def _temporal(scalar: object, written: Format | None) -> pl.Date | pl.Datetime |
     return pl.Datetime("us", written.time_zone if written is not None else None)
 
 
+#: The one year polars' chrono reads a two-digit year as otherwise than ``strptime``: ``69``, 2069 for 1969.
+_CHRONO_MISREAD: Final = 2069
+#: A two-digit year's directive, not a literal ``%`` before a ``y``.
+_TWO_DIGIT_YEAR: Final = re.compile(r"(?<!%)(?:%%)*%y")
+
+
 def _strptime(cells: pl.Series, dtype: pl.Date | pl.Datetime | pl.Time, written_as: str) -> pl.Series:
-    """Parse *cells* as *dtype* written *written_as*, a cell written otherwise null."""
+    """Parse *cells* as *dtype* written *written_as*, a cell written otherwise null.
+
+    A two-digit year (``%y``) is read as ``strptime`` reads it, ``69`` to ``99`` the 1900s and the rest the 2000s:
+    polars' chrono reads ``69`` as 2069, the one year it reads otherwise, so that year is moved back a century.
+    """
     try:
-        return cells.str.strptime(dtype, written_as, strict=False)
+        values = cells.str.strptime(dtype, written_as, strict=False)
+        if dtype != pl.Time and _TWO_DIGIT_YEAR.search(written_as):
+            # shortcut: a weekday (%a) is checked by chrono against 2069's calendar, so a 1969 cell writing one
+            # is refused; read the year from the cell's text instead once a file writes both.
+            misread = pl.first().dt.year() == _CHRONO_MISREAD
+            century = pl.when(misread).then(pl.lit("-100y")).otherwise(pl.lit("0y"))
+            values = values.to_frame().select(pl.first().dt.offset_by(century)).to_series()
     except pl.exceptions.PolarsError as e:  # a local time a zone's clock change skips or repeats
         msg = f"the {cells.name!r} column holds a time that is no one moment in its zone: {e}"
         raise ReadError(msg) from e
+    return values
 
 
 #: A directive writing a day: a date format without one writes a period (a year, a month, a quarter).
@@ -754,14 +1000,17 @@ def _read_period(cells: pl.Series, written_as: str, *, end: bool = False) -> pl.
     return parts.select(first.dt.offset_by(f"{months - 1}mo").dt.month_end() if end else first).to_series()
 
 
-def _moment(cells: pl.Series, dtype: pl.Date | pl.Datetime | pl.Time, written: Format, row_one: int = 1) -> pl.Series:
+def _moment(
+    cells: pl.Series, dtype: pl.Date | pl.Datetime | pl.Time, written: Format, row_one: int | pl.Series = 1
+) -> pl.Series:
     """Parse *cells* as *dtype* by *written*, refusing a cell that is not its value written in one of its formats.
 
     A cell must be what a format writes for its value: polars' ``%Y`` takes one to four digits (``01/08/71`` is the
     year 71) and ``%m`` one or two, and a day that does not exist (``02/30/2026``) is no date. A date's format with no
     day writes a period, read as its first day by the pattern :func:`_period` gives it (``%YQ%q`` is ``2026Q1``,
-    ``%Ym%-m`` ``2011m9``). A cell takes the first of the formats it is written in. A time in a zone is read as an
-    aware time in it, and written back in it.
+    ``%Ym%-m`` ``2011m9``). A two-digit year, ``%y``, is read as ``strptime`` reads it (``69`` to ``99`` the 1900s,
+    the rest the 2000s), a period's as a date's. A cell takes the first of the formats it is written in. A time in a
+    zone is read as an aware time in it, and written back in it. A row is numbered by *row_one* (:func:`_found`).
     """
     formats = (written.strptime, *written.alternatives)
     periods = [dtype == pl.Date and not _DAY.search(written_as) for written_as in formats]
@@ -782,11 +1031,10 @@ def _moment(cells: pl.Series, dtype: pl.Date | pl.Datetime | pl.Time, written: F
         for values, written_as, period in zip(parsed, formats, periods, strict=True)
     ]
     wrong = cells.is_not_null() & ~pl.select(pl.any_horizontal(exact)).to_series()
-    if (at := _first(wrong, row_one)) is not None:
+    if (found := _found(wrong, row_one)) is not None:
+        place, row = found
         what = "date" if dtype == pl.Date else "time of day" if dtype == pl.Time else "time"
-        msg = (
-            f"the {cells.name!r} cell {cells[at - row_one]!r} is not a {what} written {' or '.join(formats)}: row {at}"
-        )
+        msg = f"the {cells.name!r} cell {cells[place]!r} is not a {what} written {' or '.join(formats)}: row {row}"
         raise ReadError(msg)
     taken = (pl.when(ok).then(values) for values, ok in zip(parsed, exact, strict=True))
     return pl.select(pl.coalesce(taken)).to_series().alias(cells.name)

@@ -14,6 +14,7 @@ section's name carried down over its rows), and any line of no kind raises, nami
 import re
 import typing
 from collections.abc import Collection, Sequence
+from typing import Final
 
 import msgspec
 import polars as pl
@@ -36,7 +37,8 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
     skipped, and any other line raises, naming it, as does a report whose last line is not :attr:`_last_line` (one cut
     short), when the format names one; a report of no rows raises, unless :attr:`_rows_required` is false (a report that
     prints ``NO DATA``). *null_values* are the report's words for no value (``n.a.``), and *final_line_ending* is
-    :class:`CsvFile`'s. A field neither a row's group nor stated is the format's to add, in :meth:`_cells`.
+    :class:`~flatread.delimited.CsvFile`'s. A field neither a row's group nor stated is the format's to add, in
+    :meth:`_cells`.
     """
 
     #: A row's line; its named groups are the fields' cells.
@@ -61,10 +63,13 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
     ) -> None:
         """Lay out a report of *row*: each field a group of the format's row, or one its framing states.
 
-        Raises ``LayoutError`` for a group named for no field of *row*, a field both a row's cell and stated, or what
-        :class:`TextFile` refuses.
+        Raises ``LayoutError`` for a format that names no :attr:`_line` (a ``str`` regex), a group named for no field
+        of *row*, a field both a row's cell and stated, or what :class:`~flatread.core.TextFile` refuses.
         """
-        super().__init__(row)
+        if not isinstance(line := getattr(self, "_line", None), re.Pattern) or not isinstance(line.pattern, str):
+            msg = f"the {type(self).__name__} format names no _line, the regex a row's line matches (from str)"
+            raise LayoutError(msg)
+        super().__init__(row, null_values=null_values)
         self._kinds = [*self._header_lines, *self._framing, *(() if self._last_line is None else (self._last_line,))]
         cells, stated = set(self._line.groupindex), {name for kind in self._kinds for name in kind.groupindex}
         if stray := (cells | stated) - set(self._fields):
@@ -75,7 +80,6 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             raise LayoutError(msg)
         # The fields the report writes, in order: a format adds any other in its _cells.
         self._written = [name for name in self._fields if name in cells | stated]
-        self._null_values = list(null_values)
         self._final_line_ending = final_line_ending
 
     @typing.override
@@ -114,12 +118,11 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             raise EmptyBodyError(msg)
         self._check_lines(read)
         named = {column.field: column.label for column in self._columns}
-        cells = pl.DataFrame(
+        return pl.DataFrame(
             [[record.get(name) for name in self._written] for record in records],
             schema={named[name]: pl.String for name in self._written},
             orient="row",
         )
-        return cells.with_columns(pl.col(pl.String).replace(self._null_values, None)) if self._null_values else cells
 
     def _split(self, body: bytes) -> tuple[list[str], int]:
         """Return *body*'s lines, and the first one the table reads: past the preamble, if the format has one."""
@@ -167,7 +170,9 @@ class LongReport[RowT: msgspec.Struct](ReportFile[RowT]):
     block a year); a row's group named for the first value field holds every value, a run of one cell per value field
     for each key. :attr:`_cell` finds each value cell (a run of characters other than spaces, by default) and each
     key, unless :attr:`_key_cell` finds those; a row holds one run per key, or raises, naming it. Rows come record by
-    record, a record's keys in its header's order, and each cell is typed as its field's.
+    record, a record's keys in its header's order, and each cell is typed as its field's. polars' regex engine finds
+    the cells, so each pattern is one it reads (no look-around), its flags among ``IGNORECASE``, ``MULTILINE``,
+    ``DOTALL`` and ``VERBOSE``, which it is read with; another raises ``LayoutError`` when the reader is built.
     """
 
     #: A value cell's text, found in a row's values; and a key's in a header's keys, when other (keys of two words).
@@ -176,15 +181,26 @@ class LongReport[RowT: msgspec.Struct](ReportFile[RowT]):
     #: The struct's key field: the one after the record's, by default the second to last.
     _key_field: typing.ClassVar[str | None] = None
 
+    def __init__(
+        self, row: type[RowT], *, null_values: Collection[str] = (), final_line_ending: bool | None = None
+    ) -> None:
+        """Lay out a report of *row* read long (see :class:`ReportFile`), its cells found by polars' regex engine.
+
+        Raises ``LayoutError`` for a :attr:`_cell` or :attr:`_key_cell` polars' engine does not read as Python does.
+        """
+        super().__init__(row, null_values=null_values, final_line_ending=final_line_ending)
+        self._cells_found = _engine(self._cell, "_cell")
+        self._keys_found = self._cells_found if self._key_cell is None else _engine(self._key_cell, "_key_cell")
+
     @typing.override
     def _cells(self, body: bytes) -> pl.DataFrame:
         cells = super()._cells(body)
         fields = [column.field for column in self._columns]  # a given field has no column
         at = fields.index(self._key_field) if self._key_field is not None else len(fields) - 2
         key, first, *rest = self._columns[at:]
-        keys = self._cell if self._key_cell is None else self._key_cell
         found = cells.with_columns(
-            pl.col(key.label).str.extract_all(keys.pattern), pl.col(first.label).str.extract_all(self._cell.pattern)
+            pl.col(key.label).str.extract_all(self._keys_found),
+            pl.col(first.label).str.extract_all(self._cells_found),
         )
         width = 1 + len(rest)
         counted = found.select(pl.col(key.label).list.len().fill_null(0) * width, pl.col(first.label).list.len())
@@ -201,3 +217,23 @@ class LongReport[RowT: msgspec.Struct](ReportFile[RowT]):
         found = found.explode(*split).select(self._labels)
         # The report's words for no value are cells of the run, not the run.
         return found.with_columns(pl.col(split).replace(self._null_values, None)) if self._null_values else found
+
+
+#: The flags of a Python regex that polars' engine reads too, each as its inline flag.
+_INLINE_FLAGS: Final = {re.IGNORECASE: "i", re.MULTILINE: "m", re.DOTALL: "s", re.VERBOSE: "x"}
+
+
+def _engine(pattern: re.Pattern[str], switch: str) -> str:
+    """Return *pattern* as polars' regex engine reads it, its flags inline, or raise ``LayoutError`` naming *switch*."""
+    flags = re.RegexFlag(pattern.flags & ~re.UNICODE)
+    if unread := flags & ~(re.IGNORECASE | re.MULTILINE | re.DOTALL | re.VERBOSE):
+        msg = f"the {switch} regex {pattern.pattern!r} has the flags {unread!r}, which polars' engine does not read"
+        raise LayoutError(msg)
+    inline = "".join(letter for flag, letter in _INLINE_FLAGS.items() if flags & flag)
+    written = f"(?{inline}){pattern.pattern}" if inline else pattern.pattern
+    try:
+        pl.Series([""], dtype=pl.String).str.extract_all(written)
+    except pl.exceptions.PolarsError as e:
+        msg = f"the {switch} regex {pattern.pattern!r} is none polars' engine reads: {e}"
+        raise LayoutError(msg) from e
+    return written

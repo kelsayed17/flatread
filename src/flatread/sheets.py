@@ -3,13 +3,19 @@
 :class:`SheetFile` is a clean table on one named sheet: its header in one row (``header_row``, Excel's numbering),
 then a row per record to the sheet's end, nothing outside the header's columns. Errors name the sheet's own rows.
 
-**How a sheet is read.** fastexcel's typed load coerces without a word (a text cell is null as a number, ``1.5``
-truncates to ``1`` as a whole number, a plain number reads as a date), so a table is loaded twice: as text, which says
-what each cell holds, and typed by the struct's fields. A whole number is loaded as a float and checked whole; a date
-field without a ``Format`` must hold date cells, and with one, text in that format; a cell whose text is not a value
-of its column raises, unless it is one of the sheet's ``null_values`` (``#N/A``). A plain table, every column of one
-kind, its field's, is read from one strict load instead (``tests/test_sheet_loads.py`` pins the load counts). A typed
-load keeps every digit of a number, which a text load rounds to nine decimals.
+**How a sheet is read.** fastexcel's typed load coerces without a word (a text cell is the number its text parses as,
+or null, ``1.5`` truncates to ``1`` as a whole number, a plain number reads as a date), so a table is loaded twice: as
+text, which says what each cell holds, and typed by the struct's fields. A number field holds number cells, whose
+text is fastexcel's of a number (a text cell ``1e3``, ``1.0``, ``+5`` or ``nan`` raises; one written as fastexcel
+writes a number, ``2``, is not told from a number cell, and :class:`NumberTextSheet` reads a sheet that writes its
+numbers as text); a whole number is loaded as a float and checked whole and of 64 bits. A boolean field holds boolean
+cells; a date field without a ``Format`` date cells (Excel's day 60, the 1900-02-29 of its 1900 date system, raises),
+and with one, text in that format; a text field's number cell is its every digit (the text load rounds it to nine
+decimals, a float load keeps them). A cell that is not a value of its column raises, naming it, unless it is one of
+the sheet's ``null_values`` (``#N/A``). A plain table, every column of one kind, its field's, is read from one strict
+load instead (``tests/test_sheet_loads.py`` pins the load counts). fastexcel's failure on a body, and a panic of
+calamine's (pyo3's ``PanicException``, no ``Exception``), are a ReadError, as is an ``.xls`` sheet spanning more cells
+than calamine is let build (:data:`_SPAN_MAX`), refused before it loads.
 
 **The switches** of :class:`SheetFile`: ``_header`` (false: no header row, fields by position), ``_gaps`` (an empty
 row inside the table is dropped) or ``_blank_rows`` (kept, a row of no values), ``_trim`` (a cell of only whitespace
@@ -35,25 +41,28 @@ irregular for :class:`SheetFile`, and :class:`BiffSheet` from an Excel 3 or 4 wo
 :class:`~flatread.found.FoundTable` on a workbook's first sheet.
 """
 
+import contextlib
 import datetime as dt
 import functools
 import io
+import itertools
 import re
 import struct
 import typing
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
 from typing import Final, Literal
 
 import fastexcel
 import msgspec
 import polars as pl
 import xlrd
+from xlrd import compdoc
 
 from flatread.core import (
     _UNIT,
+    Column,
     File,
     _check_above,
-    _Column,
     _first,
     _flagged,
     _moment,
@@ -87,10 +96,12 @@ __all__ = [
     "sheet_grid",
 ]
 
-#: The fastexcel type each field scalar's column is loaded as: a whole number as a float, which is then checked whole
-#: (fastexcel would truncate ``1.5`` to ``1``), a date or time written as text as text (its ``Format`` parses it).
+#: The fastexcel type each field scalar's column is loaded as by the typed load: a whole number as a float, which is
+#: then checked whole (fastexcel would truncate ``1.5`` to ``1``), a date or time written as text as text (its
+#: ``Format`` parses it), and text as a float, whose number cells hold every digit (the text load rounds them to nine
+#: decimals: :func:`_with_digits`).
 _SHEET_DTYPES: Final[Mapping[object, fastexcel.DType]] = {
-    str: "string",
+    str: "float",
     int: "float",
     float: "float",
     bool: "boolean",
@@ -130,6 +141,50 @@ _SHEET_CASTS: Final[Mapping[object, pl.DataType]] = {
 _BOOLEAN_CELLS: Final = ("true", "false")
 
 
+#: A number cell as fastexcel writes it as text: its digits rounded to nine decimals, no trailing zero, no ``+`` and no
+#: exponent (``1e20`` is ``100000000000000000000``). A text cell its float load reads as a number (``1e3``, ``1.0``,
+#: ``+5``, ``inf``) is written otherwise.
+_NUMBER_CELL: Final = r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]{0,8}[1-9])?$"
+
+
+#: A whole number's text and a decimal's, as :class:`NumberTextSheet` reads a text cell (``-12``; ``-1.03``, ``.5``).
+_WHOLE_TEXT: Final = r"^-?[0-9]+$"
+
+
+_DECIMAL_TEXT: Final = r"^-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$"
+
+
+#: The whole numbers an ``int`` field holds, 64 bits' (a float load reads ``1e20`` as one), as floats: low, high.
+_INT_RANGE: Final = (-(2.0**63), 2.0**63)
+
+
+#: The date fastexcel reads Excel's serial 60 as, 1900-02-29 in Excel's 1900 date system, a day no calendar has: the
+#: same as serial 59's.
+_LEAP_DAY: Final = dt.date(1900, 2, 28)
+
+
+def _whole(numbers: pl.Series) -> pl.Series:
+    """Return whether each of *numbers*, floats, is a whole number an ``int`` field holds: 64 bits' (none is NaN)."""
+    return (numbers == numbers.floor()) & numbers.is_between(*_INT_RANGE, closed="left")
+
+
+def _refuse(text: pl.Series, wrong: pl.Series, what: str, row_one: int) -> None:
+    """Raise ReadError for the first of *text*'s cells *wrong* marks (an empty one is none): it is not a *what*."""
+    if (at := _first((text.is_not_null() & wrong).fill_null(value=False), row_one)) is not None:
+        msg = f"the {text.name!r} cell {text[at - row_one]!r} is not a {what}: row {at}"
+        raise ReadError(msg)
+
+
+def _with_digits(text: pl.Series, numbers: pl.Series) -> pl.Series:
+    """Return text cells *text* with each number cell's every digit, from *numbers*, a float load of them.
+
+    fastexcel's text of a number cell rounds it to nine decimals; where that text is not the cell's number, the
+    number's own text replaces it. A text cell its float load reads as a number (``1e3``) is that number: kept.
+    """
+    rounded = numbers.is_not_null() & (text.cast(pl.Float64, strict=False) != numbers)
+    return pl.select(pl.when(rounded).then(numbers.cast(pl.String)).otherwise(text)).to_series().alias(text.name)
+
+
 #: The methods a format reads its sheet otherwise by: a format that overrides any reads its sheet by two loads.
 _ONE_LOAD_HOOKS: Final = (
     "_read", "_column", "_layout", "_label", "_value", "_end", "_outside", "_span", "_header_cells", "_headings",
@@ -138,28 +193,122 @@ _ONE_LOAD_HOOKS: Final = (
 )  # fmt: skip
 
 
-def _workbook(body: bytes) -> fastexcel.ExcelReader:
-    """Return the workbook *body*, open, or raise ReadError for a body that is no workbook."""
+#: The methods a format finds its table's sheet or header row in each body by: one that overrides either places each.
+_PLACING: Final = ("_sheet_in", "_header_in")
+
+
+def _failed(e: BaseException) -> bool:
+    """Return whether *e* is fastexcel's failure to read a body: its own error, or a panic of calamine's Rust code.
+
+    A panic is pyo3's ``PanicException``, a ``BaseException`` (``except Exception`` misses it) that no module exports,
+    so it is known by its name.
+    """
+    return isinstance(e, fastexcel.FastExcelError) or type(e).__name__ == "PanicException"
+
+
+@contextlib.contextmanager
+def _loading(what: str) -> Generator[None]:
+    """Run fastexcel's calls on a body, its failure (:func:`_failed`) raised as a ReadError: *what*, then the error."""
     try:
-        return fastexcel.read_excel(body)
-    except fastexcel.FastExcelError as e:
-        msg = f"the body is not a workbook: {e}"
+        yield
+    except BaseException as e:
+        if not _failed(e):
+            raise
+        msg = f"{what}: {e}"
         raise ReadError(msg) from e
 
 
-def _of_kind(column: _Column, cells: pl.Series) -> bool:
+#: The most cells a sheet of an Excel 97 workbook (``.xls``) may span, its rows by its columns from the first filled to
+#: the last, and the most columns: calamine builds the whole span, about 33 bytes a cell (a 200 KB workbook with one
+#: cell moved to row 65,536 and column 256 took 860 MB) and more a column, so a span past them is refused before a
+#: load. 2^23 cells is 1,048,576 rows by 8 columns, 4,000 times the largest real sheet among the tests' (2,006 cells);
+#: 16,384 columns is Excel's own limit. shortcut: an ``.xlsx``'s span is not checked, as only a scan of its every cell
+#: reference finds it, which would slow a read by a third; check it if workbooks come from hostile sources.
+_SPAN_MAX: Final = 2**23
+_COLUMNS_MAX: Final = 16_384
+
+
+#: An Excel 97 or 95 workbook's opening, a compound document's; the BIFF records of a cell calamine reads (a BLANK's or
+#: MULBLANK's it does not), each opening with its row and column; MULRK, whose last column ends it; a sheet's BOF.
+_COMPOUND: Final = bytes.fromhex("d0cf11e0a1b11ae1")
+_BIFF_CELLS: Final = frozenset({0x0006, 0x00D6, 0x00FD, 0x0203, 0x0204, 0x0205, 0x027E})
+_MULRK: Final = 0x00BD
+_BOF: Final = 0x0809
+
+
+def _check_span(body: bytes) -> None:
+    """Refuse an Excel 97 or 95 workbook *body* one of whose sheets spans past :data:`_SPAN_MAX` or its columns.
+
+    Its records are walked (about 0.3 µs each, a quarter of a second for a million cells); a body that is no such
+    workbook is fastexcel's to read or refuse.
+    """
+    if not body.startswith(_COMPOUND):
+        return
+    try:
+        document = compdoc.CompDoc(body, logfile=io.StringIO())
+        stream = document.get_named_stream("Workbook") or document.get_named_stream("Book")
+    # xlrd's checks of a corrupt document are its own error, struct's, a lookup's or an assert.
+    except (compdoc.CompDocError, struct.error, LookupError, ValueError, AssertionError) as e:
+        msg = f"the body is not a readable Excel workbook: {e!r}"
+        raise ReadError(msg) from e
+    if stream is None:  # no workbook in it, which fastexcel refuses
+        return
+    unpack, at, end = struct.Struct("<HHHH").unpack_from, 0, len(stream)
+    spans: list[tuple[int, int]] = []
+    low_row = low_column = 1 << 16
+    high_row = high_column = -1
+    while at + 8 <= end:
+        kind, size, row, column = unpack(stream, at)
+        at += 4 + size
+        if kind == _BOF:  # a sheet's records begin
+            spans.append((high_row - low_row + 1, high_column - low_column + 1))
+            low_row = low_column = 1 << 16
+            high_row = high_column = -1
+        elif kind in _BIFF_CELLS or (kind == _MULRK and at <= end):
+            last = int.from_bytes(stream[at - 2 : at], "little") if kind == _MULRK else column
+            low_row, high_row = min(low_row, row), max(high_row, row)
+            low_column, high_column = min(low_column, column), max(high_column, last)
+    spans.append((high_row - low_row + 1, high_column - low_column + 1))
+    for rows, columns in spans:
+        if rows > 0 and (columns > _COLUMNS_MAX or rows * columns > _SPAN_MAX):  # a sheet of no cell spans none
+            msg = (
+                f"a sheet of the workbook spans {rows} rows by {columns} columns, past the {_SPAN_MAX} cells and"
+                f" {_COLUMNS_MAX} columns a sheet is read to"
+            )
+            raise ReadError(msg)
+
+
+def _workbook(body: bytes) -> fastexcel.ExcelReader:
+    """Return the workbook *body*, open, or raise ReadError for a body that is no workbook or spans too far.
+
+    An Excel 97 or 95 workbook's sheet whose span calamine would build past :data:`_SPAN_MAX` cells is refused first.
+    """
+    _check_span(body)
+    with _loading("the body is not a workbook"):
+        return fastexcel.read_excel(body)
+
+
+def _of_kind(column: Column, cells: pl.Series) -> bool:
     """Return whether each of a strict load's *cells* is one *column* holds, as the two loads read its cells."""
     dtype, scalar = cells.dtype, column.scalar
     if column.written is not None or column.flag is not None or scalar is str:
         return dtype == pl.String
     if scalar in {int, float}:
-        return dtype == pl.Float64 and (scalar is float or bool((cells == cells.floor()).all()))
+        # fastexcel's strict load reads a text cell ``nan`` as NaN among number cells, which no number cell holds.
+        return dtype == pl.Float64 and bool(_whole(cells).all() if scalar is int else not cells.is_nan().any())
     if scalar in _MOMENT_CELLS:
         shape = _MOMENT_CELLS[scalar][0]
         return isinstance(dtype, pl.Datetime) and bool(
             cells.dt.strftime("%Y-%m-%d %H:%M:%S").drop_nulls().str.contains(shape).all()
         )
     return scalar is bool and dtype == pl.Boolean
+
+
+def _near_leap_day(column: Column, values: pl.Series) -> bool:
+    """Return whether *column* reads date cells and *values*, its date or datetime values, fall on :data:`_LEAP_DAY`."""
+    if column.scalar not in {dt.date, dt.datetime} or column.written is not None or column.flag is not None:
+        return False
+    return bool((values.cast(pl.Date) == _LEAP_DAY).any())
 
 
 def _cell_at(frame: pl.DataFrame, row: int, at: int) -> pl.Series:
@@ -174,8 +323,8 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     _by_cell = True
 
     #: Whether the table opens with a header row: a format whose sheet writes none (GDPNow's ticker map) sets it false,
-    #: and its rows, from the one under ``header_row`` (0: the sheet's first), are read by position, its fields' names
-    #: their labels.
+    #: and its fields are read by position, their names their labels, from the row under ``header_row`` to the sheet's
+    #: end: the rows down to ``header_row`` are skipped, unread, and ``header_row=0`` reads from row 1.
     _header: typing.ClassVar[bool] = True
     #: Whether an empty row inside the table is a gap, dropped: a format whose sheet leaves one (Cboe's VXO archive,
     #: between two days) sets it; otherwise an empty row raises.
@@ -187,7 +336,9 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     #: ``whitespace_as_null`` reads it. The header is then read as the sheet writes it, so a heading written twice is
     #: twice (fastexcel would name the second ``East_1``).
     _trim: typing.ClassVar[bool] = False
-    #: Whether a header cell is read stripped of its whitespace (EIA pads some headings), read as :attr:`_trim`'s is.
+    #: Whether a header cell is read stripped of its whitespace (EIA pads some headings). The header is then read from
+    #: the sheet's own row, as :attr:`_trim`'s is: a date, time or boolean header cell is its text (``2026-01-02
+    #: 00:00:00``, ``true``), and a label written twice is twice, not numbered.
     _strip: typing.ClassVar[bool] = False
     #: How many rows right over the header row head its columns too (EIA's ``Sourcekey`` row over its descriptions): a
     #: cell heads its own column and every column to its right with no cell of its own. Each column's header is then
@@ -203,7 +354,8 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         format. *null_values* are the sheet's text for no value (``#N/A``, ``NA``). Errors name the sheet's own rows.
         Raises ``LayoutError`` where the :attr:`_above` rows do not fit over *header_row*.
         """
-        super().__init__(row, row_one=header_row + 1)
+        super().__init__(row)
+        self._row_one = header_row + 1
         _check_above(self._above, header_row)
         self._sheet = sheet
         self._header_row = header_row
@@ -217,16 +369,26 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     #: ``None`` on a shared reader, whose :meth:`_read` opens the body itself.
     _opened: fastexcel.ExcelReader | None = None
     _opened_grid: pl.DataFrame | None = None
+    #: Whether this reader is one read's own copy (:meth:`frame`'s), which takes the rows of the body it reads.
+    _reading: bool = False
+
+    @typing.override
+    def frame(self, body: bytes) -> pl.DataFrame:
+        # A copy of this reader reads the body, so the header row a format finds in it (:meth:`_header_in`), which its
+        # errors' rows count from, is this read's alone: the reader is shared, by every thread.
+        reading = object.__new__(type(self))
+        vars(reading).update(vars(self), _reading=True)
+        return super(SheetFile, reading).frame(body)
 
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
         reader = self._opened or _workbook(body)
-        if self._opened_grid is None and (frame := self._one_load(reader)) is not None:
+        if (frame := self._read_first(reader, body)) is not None:
             return frame
         # Two loads: the sheet's every cell as text (the grid), which says what a cell holds and serves all above and
         # around the table, and the table's cells typed, which fastexcel coerces without a word (a text cell is null as
-        # a number). shortcut: a text field's number cell reads as fastexcel's text of it, rounded to 9 decimals; no
-        # clean table keeps such numbers as text, a layout that does needs SheetText.
+        # a number, or the number its text parses as). A text field's column is loaded as floats: its number cells'
+        # every digit.
         grid = self._opened_grid if self._opened_grid is not None else self._text_grid(reader, self._sheet)
         if self._header and grid.height < self._header_row:
             msg = f"the {self._sheet!r} sheet ends at row {grid.height}, before its header row {self._header_row}"
@@ -234,7 +396,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         span = self._span(grid)
         used = self._used_columns()
         table = span if used is None else [str(at) for at in used]
-        if any(name not in span for name in table):
+        if not set(table) <= set(span):  # sets: a sheet may be 16,384 columns wide
             msg = f"the {self._sheet!r} sheet has no column {used!r} of its table"
             raise ReadError(msg)
         written = bool(self._above) or self._trim or self._strip  # the header as the sheet's own row writes it
@@ -295,9 +457,25 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
                 for column in columns
             ]
         )
+        self._refuse_leap_day(reader, frame, [(column, int(table[at])) for at, column in placed.items()])
         frame = self._completed(frame, absent, stated)
         # Dropped once typed and numbered, so an error and a numbered row still name the sheet's own row.
         return self._gapless(frame, empty) if self._gaps else frame
+
+    def _read_first(self, reader: fastexcel.ExcelReader, body: bytes) -> pl.DataFrame | None:
+        """Return the table of the workbook open in *reader* read but by this reader's two loads, or ``None``.
+
+        A format that finds its sheet or its header in each body (:meth:`_sheet_in`, :meth:`_header_in`) has a reader
+        of this body's read it (:meth:`_placed`), here, so a zip's member (``ZippedFile``) is placed as a bare workbook
+        is; a plain table is read from one load (:meth:`_one_load`).
+        """
+        if self._opened is None and any(getattr(type(self), hook) is not getattr(SheetFile, hook) for hook in _PLACING):
+            placed = self._placed(reader)
+            if self._reading:  # frame()'s copy: its checks name the body's rows
+                self._row_one = placed._row_one  # noqa: SLF001 (a reader of this class's)
+            # This class's read, not the format's: the pieces before it (a zip's) read the body down to the workbook.
+            return SheetFile._read(placed, body)
+        return self._one_load(reader) if self._opened_grid is None else None
 
     def _one_loadable(self) -> bool:
         """Return whether a table may be read from one strict load: a plain table, by none of the hooks or switches."""
@@ -324,10 +502,13 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             return None
         columns = [column for column in self._columns if column.field != self._numbered]
         try:
-            table = reader.load_sheet(
+            loaded = reader.load_sheet(
                 self._sheet, header_row=self._header_row - 1, dtype_coercion="strict", schema_sample_rows=None
-            ).to_polars()
-        except fastexcel.FastExcelError:
+            )
+            table = loaded.to_polars()
+        except BaseException as e:  # a mixed column, or a cell calamine panics on typed: the text load may read it
+            if not _failed(e):
+                raise
             return None
         # fastexcel names a column by its header cell, a repeat by its place (Rate_1) and an empty or date cell
         # __UNNAMED__n, so a stray cell beside the table or a header that is not the labels is a mismatch.
@@ -341,11 +522,11 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             return None
         return self._completed(frame, [], [])
 
-    def _one_kind(self, column: _Column, cells: pl.Series) -> pl.Series | None:
+    def _one_kind(self, column: Column, cells: pl.Series) -> pl.Series | None:
         """Return *column*'s values from its strictly loaded *cells*, or ``None`` where they are not all its kind."""
         if cells.null_count() == cells.len():
             return pl.Series(column.field, [None] * cells.len(), _none_dtype(column.scalar))
-        if not _of_kind(column, cells):
+        if not _of_kind(column, cells) or _near_leap_day(column, cells):
             return None
         if column.written is not None or column.flag is not None or column.scalar is str:
             text = pl.select(pl.when(cells != "").then(cells)).to_series().alias(column.label)
@@ -371,7 +552,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         self,
         reader: fastexcel.ExcelReader,
         grid: pl.DataFrame,
-        read: Mapping[int, _Column | None],
+        read: Mapping[int, Column | None],
         used: list[int] | None,
     ) -> tuple[pl.DataFrame, list[pl.Expr]]:
         """Load the table's cells typed, the rows under its header, and read its ``Cell`` fields: a read's second load.
@@ -466,7 +647,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             raise ReadError(msg)
         return self._load(reader, sheet, skip_rows=0, dtypes="string", use_columns=None)
 
-    def _completed(self, frame: pl.DataFrame, absent: list[_Column], stated: list[pl.Expr]) -> pl.DataFrame:
+    def _completed(self, frame: pl.DataFrame, absent: list[Column], stated: list[pl.Expr]) -> pl.DataFrame:
         """Return the table's typed *frame* with the fields no column holds: its row, the *absent*, the *stated*."""
         if self._numbered is not None:
             numbers = pl.int_range(self._row_one, self._row_one + frame.height, dtype=pl.Int64, eager=True)
@@ -491,18 +672,39 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     ) -> pl.DataFrame:
         """Load *sheet* by fastexcel from sheet row *skip_rows* + 1, its columns named by place (``"0"`` is ``A``).
 
-        fastexcel's own failure is a ReadError.
+        fastexcel's own failure, or calamine's panic, is a ReadError.
         """
-        try:
+        with _loading(f"the {sheet!r} sheet cannot be loaded as the table"):  # a cut sheet, a cell calamine panics on
             loaded = reader.load_sheet(
                 sheet, header_row=None, skip_rows=skip_rows, dtypes=dtypes, use_columns=use_columns
             )
             frame = loaded.to_polars()  # fastexcel loads lazily
-        except fastexcel.FastExcelError as e:  # a sheet fastexcel cannot read (a cut one)
-            msg = f"the {sheet!r} sheet cannot be loaded as the table: {e}"
-            raise ReadError(msg) from e
-        frame.columns = [str(column.absolute_index) for column in loaded.selected_columns]
+            frame.columns = [str(column.absolute_index) for column in loaded.selected_columns]
         return frame
+
+    def _refuse_leap_day(
+        self, reader: fastexcel.ExcelReader, frame: pl.DataFrame, columns: Sequence[tuple[Column, int]]
+    ) -> None:
+        """Refuse a date cell of the table's on Excel's serial 60, 1900-02-29, which its 1900 date system counts.
+
+        No calendar has that day, and fastexcel reads it as serial 59's, 1900-02-28. *frame* holds the table's
+        columns, a row per sheet row under the header; *columns*, each column and its sheet column (``A`` is 0). A
+        column holding 1900-02-28 is loaded once more, as durations, which are its cells' serials; any other costs
+        nothing. A 1904 workbook's serial 60 is 1904-03-01.
+        """
+        for column, at in columns:
+            if not _near_leap_day(column, frame[column.field]):
+                continue
+            durations = self._load(
+                reader, self._sheet, skip_rows=self._header_row, dtypes={at: "duration"}, use_columns=[at]
+            )
+            serials = durations.to_series().head(frame.height).dt.total_days()
+            if (row := _first(serials == 60, self._row_one)) is not None:  # noqa: PLR2004 (the day itself)
+                msg = (
+                    f"the {column.label!r} cell on row {row} is Excel's day 60, 1900-02-29, which its 1900 date system"
+                    " counts and no calendar has"
+                )
+                raise ReadError(msg)
 
     @typing.override
     def _label(self, name: str) -> str | None:
@@ -524,7 +726,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             1,
         )
 
-    def _stated(self, column: _Column, text: pl.Series, typed: pl.Series) -> pl.Expr:
+    def _stated(self, column: Column, text: pl.Series, typed: pl.Series) -> pl.Expr:
         """Return the value *column*'s cell states, its *text* and its *typed* cell, read as a cell of its column is."""
         text = text.cast(pl.String).replace(["", *self._null_values], None).alias(column.label)
         try:
@@ -540,9 +742,10 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         self, reader: fastexcel.ExcelReader, row: int, at: int, dtypes: fastexcel.DType | fastexcel.DTypeMap
     ) -> pl.Series:
         """Return the cell at sheet *row* and column *at*, loaded with *dtypes*: a series of one, null where empty."""
-        loaded = reader.load_sheet(
-            self._sheet, header_row=None, skip_rows=row - 1, n_rows=1, use_columns=[at], dtypes=dtypes
-        ).to_polars()
+        with _loading(f"the {self._sheet!r} sheet's cell cannot be loaded"):
+            loaded = reader.load_sheet(
+                self._sheet, header_row=None, skip_rows=row - 1, n_rows=1, use_columns=[at], dtypes=dtypes
+            ).to_polars()
         return loaded.to_series(0) if loaded.height else pl.Series([None], dtype=pl.String)
 
     def _used_columns(self) -> list[int] | None:
@@ -570,36 +773,53 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             ]
         )
 
-    def _value(self, column: _Column, text: pl.Series, typed: pl.Series) -> pl.Series:
+    def _value(self, column: Column, text: pl.Series, typed: pl.Series) -> pl.Series:
         """Return *column*'s values, refusing a cell that is not one of its type, its row the sheet's own."""
         if column.written is not None:
             return _moment(text, _temporal(column.scalar, column.written), column.written, self._row_one).alias(
                 column.field
             )
         if column.scalar is str:
-            return text.alias(column.field)
+            # The two loads' typed cells are a float load of the column (a number cell's every digit); one load's and a
+            # Cell's are its text.
+            return (_with_digits(text, typed) if typed.dtype == pl.Float64 else text).alias(column.field)
+        if column.flag is not None:
+            return _flagged(text, column.flag, self._row_one).alias(column.field)
+        cell, number = pl.col("text"), pl.col("typed")
         if column.scalar in _MOMENT_CELLS:
             # A text cell written like a date cell has the shape, and fastexcel reads it as no date.
             shape, what = _MOMENT_CELLS[column.scalar]
-            wrong = ~text.str.contains(shape) | typed.is_null()
-        elif column.flag is not None:
-            return _flagged(text, column.flag, self._row_one).alias(column.field)
+            checks = [(~cell.str.contains(shape) | number.is_null(), what)]
         elif column.scalar is bool:
-            # fastexcel reads a number cell as a boolean (1 is true); a boolean cell's text is its word.
-            wrong, what = ~text.is_in(_BOOLEAN_CELLS), "boolean cell"
+            # fastexcel reads a number cell as a boolean (1 is true), and a text cell as none; a boolean cell's text is
+            # its word.
+            checks = [(~cell.is_in(_BOOLEAN_CELLS) | number.is_null(), "boolean cell")]
         else:
-            # ... and a boolean cell as a number (true is 1.0).
-            wrong = typed.is_null() | text.is_in(_BOOLEAN_CELLS)
-            if column.scalar is int:
-                wrong |= typed != typed.floor()
-            what = "whole number" if column.scalar is int else "number"
-        if (at := _first((text.is_not_null() & wrong).fill_null(value=False), self._row_one)) is not None:
-            msg = f"the {text.name!r} cell {text[at - self._row_one]!r} is not a {what}: row {at}"
-            raise ReadError(msg)
-        values = pl.select(pl.when(text.is_not_null()).then(typed)).to_series()
-        if (cast := _SHEET_CASTS.get(column.scalar)) is not None:
-            values = values.cast(cast)
-        return values.alias(column.field)
+            # ... a boolean cell as a number (true is 1.0), and a text cell as the number its text is (``1e3``). A
+            # number cell's text is fastexcel's of a number. shortcut: a text cell written as fastexcel writes a number
+            # (``2``, ``2.5``) still reads as that number, as no load but one more tells it from a number cell (a mixed
+            # table's read 35% slower); read a sheet that writes numbers as text by NumberTextSheet.
+            wrong = number.is_null() | ~cell.str.contains(_NUMBER_CELL)
+            checks = (
+                [
+                    (wrong | (number != number.floor()), "whole number"),
+                    (~number.is_between(*_INT_RANGE, closed="left"), "whole number of 64 bits"),
+                ]
+                if column.scalar is int
+                else [(wrong, "number")]
+            )
+        # One pass over the cells: each check's mask (named by place: no field's name), and the values (none where the
+        # cell is empty).
+        held = cell.is_not_null()
+        found = pl.DataFrame([text.alias("text"), typed.alias("typed")]).select(
+            *((held & wrong).fill_null(value=False).alias(f"\0{at}") for at, (wrong, _) in enumerate(checks)),
+            pl.when(held).then(number).alias(column.field),
+        )
+        for at, (_, what) in enumerate(checks):
+            if (wrong := found[f"\0{at}"]).any():
+                _refuse(text, wrong, what, self._row_one)
+        values = found[column.field]
+        return values if (cast := _SHEET_CASTS.get(column.scalar)) is None else values.cast(cast)
 
 
 class PaddedSheet[RowT: msgspec.Struct](SheetFile[RowT]):
@@ -609,7 +829,7 @@ class PaddedSheet[RowT: msgspec.Struct](SheetFile[RowT]):
     """
 
     @typing.override
-    def _value(self, column: _Column, text: pl.Series, typed: pl.Series) -> pl.Series:
+    def _value(self, column: Column, text: pl.Series, typed: pl.Series) -> pl.Series:
         stripped = text.str.strip_chars(" ")
         return super()._value(column, stripped.replace(["", *self._null_values], None), typed)
 
@@ -649,25 +869,30 @@ class CellHeaderSheet[RowT: msgspec.Struct](SheetFile[RowT]):
 class NumberTextSheet[RowT: msgspec.Struct](SheetFile[RowT]):
     """A sheet whose numbers are written as text as well as in number cells (SF Fed's ``' 1.03'`` beside ``0.60``).
 
-    A number field's text cell, which fastexcel's typed load reads as no number, is read as its text's number
-    of the field's own type, strictly (an int field takes no ``1e3`` or ``1.0``); a number cell keeps every digit it
-    holds. Composed after a piece that cleans the text
-    (``class _Sheet(PaddedSheet[RowT], NumberTextSheet[RowT])``).
+    A number field's text cell is read as its text's number of the field's own type, strictly: an int field's is
+    digits after an optional ``-`` (no ``+5``, ``1e3``, ``1.0`` or ``inf``), a whole number of 64 bits, read digit for
+    digit; a float field's a decimal (``-1.03``, ``.5``; no exponent, ``nan`` or ``inf``). A number cell, whose text is
+    a decimal too, keeps every digit it holds. A text cell that is no such number, or a boolean, date or time cell,
+    raises. Composed after a piece that cleans the text (``class _Sheet(PaddedSheet[RowT], NumberTextSheet[RowT])``).
     """
 
     @typing.override
-    def _value(self, column: _Column, text: pl.Series, typed: pl.Series) -> pl.Series:
-        if column.scalar in {int, float} and column.flag is None and column.written is None:
-            # Read as the field's own type, as a CSV's text is: an int field's text that is no whole number
-            # (``1e3``, ``1.0``, ``inf``, past 2^63) stays no value, and is refused as such; a float's NaN and
-            # infinities are refused downstream as any float that is not finite is.
-            if column.scalar is float:
-                return super()._value(column, text, typed.fill_null(text.cast(pl.Float64, strict=False)))
-            # An int is loaded as a float, which holds 2^53 exactly; the text's own digits are kept beside it.
-            whole = text.cast(pl.Int64, strict=False)
-            checked = super()._value(column, text, typed.fill_null(whole.cast(pl.Float64)))
-            return pl.select(pl.when(typed.is_null()).then(whole).otherwise(checked)).to_series().alias(column.field)
-        return super()._value(column, text, typed)
+    def _value(self, column: Column, text: pl.Series, typed: pl.Series) -> pl.Series:
+        if column.scalar not in {int, float} or column.flag is not None or column.written is not None:
+            return super()._value(column, text, typed)
+        whole = column.scalar is int
+        # fastexcel's float load reads a decimal's text as its number, but not one padded (PaddedSheet strips it).
+        numbers = typed.fill_null(text.cast(pl.Float64, strict=False))
+        wrong = ~text.str.contains(_WHOLE_TEXT if whole else _DECIMAL_TEXT) | numbers.is_null()
+        if not whole:
+            _refuse(text, wrong, "number", self._row_one)
+            return pl.select(pl.when(text.is_not_null()).then(numbers)).to_series().alias(column.field)
+        # The text's own digits (a float holds 2^53 exactly, no more), where its number is whole: a number cell's text
+        # is rounded to nine decimals (``3.0000000004`` is ``3``).
+        digits = text.cast(pl.Int64, strict=False)
+        _refuse(text, wrong | (numbers != numbers.floor()), "whole number", self._row_one)
+        _refuse(text, digits.is_null(), "whole number of 64 bits", self._row_one)
+        return pl.select(pl.when(text.is_not_null()).then(digits)).to_series().alias(column.field)
 
 
 class NotedSheet[RowT: msgspec.Struct](SheetFile[RowT]):
@@ -795,10 +1020,6 @@ class PreambleSheet[RowT: msgspec.Struct](SheetFile[RowT]):
     """
 
     @typing.override
-    def frame(self, body: bytes) -> pl.DataFrame:
-        return super(PreambleSheet, self._placed(self._opened or _workbook(body))).frame(body)
-
-    @typing.override
     def _header_in(self, grid: pl.DataFrame) -> int:
         """Return the sheet row of the header: the first whose first cell is the first column's label."""
         label = self._columns[0].label
@@ -815,10 +1036,6 @@ class OnlySheet[RowT: msgspec.Struct](SheetFile[RowT]):
     def __init__(self, row: type[RowT], *, header_row: int = 1, null_values: Sequence[str] = ()) -> None:
         """Lay out a table of *row* on the workbook's one sheet, under its header in sheet row *header_row*."""
         super().__init__(row, sheet="", header_row=header_row, null_values=null_values)
-
-    @typing.override
-    def frame(self, body: bytes) -> pl.DataFrame:
-        return super(OnlySheet, self._placed(self._opened or _workbook(body))).frame(body)
 
     @typing.override
     def _sheet_in(self, reader: fastexcel.ExcelReader) -> str:
@@ -857,11 +1074,8 @@ def _text_grid(reader: fastexcel.ExcelReader, sheet: str, null_values: Sequence[
     if sheet not in reader.sheet_names:
         msg = f"the workbook has no sheet {sheet!r}; its sheets are {reader.sheet_names!r}"
         raise ReadError(msg)
-    try:
+    with _loading(f"the workbook's {sheet!r} sheet will not load"):
         text = _text_sheet(reader, sheet)
-    except fastexcel.FastExcelError as e:
-        msg = f"the workbook's {sheet!r} sheet will not load: {e}"
-        raise ReadError(msg) from e
     first = int(text.columns[0].removeprefix("__UNNAMED__")) if text.width else 0
     text.columns = [str(at) for at in range(text.width)]
     cell = pl.col(pl.String)
@@ -948,20 +1162,30 @@ class BiffSheet[RowT: msgspec.Struct](SheetText[RowT]):
         empty = {xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK}
         first = next((at for at in range(sheet.ncols) if set(sheet.col_types(at)) - empty), sheet.ncols)
         text = functools.partial(_biff_text, book.datemode)
+        rows = range(sheet.nrows)
         columns = {
             str(at - first): [
                 None if cell is None or not cell.strip() or cell in self._null_values else cell
-                for cell in map(text, sheet.col_types(at), sheet.col_values(at), strict=True)
+                for cell in map(
+                    text,
+                    sheet.col_types(at),
+                    sheet.col_values(at),
+                    rows,
+                    itertools.repeat(at, sheet.nrows),
+                    strict=True,
+                )
             ]
             for at in range(first, sheet.ncols)
         }
         return pl.DataFrame(columns, schema=dict.fromkeys(columns, pl.String))
 
 
-def _biff_text(datemode: int, kind: int, value: object) -> str | None:
+def _biff_text(datemode: int, kind: int, value: object, row: int, at: int) -> str | None:
     """Return the text of an xlrd cell of *kind* holding *value*, as fastexcel writes it; an empty cell none.
 
-    A date's serial counts from the workbook's *datemode* (1900 or 1904).
+    A date's serial counts from the workbook's *datemode* (0: 1900, 1: 1904). The cell is at *row* and column *at*
+    (0-based), which a ReadError names: a date no calendar has (past year 9999, not a number, Excel's 1900-02-29) or an
+    error code none of Excel's.
     """
     match kind, value:
         case xlrd.XL_CELL_TEXT, str():
@@ -969,11 +1193,22 @@ def _biff_text(datemode: int, kind: int, value: object) -> str | None:
         case xlrd.XL_CELL_NUMBER, float():
             return str(int(value)) if value.is_integer() else repr(value)
         case xlrd.XL_CELL_DATE, float():
-            return f"{xlrd.xldate_as_datetime(value, datemode):%Y-%m-%d %H:%M:%S}"
+            # Serial 60 is 1900-02-29 in the 1900 system, which xlrd reads as serial 59's day, as fastexcel does.
+            if not datemode and 60 <= value < 61:  # noqa: PLR2004
+                msg = f"the cell {xlrd.cellname(row, at)} is Excel's day 60, 1900-02-29, which no calendar has"
+                raise ReadError(msg)
+            try:
+                return f"{xlrd.xldate_as_datetime(value, datemode):%Y-%m-%d %H:%M:%S}"
+            except (OverflowError, ValueError) as e:
+                msg = f"the cell {xlrd.cellname(row, at)} is a date cell of no date: its serial is {value!r}"
+                raise ReadError(msg) from e
         case xlrd.XL_CELL_BOOLEAN, int():
             return _BOOLEAN_CELLS[not value]
         case xlrd.XL_CELL_ERROR, int():
-            return xlrd.error_text_from_code[value]
+            if (error := xlrd.error_text_from_code.get(value)) is None:
+                msg = f"the cell {xlrd.cellname(row, at)} is an error cell of a code none of Excel's: {value:#x}"
+                raise ReadError(msg)
+            return error
         case _:
             return None
 
@@ -994,9 +1229,10 @@ class GroupedSheet[RowT: msgspec.Struct](LongFile[RowT], CellHeaderSheet[RowT]):
 
     def __init__(self, row: type[RowT], *, sheet: str, header_row: int = 1, null_values: Sequence[str] = ()) -> None:
         """Lay out a grouped table of *row* (see :class:`SheetFile`): its group and label fields before its value."""
-        super().__init__(row, sheet=sheet, header_row=header_row, null_values=null_values)
-        group, label = self._fields[-3:-1]
+        group, label = row.__struct_fields__[-3:-1]
+        # Set before File's constructor, which refuses a long table with no _keys.
         self._keys = re.compile(f"(?P<{group}>[^{_UNIT}]+){_UNIT}(?P<{label}>[^{_UNIT}]+)")
+        super().__init__(row, sheet=sheet, header_row=header_row, null_values=null_values)
 
     @typing.override
     def _header_cells(self, cells: pl.DataFrame) -> list[str]:
@@ -1042,10 +1278,10 @@ class FoundSheet[RowT: msgspec.Struct](FoundTable[RowT]):
 
     @typing.override
     def _lines(self, body: bytes) -> list[list[str]]:
-        try:
-            reader = fastexcel.read_excel(body)
+        reader = _workbook(body)
+        if not reader.sheet_names:
+            msg = "the workbook holds no sheet"
+            raise ReadError(msg)
+        with _loading("the workbook's first sheet will not load"):
             sheet = _text_sheet(reader, reader.sheet_names[0])
-        except fastexcel.FastExcelError as e:
-            msg = f"the body is not a workbook: {e}"
-            raise ReadError(msg) from e
         return [[cell or "" for cell in line] for line in sheet.iter_rows()]

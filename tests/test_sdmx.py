@@ -161,7 +161,7 @@ class _ObsOf[RowT: msgspec.Struct](_Data[RowT], SdmxObservations[RowT]):
 
 
 class _Zipped[RowT: msgspec.Struct](_ObsOf[RowT]):
-    _member = re.compile(r"[^/]*\.xml")
+    _zipped_member = re.compile(r"[^/]*\.xml")
 
 
 _M = b'xmlns:message="http://www.SDMX.org/resources/SDMXML/schemas/v1_0/message"'
@@ -290,8 +290,11 @@ _GOOD = _one(b"S1", _TWO)
             _message().replace(b"<x:DataSet", _GOOD + b"<x:DataSet").replace(b'xmlns:k="urn:k"', b""),
             r"of the body sits outside any <\{urn:x\}DataSet>$",
         ),
-        (_message(b"<x:note/>", _GOOD), r"^in the D data set, the body holds b'<x:note.*' where a series should be$"),
-        (_message(_GOOD, b"text", _GOOD), r"^in the D data set, the body holds b'<k:Series.*' where a series"),
+        (
+            _message(b"<x:note/>", _GOOD),
+            r"^in the D data set, the body holds <\{urn:x\}note> where a series should be$",
+        ),
+        (_message(_GOOD, b"text", _GOOD), r"^in the D data set, the body holds 'text' where a series should be$"),
         (_message(b"text", _GOOD), r"^in the D data set, the body holds 'text' where a series should be$"),
         (_message(_GOOD, b"<x:note/>"), r"^in the D data set, the body holds other than series$"),
         (_message(_GOOD, _GOOD), r"^the D data set of the body lists the series 'S1' twice$"),

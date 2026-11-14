@@ -33,15 +33,18 @@ class Format(NamedTuple):
     """How a date or time field's cells are written: their ``strptime`` format and, for a time, its zone.
 
     *time_zone* is the zone a file writes every time of the column in, with no zone in the cells
-    (``Format("%m/%d/%Y %-I:%M:%S %p", time_zone="UTC")``): the time is read as aware, in that zone. *alternatives*
-    are other formats the same column is written in, cell by cell (``Format("%m/%d/%Y", alternatives=("%-m/%-d/%Y",))``
-    for a file that pads its dates but for a few): each cell must be exactly one of them.
+    (``Format("%m/%d/%Y %-I:%M:%S %p", time_zone="UTC")``): the time is read as aware, in that zone, a zone of the
+    time zone database polars reads. A format writing a zone in the cell (``%z``, ``%Z``) is refused, as is one that
+    writes what its field has not (a date's ``%H:%M``). *alternatives* are other formats the same column is written in,
+    cell by cell (``Format("%m/%d/%Y", alternatives=("%-m/%-d/%Y",))`` for a file that pads its dates but for a few):
+    each cell must be exactly one of them.
 
     A date written as a quarter uses ``%q``, the quarter's number 1 to 4, beside ``%Y`` and literal text alone
     (``Format("%YQ%q")`` for ``2026Q1``, ``Format("%Y: Q%q")`` for ``2026: Q2``): the date is the quarter's first day.
-    A period's year may be written in two digits, ``%y`` (``Format("%b-%y")`` for ``Jan-21``), as ``strptime`` reads
-    it (``69`` to ``99`` the 1900s, the rest the 2000s). *end* reads a period as its last day instead
-    (``Format("%Y:Q%q", end=True)``: ``2026:Q2`` is 2026-06-30), for a file that dates a period by its end.
+    A year may be written in two digits, ``%y`` (``Format("%b-%y")`` for ``Jan-21``, ``Format("%m/%d/%y")``), as
+    ``strptime`` reads it (``69`` to ``99`` the 1900s, the rest the 2000s). *end* reads a period as its last day
+    instead (``Format("%Y:Q%q", end=True)``: ``2026:Q2`` is 2026-06-30), for a file that dates a period by its end.
+    A ``Format`` that is no format of its field raises ``LayoutError`` when the reader is built.
     """
 
     strptime: str
@@ -90,10 +93,11 @@ class Link(NamedTuple):
 
 
 class Shape(NamedTuple):
-    """A text field's shape: the regex each of its cells fullmatches, every reader checking it.
+    r"""A text field's shape: the regex each of its cells fullmatches, every reader checking it.
 
     ``Shape(r"[0-9]{4}(?::Q[1-4])?")`` is a period a file writes as text, ``2026:Q2`` or ``1946``. A cell of another
-    shape raises, naming its row.
+    shape raises, naming its row. The regex is polars' (Rust's ``regex``), which has no look-around and no ``\Z``: one
+    it does not compile raises ``LayoutError`` when the reader is built.
     """
 
     pattern: str

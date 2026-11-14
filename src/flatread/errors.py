@@ -2,11 +2,14 @@
 
 * :class:`ReadError` is raised by :meth:`~flatread.core.File.frame` and :meth:`~flatread.core.File.rows` for a body
   that is not the file its reader describes: a cell that is not its column's type, a row of the wrong width, a header
-  that is not the struct's labels, a cut or damaged body. Its message names where: the row, the cell, the line or the
-  member. :class:`EmptyBodyError` and :class:`RaggedRowError` are the two kinds worth telling apart.
+  that is not the struct's labels, a cut or damaged body, and a body on which polars' or fastexcel's Rust code panics
+  (pyo3's ``PanicException``, no ``Exception`` of its own). Its message names where: the column by its label, the row,
+  the cell, the line or the member. :class:`EmptyBodyError` and :class:`RaggedRowError` are the two kinds worth
+  telling apart.
 * :class:`LayoutError` is raised for a reader declared wrong: a field with no ``Label`` where its format needs one, a
-  ``Format`` on a field that is no date, spans that overlap, a switch naming a field the struct lacks. Most are raised
-  when the reader is built; a few only show once a body is read (an inner reader's columns that are not the struct's).
+  ``Format`` on a field that is no date or that polars cannot read it by, a ``Shape`` polars cannot compile, spans that
+  overlap, a required switch left unset, a switch naming a field the struct lacks. Most are raised when the reader is
+  built; a few only show once a body is read (an inner reader's columns that are not the struct's).
 
 Both are :class:`ValueError`, as :mod:`json` and msgspec raise theirs, so code that catches a decoder's
 ``ValueError`` catches them; catch :class:`ReadError` alone to handle bad data and let a misdeclared reader fail loudly.

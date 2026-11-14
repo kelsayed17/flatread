@@ -14,8 +14,8 @@ from collections.abc import Collection, Sequence
 import msgspec
 import polars as pl
 
-from flatread.core import TextFile, _Column, _decoded
-from flatread.errors import LayoutError, ReadError
+from flatread.core import Column, TextFile, _decoded
+from flatread.errors import LayoutError, RaggedRowError, ReadError
 
 __all__ = ["FoundCsv", "FoundTable"]
 
@@ -27,13 +27,14 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
     alternatives, each cell as :meth:`_heading` folds it). Each cell of it names a column: one word of a field's
     label, which is that field's column, a field it lacks reading as null. A cell no field's words name, two cells
     naming one field, a line wider than the header, or a value under a blank header cell (unless :attr:`_open`) raises,
-    naming the line. A line of nothing but spaces and ``-`` rules, whether a blank one or a rule, is skipped; a cell
+    naming the line, as does a line narrower than the header (``RaggedRowError``: a body cut inside its last row). A
+    line of nothing but spaces and ``-`` rules, whether a blank one or a rule, is skipped; a cell
     the format lists in *null_values* is no value, an empty one too; and a file with no rows is empty. A first column
     with no header cell whose cells are whole numbers is the export's row count when the format says so
     (:attr:`_row_count`).
     A line that opens a section (:attr:`_section_prefix`, then its text) states the :attr:`_section_field` field for the
     rows below. A format subclasses it with :meth:`_lines`, the file's lines of cells (:class:`FoundCsv`,
-    :class:`FoundSheet`).
+    :class:`~flatread.sheets.FoundSheet`).
     """
 
     _by_name = True
@@ -52,10 +53,13 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         """Lay out an export of *row*, whose header is the line naming its field *key* (refused if no field is).
 
         *null_values* are the cells' words for no value, besides an empty cell; a field kept as written has none.
+        Raises ``LayoutError`` for a *key* that is none of *row*'s fields read from a column, or a label two share.
         """
-        super().__init__(row)
-        self._null_values = list(null_values)
-        (key_column,) = (column for column in self._columns if column.field == key)
+        super().__init__(row, null_values=null_values)
+        if not (keyed := [column for column in self._columns if column.field == key]):
+            msg = f"the key {key!r} is no field of {row.__name__} read from a column"
+            raise LayoutError(msg)
+        (key_column,) = keyed
         self._key_field = key
         self._key_words = {key_column.label, *key_column.aliases}
         words = [
@@ -78,7 +82,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         return cell
 
     @typing.override
-    def _clean(self, cells: pl.Series, column: _Column) -> pl.Series:
+    def _clean(self, cells: pl.Series, column: Column) -> pl.Series:
         if column.field in self._as_written:
             return cells
         return pl.select(pl.when(~cells.str.strip_chars().is_in(self._null_values)).then(cells)).to_series()
@@ -118,6 +122,9 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
             if self._section_prefix and line[0].startswith(self._section_prefix) and not "".join(line[1:]).strip():
                 section = line[0].removeprefix(self._section_prefix).strip()
                 continue
+            if len(line) < len(header):
+                msg = f"line {number} has {len(line)} cells, not the header's {len(header)}: {line}"
+                raise RaggedRowError(msg)
             # An unnamed first column of whole numbers is the export's row count (2013's BDC file), and not data.
             under = [cell for cell, name in zip(line, names, strict=False) if name is None]
             if self._row_count and names[0] is None and line[0].strip().isdecimal():

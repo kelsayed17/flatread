@@ -255,6 +255,9 @@ caf = "caf"
 PADD = "PADD"
 Maxium = "Maxium"
 Ffor = "Ffor"
+# PDF's FlateDecode filter, as pdfminer and the PDF reference name it.
+Flate = "Flate"
+flate = "flate"
 
 [tool.typos.files]
 # The examples keep a recorded file's bytes, the publisher's own words and abbreviations (PADD, Infor, Consol).

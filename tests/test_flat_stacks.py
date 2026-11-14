@@ -15,7 +15,7 @@ import msgspec
 import pytest
 
 from flatread.archives import Transcoded, ZippedFile
-from flatread.core import Carried, Thousands, _Column
+from flatread.core import Carried, Column, Thousands
 from flatread.delimited import (
     CsvFile,
     HeadersCsv,
@@ -256,7 +256,7 @@ class TestACarriedBesideSheet:
 
     def test_a_first_row_without_its_group_is_refused_as_an_empty_cell(self) -> None:
         body = workbook({"S": [[None, "Asset Class", "Product", "Level"], [None, None, "2Y", 1]]})
-        with pytest.raises(ReadError, match=r"\['asset_class'\] columns have an empty cell.*row 2"):
+        with pytest.raises(ReadError, match=r"\['Asset Class'\] columns have an empty cell.*row 2"):
             _Factors(_Factor, sheet="S").rows(body)
 
 
@@ -284,7 +284,7 @@ class _Wpsr(LongFile[_Stub], Thousands[_Stub], Transcoded[_Stub], SectionedCsv[_
     _keys = re.compile(r"(?!STUB_)\s*(?P<heading>.*?)\s*", re.DOTALL)
 
     @typing.override
-    def _clean(self, cells: pl.Series, column: _Column) -> pl.Series:
+    def _clean(self, cells: pl.Series, column: Column) -> pl.Series:
         return super()._clean(cells.str.strip_chars(), column)
 
 

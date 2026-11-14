@@ -3,9 +3,9 @@
 Both are text tables (:class:`~flatread.core.TextFile`):
 
 * :class:`XmlFile`, a clean XML table: a root element whose children are records, each a run of leaf elements, the
-  struct's labels in order (an element's tag is its label). It is parsed by :func:`parse_xml` (entities left
-  unexpanded, no network, a cut body refused). A format's ``_namespaces`` binds the
-  prefixes its names write (``mes:Structure``).
+  struct's labels in order (an element's tag is its label), and no text between them but whitespace. It is parsed by
+  :func:`parse_xml` (entities left unexpanded, no network, a cut body refused) and held whole. A format's
+  ``_namespaces`` binds the prefixes its names write (``mes:Structure``).
 * :class:`NestedXml`, a document whose records nest below its root (SDMX's code lists, the House's seats): the record
   is an XPath from the root, and each field's ``Label`` an XPath from its record to one node, an attribute
   (``@id``), a descendant's text (``info/name``) or an ancestor's, every record's under it (``../@comcode``).
@@ -13,7 +13,7 @@ Both are text tables (:class:`~flatread.core.TextFile`):
 
 import types
 import typing
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 
 import msgspec
 import polars as pl
@@ -52,26 +52,41 @@ def parse_xml(body: bytes) -> etree._Element:
 
 
 class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
-    """A clean XML table: a root of records, each a run of leaf elements its row struct's labels name, in order."""
+    """A clean XML table: a root of records, each a run of leaf elements its row struct's labels name, in order.
+
+    A record of other elements, or a leaf holding elements, raises ``ReadError``, as does text other than whitespace
+    beside a record or a leaf (``<r><a>x</a>junk<b>1</b></r>``): a leaf's text is its cell, and nothing else is read.
+    """
 
     #: The prefixes the format's names and paths write, each bound to its namespace (``{"str": "http://..."}``).
     _namespaces: typing.ClassVar[Mapping[str, str]] = types.MappingProxyType[str, str]({})
 
-    def __init__(self, row: type[RowT], *, root: str, record: str) -> None:
+    def __init__(self, row: type[RowT], *, root: str, record: str, null_values: Collection[str] = ()) -> None:
         """Lay out a table of *row*: the document's root element *root*, each of its children a *record* element.
 
         Each field names its record's element with a :class:`~flatread.fields.Label`; a date or time field
         gives the :class:`~flatread.fields.Format` its text is written in. A name may carry a prefix of
-        ``_namespaces`` (``mes:Structure``). Raises what :class:`TextFile` refuses.
+        ``_namespaces`` (``mes:Structure``). Raises ``LayoutError`` for a prefix ``_namespaces`` does not bind, and
+        what :class:`TextFile` refuses.
         """
-        super().__init__(row)
+        super().__init__(row, null_values=null_values)
         self._root = self._qualified(root)
         self._record_path = record
+        self._record = self._record_tag(record)
+
+    def _record_tag(self, record: str) -> str:
+        """Return the tag every record is, *record* qualified."""
+        return self._qualified(record)
 
     def _qualified(self, name: str) -> str:
-        """Return *name* as lxml writes it: ``{namespace}local`` for a prefixed ``prefix:local``."""
+        """Return *name* as lxml writes it: ``{namespace}local`` for a prefixed ``prefix:local``; raise LayoutError."""
         prefix, colon, local = name.rpartition(":")
-        return f"{{{self._namespaces[prefix]}}}{local}" if colon else name
+        if not colon:
+            return name
+        if prefix not in self._namespaces:
+            msg = f"the name {name!r} writes the prefix {prefix!r}, which the format's _namespaces do not bind"
+            raise LayoutError(msg)
+        return f"{{{self._namespaces[prefix]}}}{local}"
 
     def _document(self, body: bytes) -> etree._Element:
         """Parse *body* into its root element, hardened, and check the root is the format's, or raise ReadError."""
@@ -85,12 +100,20 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
 
     def _rows(self, root: etree._Element) -> list[list[str | None]]:
         """Return each record's cells under *root*, in order, one per label: the root's children, each its leaves."""
-        tag = self._qualified(self._record_path)
+        tag = self._record
+        if not _blank(root.text):
+            msg = f"the <{root.tag}> root holds the text {root.text.strip()[:200]!r} before its first record"
+            raise ReadError(msg)
         cells: list[list[str | None]] = []
         for n, record in enumerate(root, 1):
             tags = [child.tag for child in record]
             if record.tag != tag or tags != self._labels or any(len(child) for child in record):
                 msg = f"record {n} is <{record.tag}> of {tags!r}, not <{tag}> of leaf elements {self._labels!r}"
+                raise ReadError(msg)
+            if stray := next(
+                (text for text in (record.text, record.tail, *(c.tail for c in record)) if not _blank(text)), None
+            ):
+                msg = f"record {n} holds the text {stray.strip()[:200]!r} beside its leaf elements"
                 raise ReadError(msg)
             cells.append([child.text for child in record])
         return cells
@@ -116,37 +139,42 @@ class NestedXml[RowT: msgspec.Struct](XmlFile[RowT]):
     :meth:`_namespaces_of` where a format's bodies bind them otherwise (SEC's ``edgar:``, once ``http``).
     """
 
-    def __init__(self, row: type[RowT], *, root: str, record: str) -> None:
+    def __init__(self, row: type[RowT], *, root: str, record: str, null_values: Collection[str] = ()) -> None:
         """Lay out *row*'s records at the XPath *record* below the root element *root* (see the class).
 
         Raises ``LayoutError`` for a path that is no XPath, or what :class:`XmlFile` refuses.
         """
-        super().__init__(row, root=root, record=record)
-        self._compiled: dict[tuple[tuple[str, str], ...], tuple[etree.XPath, list[etree.XPath]]] = {}
-        self._paths(self._namespaces)
+        super().__init__(row, root=root, record=record, null_values=null_values)
+        self._compiled = self._paths(self._namespaces)
+
+    @typing.override
+    def _record_tag(self, record: str) -> str:
+        return record  # an XPath, compiled with the fields'
 
     def _namespaces_of(self, root: etree._Element) -> Mapping[str, str]:
-        """Return the prefixes a body whose root is *root* is read with: the format's ``_namespaces``."""
+        """Return the prefixes a body whose root is *root* is read with: the format's ``_namespaces``.
+
+        A format overriding it has its paths compiled again for each body whose prefixes differ from ``_namespaces``:
+        a reader keeps nothing of one read for the next.
+        """
         del root
         return self._namespaces
 
     def _paths(self, namespaces: Mapping[str, str]) -> tuple[etree.XPath, list[etree.XPath]]:
-        """Return the record's XPath and each field's, compiled once for *namespaces*."""
-        key = tuple(sorted(namespaces.items()))
-        if key not in self._compiled:
-            try:
-                self._compiled[key] = (
-                    etree.XPath(self._record_path, namespaces=namespaces, smart_strings=False),
-                    [etree.XPath(label, namespaces=namespaces, smart_strings=False) for label in self._labels],
-                )
-            except etree.XPathSyntaxError as e:
-                msg = f"the record path {self._record_path!r} or a field's Label {self._labels!r} is no XPath: {e}"
-                raise LayoutError(msg) from e
-        return self._compiled[key]
+        """Return the record's XPath and each field's, compiled for *namespaces*."""
+        try:
+            return (
+                etree.XPath(self._record_path, namespaces=namespaces, smart_strings=False),
+                [etree.XPath(label, namespaces=namespaces, smart_strings=False) for label in self._labels],
+            )
+        except etree.XPathSyntaxError as e:
+            msg = f"the record path {self._record_path!r} or a field's Label {self._labels!r} is no XPath: {e}"
+            raise LayoutError(msg) from e
 
     @typing.override
     def _rows(self, root: etree._Element) -> list[list[str | None]]:
-        record_path, field_paths = self._paths(self._namespaces_of(root))
+        namespaces = self._namespaces_of(root)
+        record_path, field_paths = self._compiled if namespaces == self._namespaces else self._paths(namespaces)
         try:
             found = record_path(root)
             records = [record for record in found if etree.iselement(record)] if isinstance(found, list) else []
@@ -160,6 +188,10 @@ class NestedXml[RowT: msgspec.Struct](XmlFile[RowT]):
         except etree.XPathEvalError as e:  # a prefix the namespaces do not bind
             msg = f"a path will not evaluate on the document: {e}"
             raise ReadError(msg) from e
+
+
+def _blank(text: str | None) -> bool:
+    return text is None or not text.strip()
 
 
 def _found(found: object, label: str, n: int) -> str | None:

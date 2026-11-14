@@ -282,9 +282,10 @@ class TestTableFrame:
         frame, _ = self._frame("<table><tr><th>A</th></tr><tr><td>-</td></tr></table>")
         assert frame.rows() == [("-",)]
 
-    def test_a_row_with_no_cells_is_no_row_and_keeps_the_others_numbers(self) -> None:
+    def test_a_row_with_no_cells_is_no_row_nor_numbered(self) -> None:
+        # Until 2026-11-14 the row after an empty <tr> was row 2 here and row 1 in the typing's errors.
         frame, numbers = self._frame("<table><tr><th>A</th></tr><tr></tr><tr><td>1</td></tr></table>")
-        assert (frame.rows(), numbers) == ([("1",)], [2])
+        assert (frame.rows(), numbers) == ([("1",)], [1])
 
     def test_header_only_table_yields_no_rows(self) -> None:
         frame, numbers = self._frame("<table><tr><th>A</th></tr></table>")
@@ -313,8 +314,8 @@ class TestTableFrame:
         ):
             self._frame("<table><tr><th>A</th><th>B</th></tr><tr><td>1</td></tr></table>")
 
-    def test_a_later_ragged_row_is_reported_by_its_place(self) -> None:
-        with pytest.raises(RaggedRowError, match=r"^row 3 of the table under header \['A'\] has 2 cells"):
+    def test_a_later_ragged_row_is_reported_by_its_place_among_the_rows_with_cells(self) -> None:
+        with pytest.raises(RaggedRowError, match=r"^row 2 of the table under header \['A'\] has 2 cells"):
             self._frame("<table><tr><th>A</th></tr><tr><td>1</td></tr><tr></tr><tr><td>2</td><td>x</td></tr></table>")
 
     def test_a_repeated_column_name_raises(self) -> None:
@@ -550,7 +551,7 @@ class TestAnHtmlFile:
             ({1: "4/24/2025"}, r"^the 'Date' cell '4/24/2025' is not a date written %m/%d/%Y: row 2$"),
             ({3: "high"}, r"^the 'Rate' cell 'high' is not a number: row 2$"),
             ({4: "yes"}, r"^the 'Held' cell 'yes' is not 'Y' or 'N': row 2$"),
-            ({2: " "}, r"^the \['name'\] columns have an empty cell, a short row or no column, .*: row 2$"),
+            ({2: " "}, r"^the \['Asset Name'\] columns have an empty cell, a short row or no column, .*: row 2$"),
         ],
         ids=["fraction", "unpadded date", "text in float", "another flag", "a blank required cell"],
     )
@@ -639,9 +640,9 @@ class TestAnHtmlFilesLinks:
     @pytest.mark.parametrize(
         ("cell", "message"),
         [
-            ("A", r"^the \['path'\] columns have an empty cell"),
+            ("A", r"^the \['File'\] columns have an empty cell"),
             ('<a href="/a">A</a><a href="/b">B</a>', r"^row 1: its 'File' cell holds 2 links, not one: 'AB'$"),
-            ("<a>A</a>", r"^the \['path'\] columns have an empty cell"),
+            ("<a>A</a>", r"^the \['File'\] columns have an empty cell"),
         ],
         ids=["no link", "two links", "no href"],
     )
