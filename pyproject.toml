@@ -248,6 +248,11 @@ locale = "en-us"
 ND = "ND"
 # The first letters of "café" before its escaped é (b"caf\xe9"), the cp1252 byte a test decodes.
 caf = "caf"
+# tests/test_real_files.py asserts recorded files' words as written: EIA's PADD regions and its "5-Year Maxium"
+# heading, and the Philadelphia Fed's SPFfor_Step columns.
+PADD = "PADD"
+Maxium = "Maxium"
+Ffor = "Ffor"
 
 [tool.typos.files]
 # The examples keep a recorded file's bytes, the publisher's own words and abbreviations (PADD, Infor, Consol).
