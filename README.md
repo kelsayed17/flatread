@@ -137,11 +137,12 @@ it holds the rest.
 
 **What strictness costs.** polars' CSV parser takes a number after a space or a tab (`" 5"`) and a float that
 underflows (`1e-400` as `0.0`), so a body where a number may be either (a space or tab outside its text cells, a
-`0.0` beside an `e-`) has its number columns read again, as text, and cast; any other is read once, as fast as 5.0
-read it. A sheet's number cell is told from text written as a number (`"2"`) or a token (`n/a`, `NA`) by its kind,
-which an `.xlsx` sheet's part writes and a third load reads elsewhere; and an `.xlsx` sheet's span is read from its
-cell references before calamine builds it. A sheet read costs about 1.2 times what it did in 5.0 (single-threaded,
-`benchmarks/test_speed.py`). An `.xlsb` or `.ods` is not read.
+`0.0` beside an `e-`) has its number columns read again, as text, and cast; any other is read once. A sheet's number
+cell is told from text written as a number (`"2"`) or a token (`n/a`, `NA`) by its kind, which an `.xlsx` sheet's
+part writes and a third load reads elsewhere; and an `.xlsx` sheet's span is read from its cell references before
+calamine builds it, a pass over the sheet's XML. In CodSpeed's simulation (`benchmarks/test_speed.py`) a CSV read
+costs about 1.1 times what it did in 5.0 and a sheet read about 1.25 times; a wide or row-by-row CSV read costs
+less. An `.xlsb` or `.ods` is not read.
 
 ## From 5.0
 
