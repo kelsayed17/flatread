@@ -1034,26 +1034,40 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         top = min([self._header_row, *(row - 1 for _, (row, _) in cells)])
         last = max([self._header_row + frame.height, *(row for _, (row, _) in cells)])
         ats = sorted({*(at for _, at in numbers), *(at for _, (_, at) in cells)})
-        unread = self._no_numbers(reader, ats, top, last)
-        for column, at in numbers:
-            held = frame[column.field].is_not_null() & unread[str(at)].slice(self._header_row - top, frame.height)
-            _refuse(text[column.field].alias(column.label or column.field), held, "number cell", self._row_one)
-        for column, (row, at) in cells:
-            cell = _cell_at(grid, row - 1, at).cast(pl.String).str.strip_chars(" ")[0]
-            if cell not in {None, "", *self._null_values} and unread[str(at)][row - 1 - top]:
-                msg = f"the {self._sheet!r} sheet's cell {column.label!r} {cell!r} is not a number cell"
-                raise ReadError(msg)
 
-    def _no_numbers(self, reader: fastexcel.ExcelReader, ats: list[int], top: int, last: int) -> pl.DataFrame:
+        def held(unread: pl.DataFrame) -> Iterator[tuple[Column, pl.Series | str]]:
+            """Yield each number column and its cells holding a value *unread* finds no number, then each such cell."""
+            for column, at in numbers:
+                values = frame[column.field].is_not_null()
+                yield column, values & unread[str(at)].slice(self._header_row - top, frame.height)
+            for column, (row, at) in cells:
+                cell = _cell_at(grid, row - 1, at).cast(pl.String).str.strip_chars(" ")[0]
+                if cell not in {None, "", *self._null_values} and unread[str(at)][row - 1 - top]:
+                    yield column, str(cell)
+
+        # A part may write a reference twice, and calamine keeps the last: a cell its part finds written as no number,
+        # and holding a value, is no number only if the boolean load says so too.
+        unread = self._no_numbers(reader, ats, top, last, from_part=True)
+        if any(isinstance(wrong, str) or wrong.any() for _, wrong in held(unread)):
+            unread = self._no_numbers(reader, ats, top, last, from_part=False)
+        for column, wrong in held(unread):
+            if isinstance(wrong, str):
+                msg = f"the {self._sheet!r} sheet's cell {column.label!r} {wrong!r} is not a number cell"
+                raise ReadError(msg)
+            _refuse(text[column.field].alias(column.label or column.field), wrong, "number cell", self._row_one)
+
+    def _no_numbers(
+        self, reader: fastexcel.ExcelReader, ats: list[int], top: int, last: int, *, from_part: bool
+    ) -> pl.DataFrame:
         """Return whether each cell of sheet columns *ats* (``A`` is 0) is no number cell, rows *top* + 1 to *last*.
 
-        A column per one of *ats*, named by it (``"0"``), a row per sheet row. Where an ``.xlsx`` sheet's part places
-        each cell by its own reference, the cells' kinds are read from it (:meth:`_BoundedXlsx.unnumbered`); elsewhere
-        the columns are loaded once more, as booleans: fastexcel reads a number cell so (``0`` is false), a text cell
-        as none.
+        A column per one of *ats*, named by it (``"0"``), a row per sheet row. *from_part*, where an ``.xlsx`` sheet's
+        part places each cell by its own reference: a cell is no number where any of its writings in the part says so
+        (:meth:`_BoundedXlsx.unnumbered`). Otherwise the columns are loaded once more, as booleans: fastexcel reads a
+        number cell so (``0`` is false), a text cell as none.
         """
         height = last - top
-        found = reader.unnumbered(self._sheet, ats) if isinstance(reader, _BoundedXlsx) else None
+        found = reader.unnumbered(self._sheet, ats) if from_part and isinstance(reader, _BoundedXlsx) else None
         if found is not None:
             rows = pl.int_range(top + 1, last + 1, dtype=pl.Int64)
             return pl.select(

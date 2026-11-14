@@ -651,7 +651,7 @@ def test_a_number_fields_text_cell_is_told_from_the_sheets_part(cell: str, monke
     calls = _loads(monkeypatch)
     with pytest.raises(ReadError, match=r"the 'V' cell '2' is not a number cell: row 2"):
         SheetFile(_Measure, sheet="S", null_values=["."]).rows(_parts(_data(_V1, f'<row r="2">{cell}</row>')))
-    assert len(calls) == 2  # the text and the typed loads: the cell's kind is the part's, not a third load's
+    assert len(calls) == 3  # the text and typed loads, then the boolean load the part's find sends a refusal to
 
 
 @pytest.mark.parametrize(
@@ -665,6 +665,27 @@ def test_a_number_fields_text_cell_is_told_from_the_sheets_part(cell: str, monke
 def test_a_number_cell_is_told_from_the_sheets_part(cell: str) -> None:
     sheet = _data(_V1, f'<row r="2">{cell}</row>')
     assert SheetFile(_Measure, sheet="S", null_values=["."]).rows(_parts(sheet)) == [_Measure(2.0)]
+
+
+@pytest.mark.parametrize(
+    ("first", "last", "reads"),
+    [
+        ('<c r="A2" t="str"><v>2</v></c>', '<c r="A2"><v>2.5</v></c>', [_Measure(2.5)]),
+        ('<c r="A2"><v>2.5</v></c>', '<c r="A2" t="str"><v>2</v></c>', None),
+    ],
+    ids=["text, then a number", "a number, then text"],
+)
+def test_a_cell_written_twice_is_its_last_writing_as_calamine_keeps(
+    first: str, last: str, reads: list[_Measure] | None
+) -> None:
+    """The part's kinds find a cell any of whose writings is text; a load says which calamine kept."""
+    body = _parts(_data(_V1, f'<row r="2">{first}</row>', f'<row r="2">{last}</row>'))
+    reader = SheetFile(_Measure, sheet="S", null_values=["."])
+    if reads is None:
+        with pytest.raises(ReadError, match=r"the 'V' cell '2' is not a number cell: row 2"):
+            reader.rows(body)
+    else:
+        assert reader.rows(body) == reads
 
 
 def test_a_zip_that_will_not_open_is_refused() -> None:
