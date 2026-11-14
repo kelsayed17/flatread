@@ -400,23 +400,26 @@ class File[RowT: msgspec.Struct](abc.ABC):
         """Refuse a float in *frame* that is not finite (unless the format writes them) or a null in *required*.
 
         With *among*, a mask of *frame*'s rows, only those rows are checked (a long table's records that hold values).
+        One pass says whether any column fails; only then is each failing column's first row found.
         """
-        checked = pl.repeat(value=True, n=frame.height, eager=True) if among is None else among
-        floats = [name for name, dtype in frame.schema.items() if dtype == pl.Float64]
-        infinite = {
-            name: at
-            for name in floats
-            if self._finite and (at := _first(~frame[name].is_finite() & checked, self._row_one)) is not None
-        }
-        if infinite:
-            msg = (
-                f"the {list(infinite)} columns hold NaN or an infinity, which is no number here:"
-                f" row {min(infinite.values())}"
-            )
+        checked = pl.lit(value=True) if among is None else pl.lit(among)
+        floats = [name for name, dtype in frame.schema.items() if dtype == pl.Float64] if self._finite else []
+        tests = [
+            *(("infinite", name, ~pl.col(name).is_finite() & checked) for name in floats),
+            *(("empty", name, pl.col(name).is_null() & checked) for name in required),
+        ]
+        if not tests:
+            return
+        anywhere = frame.select(test.any().alias(str(at)) for at, (_, _, test) in enumerate(tests)).row(0)
+        failed: dict[str, dict[str, int]] = {"infinite": {}, "empty": {}}
+        for (kind, name, test), failing in zip(tests, anywhere, strict=True):
+            if failing and (at := _first(frame.select(test).to_series(), self._row_one)) is not None:
+                failed[kind][name] = at
+        if infinite := failed["infinite"]:
+            row = min(infinite.values())
+            msg = f"the {list(infinite)} columns hold NaN or an infinity, which is no number here: row {row}"
             raise ReadError(msg)
-        if empty := {
-            name: at for name in required if (at := _first(frame[name].is_null() & checked, self._row_one)) is not None
-        }:
+        if empty := failed["empty"]:
             msg = (
                 f"the {list(empty)} columns have an empty cell, a short row or no column, and every cell holds a value:"
                 f" row {min(empty.values())}"
@@ -425,8 +428,9 @@ class File[RowT: msgspec.Struct](abc.ABC):
 
     def rows(self, body: bytes) -> list[RowT]:
         """Read *body* into typed rows: :meth:`frame`'s rows, one struct a row."""
-        # By position: frame() checked its columns are the struct's fields, in order, already typed.
-        return [self._row(*row) for row in self.frame(body).iter_rows()]
+        # By position: frame() checked its columns are the struct's fields, in order, already typed. A column a list
+        # each, zipped by map in C: about twice as fast as polars' iter_rows.
+        return list(map(self._row, *(column.to_list() for column in self.frame(body).iter_columns()), strict=True))
 
 
 #: A number written with thousands separators: a group of one to three digits, then groups of three.
