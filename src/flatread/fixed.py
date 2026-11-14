@@ -65,7 +65,9 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         self._spanned = spanned
         self._width = self._spans[-1].end
         # The places between columns, which hold only spaces.
-        self._gaps = [(end, span.start) for span, end in zip(self._spans, ends[:-1], strict=True) if span.start > end]
+        self._between = [
+            (end, span.start) for span, end in zip(self._spans, ends[:-1], strict=True) if span.start > end
+        ]
         self._final_line_ending = final_line_ending
 
     @typing.override
@@ -94,7 +96,7 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         line = pl.col("line")
         bad = pl.any_horizontal(
             line.str.len_chars() != self._width,
-            *(line.str.slice(start, end - start).str.strip_chars(" ") != "" for start, end in self._gaps),
+            *(line.str.slice(start, end - start).str.strip_chars(" ") != "" for start, end in self._between),
         )
         # A row is numbered from 1 under the header, which is row 0.
         if (at := _first(lines.to_frame("line").select(bad).to_series(), 1 - header)) is not None:

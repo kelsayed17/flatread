@@ -385,13 +385,13 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
 
     A field the header lacks reads as null, and a label it writes that no field has raises. A field's ``Label`` may
     name *alternatives*, other words a header writes it in (``Label("file_number", alternatives=("file_no",))``). A
-    format subclasses it and names :attr:`_carried`, the labels every header names, and a format whose headers write
-    its labels another way folds each header cell with :meth:`_heading` (SEC's, in any case).
+    format subclasses it and names :attr:`_required_labels`, the labels every header names, and a format whose headers
+    write its labels another way folds each header cell with :meth:`_heading` (SEC's, in any case).
     """
 
     _by_name = True
     #: The labels every header names, each a field's own label; a format's subclass (or its constructor) sets them.
-    _carried: Collection[str] = ()
+    _required_labels: Collection[str] = ()
 
     def __init__(
         self,
@@ -408,8 +408,8 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         if len(self._labeled) != len(words):
             msg = f"two fields of {row.__name__} share a label: {sorted(word for word, _ in words)}"
             raise LayoutError(msg)
-        if stray := set(self._carried) - self._names.keys():
-            msg = f"the carried labels {sorted(stray)} are no field of {row.__name__}'s labels"
+        if stray := set(self._required_labels) - self._names.keys():
+            msg = f"the required labels {sorted(stray)} are no field of {row.__name__}'s labels"
             raise LayoutError(msg)
 
     def _heading(self, cell: str) -> str:
@@ -433,7 +433,7 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         if len(set(named.values())) != len(header):
             msg = f"the header {header!r} names a column twice"
             raise ReadError(msg)
-        if missing := [label for label in self._carried if label not in named.values()]:
+        if missing := [label for label in self._required_labels if label not in named.values()]:
             msg = f"the header {header!r} lacks {missing}, which every one names"
             raise ReadError(msg)
         self._check(body)

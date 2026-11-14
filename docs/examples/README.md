@@ -118,9 +118,9 @@ Date,VIX Put/Call Ratio,VIX Put Volume,VIX Call Volume,Total VIX Options Volume
 2/27/2006,0.01,71,6996,7067
 ```
 
-### `NamedCsv._carried`
+### `NamedCsv._required_labels`
 
-[`named_csv-carried.csv`](named_csv-carried.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[sfos_202601].yaml`, interaction 0. Read by [`NamedCsv._carried`](../../src/flatread/delimited.py), in federal_reserve `_Sfos`.
+[`named_csv-carried.csv`](named_csv-carried.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[sfos_202601].yaml`, interaction 0. Read by [`NamedCsv._required_labels`](../../src/flatread/delimited.py), in federal_reserve `_Sfos`.
 
 The January 2026 survey's header is only the seven carried labels; `agg_desc_2`, `agg_desc_3`, `dom` and `fore` are missing, so they read as null.
 
@@ -1021,9 +1021,9 @@ CIK|Company Name|Form Type|Date Filed|Filename
 94673|STORAGE TECHNOLOGY CORP|CERTNYS|1993-02-24|edgar/data/94673/9999999997-05-037760.txt
 ```
 
-### `ReportFile._end`
+### `ReportFile._last_line`
 
-[`report_file-end.txt`](report_file-end.txt), recorded in `tests/occ/cassettes/test_recorded/test_endpoint[flex_reports_open_interest_equity].yaml` interaction 0. Read by [`ReportFile._end`](../../src/flatread/reports.py), in occ `_FlexOpenInterest` (via `_PrintReport`).
+[`report_file-end.txt`](report_file-end.txt), recorded in `tests/occ/cassettes/test_recorded/test_endpoint[flex_reports_open_interest_equity].yaml` interaction 0. Read by [`ReportFile._last_line`](../../src/flatread/reports.py), in occ `_FlexOpenInterest` (via `_PrintReport`).
 
 the report's last non-blank line `***** END OF REPORT *****` after class and grand totals (a cut file would lack it); its head kept too (lines 1-14, 26553-26563)
 
@@ -1154,11 +1154,11 @@ an adviser roster (zipped xlsx): every header cell (SEC Region, Firm Type, ...) 
 4: HQ | 159108 | 802-73118 | ERA | AZINI CAPITAL | AZINI CAPITAL PARTNERS LLP | 29 FARM STREET | LONDON | LONDON |  | UNITED KINGDOM | W1J 5RL
 ```
 
-### `FoundTable._nulls`
+### `FoundTable(null_values=...)`
 
-[`found_table-nulls.csv`](found_table-nulls.csv), recorded in `tests/sec/cassettes/test_recorded/test_body[file_bdc_report_2020].yaml` interaction 0. Read by [`FoundTable._nulls`](../../src/flatread/found.py), in sec `_Export` (`_CsvExport`).
+[`found_table-nulls.csv`](found_table-nulls.csv), recorded in `tests/sec/cassettes/test_recorded/test_body[file_bdc_report_2020].yaml` interaction 0. Read by [`FoundTable(null_values=...)`](../../src/flatread/found.py), in sec `_Export` (`_CsvExport`).
 
-SEC's `[NULL]` in Address_2, read as no value only with `_nulls`
+SEC's `[NULL]` in Address_2, read as no value only with `null_values`
 
 ```
 File_No,CIK,Registrant_Name,Address_1,Address_2,City,State,Zip_Code,Filing Date,Filing Type
@@ -1180,9 +1180,9 @@ File_No,CIK,Registrant_Name,Address_1,Address_2,City,State,Zip_Code,Filing Date,
 3, 814-00161                 , 0000941661 , ALLIED CAPITAL FINANCIAL CORP                                                                                                                          ," 1919 PENNSYLVANIA AVE., NW               ", NULL                                     , WASHINGTON                     , DC    ,20006, 40-17F2    , 03/28/03 ,
 ```
 
-### `FoundTable._section`
+### `FoundTable._section_prefix`
 
-[`found_table-section.csv`](found_table-section.csv), recorded in `tests/sec/cassettes/test_recorded/test_body[file_foia_log_2023_12].yaml` interaction 0. Read by [`FoundTable._section`](../../src/flatread/found.py), in sec `_FoiaLog`.
+[`found_table-section.csv`](found_table-section.csv), recorded in `tests/sec/cassettes/test_recorded/test_body[file_foia_log_2023_12].yaml` interaction 0. Read by [`FoundTable._section_prefix`](../../src/flatread/found.py), in sec `_FoiaLog`.
 
 `Request Type: Consultation,,,` section lines stating `request_type` for the rows under them, and a section's `Total No of Requests ...` line
 
@@ -1256,11 +1256,11 @@ a clean `File / Format / Size` table: header row, one row, the link's href a fie
   </table>
 ```
 
-### `HtmlFile._table`
+### `HtmlFile._table_selector`
 
-[`html_file-table.html`](html_file-table.html), recorded in fixture `tests/farside/pages/zec.html`. Read by [`HtmlFile._table`](../../src/flatread/pages.py), in farside `_FlowTable`.
+[`html_file-table.html`](html_file-table.html), recorded in fixture `tests/farside/pages/zec.html`. Read by [`HtmlFile._table_selector`](../../src/flatread/pages.py), in farside `_FlowTable`.
 
-the page's `table.etf` (three header rows, a day's row) among other tables (`table.tfooter`), which `_table` leaves out
+the page's `table.etf` (three header rows, a day's row) among other tables (`table.tfooter`), which `_table_selector` leaves out
 
 ```
 <table class="etf">
@@ -1329,9 +1329,9 @@ records found by selector (`tbody tr`), each field by a selector inside its reco
 </table>
 ```
 
-### `HtmlRecords._heading` / `_stated`
+### `HtmlRecords._heading_selector` / `_heading_pattern`
 
-[`html_records-heading.html`](html_records-heading.html), recorded in `tests/federal_reserve/cassettes/test_recorded/test_fomc_calendar.yaml` interaction 0. Read by [`HtmlRecords._heading`](../../src/flatread/pages.py), in federal_reserve `_FomcCalendar` (also cftc `_SwapsReportsArchive`).
+[`html_records-heading.html`](html_records-heading.html), recorded in `tests/federal_reserve/cassettes/test_recorded/test_fomc_calendar.yaml` interaction 0. Read by [`HtmlRecords._heading_selector`](../../src/flatread/pages.py), in federal_reserve `_FomcCalendar` (also cftc `_SwapsReportsArchive`).
 
 `div.panel-heading` `2026 FOMC Meetings` / `2025 FOMC Meetings` heading the `div.fomc-meeting` records below, `year` stated from each; one meeting per year, blank lines and one meeting's link columns dropped
 

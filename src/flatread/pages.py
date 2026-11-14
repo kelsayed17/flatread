@@ -365,7 +365,7 @@ class Grid(typing.NamedTuple):
 
 
 class HtmlFile[RowT: msgspec.Struct](_HtmlText[RowT]):
-    """A clean HTML table: the page's one table ``_table`` finds, its first row the row struct's labels, a row a record.
+    """A clean HTML table: the one table ``_table_selector`` finds, its first row the struct's labels, a row a record.
 
     Each row is read as :func:`table_cells` reads it, a ``<tr>`` with no cells no row, each cell its text
     (:func:`cell_text`) or, for a :class:`~flatread.fields.Link` field, its link's ``href``, and typed as
@@ -380,11 +380,11 @@ class HtmlFile[RowT: msgspec.Struct](_HtmlText[RowT]):
     """
 
     #: The CSS selector that finds the page's table; a format's subclass narrows it (``table.etf``).
-    _table: ClassVar[str] = "table"
+    _table_selector: ClassVar[str] = "table"
 
     def _tables(self, doc: Element) -> list[Element]:
-        """Return the page's tables for this file: every one ``_table`` finds, unless a format finds them otherwise."""
-        return list(doc.css(self._table))
+        """Return the page's tables for this file: every one ``_table_selector`` finds, unless a format overrides it."""
+        return list(doc.css(self._table_selector))
 
     def _grid(self, table: Element) -> Grid:
         """Return *table* as its header's labels and its rows' cells: its first row the header, the rest its rows."""
@@ -423,49 +423,57 @@ class HtmlFile[RowT: msgspec.Struct](_HtmlText[RowT]):
 
 
 class HtmlRecords[RowT: msgspec.Struct](_HtmlText[RowT]):
-    """Records that are elements, not table rows: each element ``_record`` finds, a field the one its ``Label`` finds.
+    """Records that are elements, not table rows: each one ``_record_selector`` finds, a field per ``Label`` inside.
 
     A field's ``Label`` is a CSS selector inside the record (``".fomc-meeting__month"``, ``'a[href$=".pdf" i]'``),
     ``""`` the record itself, and it must find exactly one element (or none, for a field that admits ``None``: no
     value), read as its text or, for a :class:`~flatread.fields.Link` field, its link's ``href``. A format
     finds its records otherwise: :meth:`_is_record` leaves some out, and :meth:`_records` checks the page.
 
-    A format whose records sit under headings (a year's panel) names them: each element ``_heading`` finds before a
-    record heads it when its text fullmatches ``_stated`` (another is no heading: a ``p`` of prose), each named group
-    the text of the field of its name, on every record it heads; such a field names no ``Label``. A record under no
-    such heading, or a heading that heads no record, raises.
+    A format whose records sit under headings (a year's panel) names them: each element ``_heading_selector`` finds
+    before a record heads it when its text fullmatches ``_heading_pattern`` (another is no heading: a ``p`` of prose),
+    each named group the text of the field of its name, on every record it heads; such a field names no ``Label``. A
+    record under no such heading, or a heading that heads no record, raises.
     """
 
     #: The CSS selector that finds each record.
-    _record: ClassVar[str]
+    _record_selector: ClassVar[str]
     #: The CSS selector that finds the headings above the records, if any.
-    _heading: ClassVar[str | None] = None
+    _heading_selector: ClassVar[str | None] = None
     #: What a heading's text fullmatches: each named group the field it states.
-    _stated: ClassVar[re.Pattern[str]] = re.compile("")
+    _heading_pattern: ClassVar[re.Pattern[str]] = re.compile("")
 
     @typing.override
     def _label(self, name: str) -> str | None:
-        return name if self._heading is not None and name in self._stated.groupindex else super()._label(name)
+        return (
+            name
+            if self._heading_selector is not None and name in self._heading_pattern.groupindex
+            else super()._label(name)
+        )
 
     def _records(self, doc: Element) -> list[Element]:
-        """Return every element ``_record`` finds, in page order: a format checks the page here, keeping them all."""
-        return list(doc.css(self._record))
+        """Return every element ``_record_selector`` finds, in page order: a format checks the page here."""
+        return list(doc.css(self._record_selector))
 
     def _is_record(self, element: Element) -> bool:
-        """Return whether *element*, which ``_record`` finds, is a record: each is, unless a format leaves some out."""
+        """Return whether *element*, which ``_record_selector`` finds, is a record: yes, unless a format says no."""
         del element
         return True
 
     def _headed(self, doc: Element, found: int) -> list[dict[str, str | None] | None]:
-        """Return what each of the *found* elements ``_record`` finds is stated by its heading (``None``: no heading).
+        """Return what each of the *found* records is stated by its heading (``None``: it sits under no heading).
 
         Scrapling's elements have no identity to compare, so each stating heading counts the elements that follow it
         (an XPath, in C): the last heading with *n* after it heads every element from the *n*-th from the end.
         """
-        if self._heading is None:
+        if self._heading_selector is None:
             return [{} for _ in range(found)]
-        following = HTMLTranslator().css_to_xpath(self._record, prefix="following::")
-        stating = [(h, match) for h in doc.css(self._heading) if (match := self._stated.fullmatch(cell_text(h)))]
+        following = HTMLTranslator().css_to_xpath(self._record_selector, prefix="following::")
+        stating = [
+            (h, match)
+            for h in doc.css(self._heading_selector)
+            if (match := self._heading_pattern.fullmatch(cell_text(h)))
+        ]
         after = [len(heading.xpath(following)) for heading, _ in stating]
         headed: list[dict[str, str | None] | None] = [None] * found
         for (heading, match), count, then in zip(stating, after, [*after[1:], 0][: len(after)], strict=True):
@@ -490,11 +498,11 @@ class HtmlRecords[RowT: msgspec.Struct](_HtmlText[RowT]):
         read: list[list[str | None]] = []
         for number, (record, stated) in enumerate(records, 1):
             if stated is None:
-                msg = f"record {number} sits under no heading matching {self._stated.pattern!r}"
+                msg = f"record {number} sits under no heading matching {self._heading_pattern.pattern!r}"
                 raise ReadError(msg)
             values: list[str | None] = []
             for column in self._columns:
-                if column.field in self._stated.groupindex and self._heading is not None:
+                if column.field in self._heading_pattern.groupindex and self._heading_selector is not None:
                     values.append(stated[column.field])
                     continue
                 under = self._under[column.field]

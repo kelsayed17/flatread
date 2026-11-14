@@ -28,11 +28,12 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
     label, which is that field's column, a field it lacks reading as null. A cell no field's words name, two cells
     naming one field, a line wider than the header, or a value under a blank header cell (unless :attr:`_open`) raises,
     naming the line. A line of nothing but spaces and ``-`` rules, whether a blank one or a rule, is skipped; a cell
-    the format lists in :attr:`_nulls` is no value, an empty one too; and a file with no rows is empty. A first column
+    the format lists in *null_values* is no value, an empty one too; and a file with no rows is empty. A first column
     with no header cell whose cells are whole numbers is the export's row count when the format says so
     (:attr:`_row_count`).
-    A line that opens a section (:attr:`_section`, then its text) states the :attr:`_stated` field for the rows below.
-    A format subclasses it with :meth:`_lines`, the file's lines of cells (:class:`FoundCsv`, :class:`FoundSheet`).
+    A line that opens a section (:attr:`_section_prefix`, then its text) states the :attr:`_section_field` field for the
+    rows below. A format subclasses it with :meth:`_lines`, the file's lines of cells (:class:`FoundCsv`,
+    :class:`FoundSheet`).
     """
 
     _by_name = True
@@ -40,24 +41,27 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
     #: Whether every header cell names a column of its own, as written (an adviser roster's, read long): a blank one
     #: names none, and what is under it is not the file's; a field's words are then only what finds the header.
     _open: typing.ClassVar[bool] = False
-    #: A line that opens a section (``Request Type: FOIA``), its text after this stating :attr:`_stated` below it.
-    _section: typing.ClassVar[str] = ""
-    _stated: typing.ClassVar[str] = ""
-    #: The cells' words for no value, besides an empty one; a field kept as written has none.
-    _nulls: typing.ClassVar[Collection[str]] = ()
+    #: A line that opens a section (``Request Type: FOIA``), its text after this stating :attr:`_section_field` below
+    #: it.
+    _section_prefix: typing.ClassVar[str] = ""
+    _section_field: typing.ClassVar[str] = ""
     #: Whether a first column with no header cell, its cells whole numbers, is the export's row count, and no data.
     _row_count: typing.ClassVar[bool] = False
 
-    def __init__(self, row: type[RowT], *, key: str) -> None:
-        """Lay out an export of *row*, whose header is the line naming its field *key* (refused if no field is)."""
+    def __init__(self, row: type[RowT], *, key: str, null_values: Collection[str] = ()) -> None:
+        """Lay out an export of *row*, whose header is the line naming its field *key* (refused if no field is).
+
+        *null_values* are the cells' words for no value, besides an empty cell; a field kept as written has none.
+        """
         super().__init__(row)
+        self._null_values = list(null_values)
         (key_column,) = (column for column in self._columns if column.field == key)
         self._key_field = key
         self._key_words = {key_column.label, *key_column.aliases}
         words = [
             (word, column.label)
             for column in self._columns
-            if not (self._section and column.field == self._stated)
+            if not (self._section_prefix and column.field == self._section_field)
             for word in (column.label, *column.aliases)
         ]
         self._words = dict(words)
@@ -77,7 +81,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
     def _clean(self, cells: pl.Series, column: _Column) -> pl.Series:
         if column.field in self._as_written:
             return cells
-        return pl.select(pl.when(~cells.str.strip_chars().is_in(list(self._nulls))).then(cells)).to_series()
+        return pl.select(pl.when(~cells.str.strip_chars().is_in(self._null_values)).then(cells)).to_series()
 
     @abc.abstractmethod
     def _lines(self, body: bytes) -> list[list[str]]:
@@ -111,8 +115,8 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         for number, line in enumerate(lines[at + 1 :], start=at + 2):
             if self._blank(line):
                 continue
-            if self._section and line[0].startswith(self._section) and not "".join(line[1:]).strip():
-                section = line[0].removeprefix(self._section).strip()
+            if self._section_prefix and line[0].startswith(self._section_prefix) and not "".join(line[1:]).strip():
+                section = line[0].removeprefix(self._section_prefix).strip()
                 continue
             # An unnamed first column of whole numbers is the export's row count (2013's BDC file), and not data.
             under = [cell for cell, name in zip(line, names, strict=False) if name is None]
@@ -124,7 +128,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
             record: dict[str, str | None] = {
                 name: cell for name, cell in zip(names, line, strict=False) if name is not None
             }
-            records.append(record | {self._stated: section} if self._section else record)
+            records.append(record | {self._section_field: section} if self._section_prefix else record)
         columns = named if self._open else self._labels
         return pl.DataFrame(
             [[record.get(label) for label in columns] for record in records],

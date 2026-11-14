@@ -66,7 +66,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
         """
         super().__init__(row)
         self._root = self._qualified(root)
-        self._record = record
+        self._record_path = record
 
     def _qualified(self, name: str) -> str:
         """Return *name* as lxml writes it: ``{namespace}local`` for a prefixed ``prefix:local``."""
@@ -85,7 +85,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
 
     def _rows(self, root: etree._Element) -> list[list[str | None]]:
         """Return each record's cells under *root*, in order, one per label: the root's children, each its leaves."""
-        tag = self._qualified(self._record)
+        tag = self._qualified(self._record_path)
         cells: list[list[str | None]] = []
         for n, record in enumerate(root, 1):
             tags = [child.tag for child in record]
@@ -100,7 +100,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
         root = self._document(body)
         cells = self._rows(root)
         if not cells:
-            msg = f"the <{self._root}> root holds no <{self._record}> record"
+            msg = f"the <{self._root}> root holds no <{self._record_path}> record"
             raise ReadError(msg)
         return pl.DataFrame(cells, schema=dict.fromkeys(self._labels, pl.String), orient="row")
 
@@ -136,11 +136,11 @@ class NestedXml[RowT: msgspec.Struct](XmlFile[RowT]):
         if key not in self._compiled:
             try:
                 self._compiled[key] = (
-                    etree.XPath(self._record, namespaces=namespaces, smart_strings=False),
+                    etree.XPath(self._record_path, namespaces=namespaces, smart_strings=False),
                     [etree.XPath(label, namespaces=namespaces, smart_strings=False) for label in self._labels],
                 )
             except etree.XPathSyntaxError as e:
-                msg = f"the record path {self._record!r} or a field's Label {self._labels!r} is no XPath: {e}"
+                msg = f"the record path {self._record_path!r} or a field's Label {self._labels!r} is no XPath: {e}"
                 raise LayoutError(msg) from e
         return self._compiled[key]
 
@@ -151,7 +151,7 @@ class NestedXml[RowT: msgspec.Struct](XmlFile[RowT]):
             found = record_path(root)
             records = [record for record in found if etree.iselement(record)] if isinstance(found, list) else []
             if not isinstance(found, list) or len(records) != len(found):
-                msg = f"the record path {self._record!r} finds {found!r}, not elements"
+                msg = f"the record path {self._record_path!r} finds {found!r}, not elements"
                 raise ReadError(msg)
             return [
                 [_found(path(record), label, n) for path, label in zip(field_paths, self._labels, strict=True)]

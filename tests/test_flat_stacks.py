@@ -189,7 +189,7 @@ class _Amount(msgspec.Struct, frozen=True, gc=False):
 class _Amounts(Thousands[_Amount], LongReport[_Amount]):
     """A block of years over each holder's amounts, grouped in thousands, read long."""
 
-    _key = "year"
+    _key_field = "year"
     _line = re.compile(r"(?P<holder>[A-Z][a-z]+) +(?P<value>[-0-9., ]+?) *")
     _framing = (re.compile(r"HOLDER +(?P<year>\S.*?) *"),)
 

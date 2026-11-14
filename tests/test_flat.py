@@ -396,7 +396,7 @@ class _Renamed(msgspec.Struct, frozen=True, gc=False):
 
 
 class _Named(NamedCsv[_Renamed]):
-    _carried = ("NAME",)
+    _required_labels = ("NAME",)
 
 
 class _Folded(_Named):
@@ -444,17 +444,17 @@ class TestANamedCsv:
         with pytest.raises(ReadError, match=message):
             _Named(_Renamed).rows(body)
 
-    def test_a_label_two_fields_share_or_a_carried_label_no_field_has_is_a_layout_bug(self) -> None:
+    def test_a_label_two_fields_share_or_a_required_label_no_field_has_is_a_layout_bug(self) -> None:
         class Shared(msgspec.Struct, frozen=True, gc=False):
             name: Annotated[str, Label("NAME", alternatives=("NOTE",))]
             note: Annotated[str, Label("NOTE")]
 
         class Stray(NamedCsv[_Renamed]):
-            _carried = ("RATE",)
+            _required_labels = ("RATE",)
 
         with pytest.raises(LayoutError, match=r"^two fields of Shared share a label"):
             NamedCsv(Shared)
-        with pytest.raises(LayoutError, match=r"^the carried labels \['RATE'\] are no field of _Renamed's labels$"):
+        with pytest.raises(LayoutError, match=r"^the required labels \['RATE'\] are no field of _Renamed's labels$"):
             Stray(_Renamed)
 
     def test_a_reader_that_does_not_read_a_header_by_name_refuses_alternatives(self) -> None:
@@ -2826,7 +2826,7 @@ class _Sales(ReportFile[_Sale]):
     """A printed sales report: a title stating its day, a two-line header, regions over their stores, page breaks."""
 
     _line = re.compile(r" (?P<store>\S+(?: \S+)*) +(?P<units>-?[0-9][0-9,]*) +(?P<price>\S+) *")
-    _header = (re.compile(r" STORE +UNITS +UNIT *"), re.compile(r" +SOLD +PRICE *"))
+    _header_lines = (re.compile(r" STORE +UNITS +UNIT *"), re.compile(r" +SOLD +PRICE *"))
     _framing = (
         re.compile(r"SALES REPORT +DAY (?P<day>\d\d/\d\d/\d{4}) +PAGE +\d+"),
         re.compile(r"REGION (?P<region>[A-Z]+)"),
@@ -2851,7 +2851,7 @@ REGION SOUTH
 
 
 class _Ended(_Sales):
-    _end = re.compile(r" +\*+ END OF REPORT \*+ *")
+    _last_line = re.compile(r" +\*+ END OF REPORT \*+ *")
 
 
 class _GroupedSales(Thousands[_Sale], _Sales):
@@ -2866,7 +2866,7 @@ class _MaybeEmptySales(_Sales):
 class _CountedSales(_Sales):
     """Its last line counts its stores, checked against the rows read."""
 
-    _end = re.compile(r"STORES +(\d+)")
+    _last_line = re.compile(r"STORES +(\d+)")
 
     @typing.override
     def _check_lines(self, read: typing.Sequence[tuple[int, re.Match[str]]]) -> None:
@@ -2953,7 +2953,7 @@ class _Shares(msgspec.Struct, frozen=True, gc=False):
 class _Held(LongReport[_Shares]):
     """A block a year: its months over a holder's value and share for each."""
 
-    _key = "month"
+    _key_field = "month"
     _line = re.compile(r"(?P<holder>[A-Z][a-z]+) +(?P<value>[-0-9. ]+?) *")
     _framing = (re.compile(r"HOLDER +(?P<month>\S.*?) *"),)
 
@@ -3891,9 +3891,8 @@ class _Found(msgspec.Struct, frozen=True, gc=False):
 
 
 class _FoundCsv(FoundCsv[_Found]):
-    _nulls = ("NULL",)
-    _section = "Section:"
-    _stated = "section"
+    _section_prefix = "Section:"
+    _section_field = "section"
     _as_written = ("section",)
 
     @typing.override
@@ -3907,7 +3906,7 @@ class _CountedCsv(_FoundCsv):
 
 class TestAFoundCsv:
     def _rows(self, body: bytes) -> list[_Found]:
-        return _FoundCsv(_Found, key="year").rows(body)
+        return _FoundCsv(_Found, key="year", null_values=("NULL",)).rows(body)
 
     def test_the_header_is_found_below_any_title_lines_and_blank_and_rule_lines_are_skipped(self) -> None:
         body = b"Title,,\nAs of,2026,\n\nYEAR,Kind,Note\n-----,---,\n,,\n2026,a,x\n   \n2025,NULL,\n"
@@ -3929,7 +3928,7 @@ class TestAFoundCsv:
                 self._rows(body)
 
     def test_a_leading_unlabeled_column_of_whole_numbers_is_a_row_count_only_where_the_format_says_so(self) -> None:
-        counted = _CountedCsv(_Found, key="year")
+        counted = _CountedCsv(_Found, key="year", null_values=("NULL",))
         assert counted.rows(b",Year,Note\n1,2026,x\n") == [_Found(None, 2026, None, "x")]
         with pytest.raises(ReadError, match=r"line 2 holds a value under no label"):
             counted.rows(b",Year\nx,2026\n")
@@ -3997,7 +3996,6 @@ class _Wide(msgspec.Struct, frozen=True, gc=False):
 
 class _WideCsv(LongFile[_Wide], FoundCsv[_Wide]):
     _open = True
-    _nulls = ("[NULL]",)
     _as_written = ("id",)
     _keys = re.compile(r"(?s).+")
     _empty_rows = False
@@ -4015,7 +4013,7 @@ class _WideCsv(LongFile[_Wide], FoundCsv[_Wide]):
 class TestAFoundTableReadLong:
     def test_every_header_cell_names_a_column_and_each_filled_cell_is_a_row(self) -> None:
         body = b"Title\nID, A ,,B\n7,1,skip,[NULL]\n,  ,,2\n"
-        assert _WideCsv(_Wide, key="id").rows(body) == [
+        assert _WideCsv(_Wide, key="id", null_values=("[NULL]",)).rows(body) == [
             _Wide("7", "ID", "7"),
             _Wide("7", "A", "1"),
             _Wide(None, "B", "2"),
@@ -4025,7 +4023,7 @@ class TestAFoundTableReadLong:
 class TestAnOpenFoundTable:
     def test_a_header_cell_twice_is_refused(self) -> None:
         with pytest.raises(ReadError, match=r"names one field twice"):
-            _WideCsv(_Wide, key="id").rows(b"ID,A,A\n1,2,3\n")
+            _WideCsv(_Wide, key="id", null_values=("[NULL]",)).rows(b"ID,A,A\n1,2,3\n")
 
 
 class _Names(msgspec.Struct, frozen=True, gc=False):
@@ -4035,7 +4033,7 @@ class _Names(msgspec.Struct, frozen=True, gc=False):
 class _Text(ReportFile[_Names]):
     _rows_required = False
     _line = re.compile(r"(?P<name>[a-z]+)")
-    _header = (re.compile(r"NAME"), re.compile(r"-+"))
+    _header_lines = (re.compile(r"NAME"), re.compile(r"-+"))
     _skip_blank = False
     _text_lines = True
     _preamble = True

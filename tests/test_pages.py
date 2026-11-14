@@ -584,7 +584,7 @@ class TestAnHtmlFile:
 
     def test_a_format_narrows_its_selector(self) -> None:
         class Etf(HtmlFile[_Holding]):
-            _table = "table.etf"
+            _table_selector = "table.etf"
 
         body = _page(_ROW, tables=2).replace(b"<table>", b'<table class="etf">', 1)
         assert len(Etf(_Holding).rows(body)) == 1
@@ -665,9 +665,9 @@ class _Meeting(msgspec.Struct, frozen=True, gc=False):
 
 
 class _Meetings(HtmlRecords[_Meeting]):
-    _record = "div.meeting"
-    _heading = "h4"
-    _stated = re.compile(r"(?P<year>\d{4}) meetings")
+    _record_selector = "div.meeting"
+    _heading_selector = "h4"
+    _heading_pattern = re.compile(r"(?P<year>\d{4}) meetings")
 
 
 def _meetings(*parts: str) -> bytes:
@@ -702,9 +702,9 @@ class TestHtmlRecords:
 
     def test_a_record_reads_its_own_link(self) -> None:
         class Linked(HtmlRecords[_Meeting]):
-            _record = "a.meeting"
-            _heading = "h4"
-            _stated = re.compile(r"(?P<year>\d{4}) meetings")
+            _record_selector = "a.meeting"
+            _heading_selector = "h4"
+            _heading_pattern = re.compile(r"(?P<year>\d{4}) meetings")
 
         body = _meetings("<h4>2026 meetings</h4>", _meeting("June", "/june.htm"))
         assert Linked(_Meeting).rows(body) == [_Meeting(2026, "June", "/june.htm")]
@@ -714,7 +714,7 @@ class TestHtmlRecords:
             name: Annotated[str, Label(".month")]
 
         class Months(HtmlRecords[Month]):
-            _record = "div.meeting"
+            _record_selector = "div.meeting"
 
         assert Months(Month).rows(_meetings(_meeting("July"), _meeting("August"))) == [Month("July"), Month("August")]
 
@@ -767,9 +767,9 @@ class TestHtmlRecords:
             month: Annotated[str, Label(".month")]
 
         class Panels(HtmlRecords[Maybe]):
-            _record = "div.meeting"
-            _heading = "h4"
-            _stated = re.compile(r"(?:(?P<year>\d{4}) )?meetings")
+            _record_selector = "div.meeting"
+            _heading_selector = "h4"
+            _heading_pattern = re.compile(r"(?:(?P<year>\d{4}) )?meetings")
 
         body = _meetings("<h4>meetings</h4>", _meeting("May"), "<h4>2026 meetings</h4>", _meeting("June"))
         assert Panels(Maybe).rows(body) == [Maybe(None, "May"), Maybe(2026, "June")]
@@ -806,7 +806,7 @@ class TestAnHtmlFilesRepeatedLabels:
             pdf: Annotated[str | None, Label('a[href$=".pdf" i]'), Link()]
 
         class Months(HtmlRecords[Month]):
-            _record = "div.meeting"
+            _record_selector = "div.meeting"
 
         body = _meetings(
             _meeting("July"), '<div class="meeting"><div class="month">May</div><a href="/m.PDF">p</a></div>'
