@@ -3,7 +3,9 @@
 :class:`SheetFile` is a clean table on one sheet of a workbook: its header in one row (row 1, or below titles), then a
 row per record to the sheet's end, nothing outside the header's columns. fastexcel loads the sheet twice, as text and
 typed by the struct's fields, because a typed load coerces without a word: a text cell is null as a number, ``1.5``
-truncates to ``1`` as a whole number, a plain number reads as a date. So a whole number is loaded as a float and
+truncates to ``1`` as a whole number, a plain number reads as a date (a plain table whose every column holds one kind
+of cell, its field's, is read from one strict load, which types a column by all its cells and refuses a mix). So a
+whole number is loaded as a float and
 checked whole, a date field without a ``Format`` must hold date cells and a time-of-day field time cells (one with a
 ``Format`` holds text, parsed as :class:`CsvFile` parses it), and any cell whose text is not a value of its column
 raises, naming the sheet's own row, unless it is one of the sheet's words for none (``null_values``: ``#N/A``). An
@@ -137,6 +139,14 @@ _SHEET_CASTS: Final[Mapping[object, pl.DataType]] = {
 _BOOLEAN_CELLS: Final = ("true", "false")
 
 
+#: The methods a format reads its sheet otherwise by: a format that overrides any reads its sheet by two loads.
+_ONE_LOAD_HOOKS: Final = (
+    "_read", "_column", "_layout", "_label", "_value", "_end", "_outside", "_span", "_header_cells", "_headings",
+    "_used_columns", "_typed", "_load", "_text_grid", "_completed", "_gapless", "_joined_header", "_stated",
+    "_sheet_in", "_header_in", "_one_cell",
+)  # fmt: skip
+
+
 def _workbook(body: bytes) -> fastexcel.ExcelReader:
     """Return the workbook *body*, open, or raise ValueError for a body that is no workbook."""
     try:
@@ -144,6 +154,21 @@ def _workbook(body: bytes) -> fastexcel.ExcelReader:
     except fastexcel.FastExcelError as e:
         msg = f"the body is not a workbook: {e}"
         raise ValueError(msg) from e
+
+
+def _of_kind(column: _Column, cells: pl.Series) -> bool:
+    """Return whether each of a strict load's *cells* is one *column* holds, as the two loads read its cells."""
+    dtype, scalar = cells.dtype, column.scalar
+    if column.written is not None or column.flag is not None or scalar is str:
+        return dtype == pl.String
+    if scalar in {int, float}:
+        return dtype == pl.Float64 and (scalar is float or bool((cells == cells.floor()).all()))
+    if scalar in _MOMENT_CELLS:
+        shape = _MOMENT_CELLS[scalar][0]
+        return isinstance(dtype, pl.Datetime) and bool(
+            cells.dt.strftime("%Y-%m-%d %H:%M:%S").drop_nulls().str.contains(shape).all()
+        )
+    return scalar is bool and dtype == pl.Boolean
 
 
 def _cell_at(frame: pl.DataFrame, row: int, at: int) -> pl.Series:
@@ -205,6 +230,8 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
         reader = self._opened or _workbook(body)
+        if self._opened_grid is None and (frame := self._one_load(reader)) is not None:
+            return frame
         # Two loads: the sheet's every cell as text (the grid), which says what a cell holds and serves all above and
         # around the table, and the table's cells typed, which fastexcel coerces without a word (a text cell is null as
         # a number). shortcut: a text field's number cell reads as fastexcel's text of it, rounded to 9 decimals; no
@@ -280,6 +307,63 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         frame = self._completed(frame, absent, stated)
         # Dropped once typed and numbered, so an error and a numbered row still name the sheet's own row.
         return self._gapless(frame, empty) if self._gaps else frame
+
+    def _one_loadable(self) -> bool:
+        """Return whether a table may be read from one strict load: a plain table, by none of the hooks or switches."""
+        labels = [column.label for column in self._columns if column.field != self._numbered]
+        return (
+            self._header
+            and not (self._above or self._trim or self._strip or self._gaps or self._blank_rows)
+            and not (self._null_values or self._unread or self._blank_columns)
+            and all(column.cell is None for column in self._columns)
+            and "" not in labels
+            and len(set(labels)) == len(labels)
+            and all(getattr(type(self), hook) is getattr(SheetFile, hook) for hook in _ONE_LOAD_HOOKS)
+        )
+
+    def _one_load(self, reader: fastexcel.ExcelReader) -> pl.DataFrame | None:
+        """Return the table read from one load, or ``None`` where the two loads must read it: a read's fast path.
+
+        fastexcel's strict load types each column by every one of its cells and raises for a column that mixes kinds
+        (a ``.`` among numbers), so a column of one kind, its field's, needs no text load to say what each cell holds.
+        Anything else (a mixed column, a header or a cell the two loads refuse) is ``None``, and the two loads raise
+        their own error. A sheet that holds tokens for none (``null_values``) mixes kinds and goes to them directly.
+        """
+        if not self._one_loadable() or self._sheet not in reader.sheet_names:
+            return None
+        columns = [column for column in self._columns if column.field != self._numbered]
+        try:
+            table = reader.load_sheet(
+                self._sheet, header_row=self._header_row - 1, dtype_coercion="strict", schema_sample_rows=None
+            ).to_polars()
+        except fastexcel.FastExcelError:
+            return None
+        # fastexcel names a column by its header cell, a repeat by its place (Rate_1) and an empty or date cell
+        # __UNNAMED__n, so a stray cell beside the table or a header that is not the labels is a mismatch.
+        if table.columns != [column.label for column in columns]:
+            return None
+        values = [self._one_kind(column, table[column.label]) for column in columns]
+        if any(value is None for value in values):
+            return None
+        frame = pl.DataFrame([value for value in values if value is not None])
+        if frame.select(pl.all_horizontal(pl.all().is_null()).any()).item():  # an empty row, which the loads refuse
+            return None
+        return self._completed(frame, [], [])
+
+    def _one_kind(self, column: _Column, cells: pl.Series) -> pl.Series | None:
+        """Return *column*'s values from its strictly loaded *cells*, or ``None`` where they are not all its kind."""
+        if cells.null_count() == cells.len():
+            return pl.Series(column.field, [None] * cells.len(), _none_dtype(column.scalar))
+        if not _of_kind(column, cells):
+            return None
+        if column.written is not None or column.flag is not None or column.scalar is str:
+            text = pl.select(pl.when(cells != "").then(cells)).to_series().alias(column.label)
+            try:
+                return self._value(column, text, text)
+            except ValueError:  # a cell its Format or Flag refuses: the two loads name it
+                return None
+        dtype = pl.Date() if column.scalar is dt.date else _SHEET_CASTS.get(column.scalar, cells.dtype)
+        return cells.cast(dtype).alias(column.field)
 
     def _span(self, grid: pl.DataFrame) -> list[str]:
         """Return the *grid*'s columns the table spans, as fastexcel loads a table under its header.
