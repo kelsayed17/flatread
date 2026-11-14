@@ -4,6 +4,7 @@ Each test is an adversary's probe turned around: a body or a reader that once re
 wrong error, and now reads right or raises ``ReadError`` (a body) or ``LayoutError`` (a reader declared wrong).
 """
 
+import contextlib
 import datetime as dt
 import io
 import re
@@ -11,6 +12,7 @@ import zipfile
 from typing import Annotated
 
 import msgspec
+import polars as pl
 import pytest
 
 from flatread.archives import ZippedFiles
@@ -371,6 +373,11 @@ class TestAFixedWidthFilesTokens:
         assert rows == [_Station("ABC", 1.5), _Station("DEF", None)]
 
 
+class _Named(msgspec.Struct, frozen=True, gc=False):
+    name: Annotated[str | None, Label("name")]
+    n: Annotated[int, Label("n")]
+
+
 class _Numbers(msgspec.Struct, frozen=True, gc=False):
     n: Annotated[int | None, Label("n")]
     f: Annotated[float | None, Label("f")]
@@ -410,6 +417,53 @@ class TestACsvsNumberCells:
         for cell in (b"NaN", b"inf", b"1e400"):
             with pytest.raises(ReadError, match=r"hold NaN or an infinity"):
                 CsvFile(_Numbers).rows(b"n,f\n1," + cell + b"\n")
+
+    @pytest.mark.parametrize(
+        ("body", "message"),
+        [
+            (b"name,n\nPlace a,5\nPlace b, 6\n", r"the 'n' cell ' 6' is not a whole number: row 2"),
+            (b"name,n\nPlace\ta,5\nPlace b,\t6\n", r"the 'n' cell '\\t6' is not a whole number: row 2"),
+            (b'name,n\n"a, b c",1\nd, 2\n', r"the 'n' cell ' 2' is not a whole number: row 2"),
+        ],
+        ids=["beside text with spaces", "beside text with tabs", "beside a quoted cell"],
+    )
+    def test_a_padded_number_beside_text_cells_holding_blanks_raises(self, body: bytes, message: str) -> None:
+        with pytest.raises(ReadError, match=message):
+            CsvFile(_Named).rows(body)
+
+    def test_a_padded_number_under_a_header_holding_a_space_raises(self) -> None:
+        class _Spaced(msgspec.Struct, frozen=True, gc=False):
+            n: Annotated[int, Label("a number")]
+
+        with pytest.raises(ReadError, match=r"the 'a number' cell ' 5' is not a whole number: row 1"):
+            CsvFile(_Spaced).rows(b"a number\n 5\n")
+
+    @pytest.mark.parametrize(
+        ("body", "reads"),
+        [
+            (b"name,n\nPlace a,5\n", 1),
+            (b"name,n\nPlace\ta,5\n", 1),
+            (b"name,n\na, 5\n", 4),  # read, read as text and cast, then the refusal's two (widths, the cell)
+            (b"name,n\nN A,5\n", 2),  # a token's space is in no cell: read again, and it reads
+        ],
+        ids=["blanks in text cells", "a tab in a text cell", "a padded number", "a token holding a space"],
+    )
+    def test_a_body_is_read_once_unless_a_number_may_be_padded(
+        self, body: bytes, reads: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[object] = []
+        read = pl.read_csv
+        monkeypatch.setattr(pl, "read_csv", lambda *a, **k: calls.append(a) or read(*a, **k))
+        with contextlib.suppress(ReadError):
+            CsvFile(_Named, null_values=["N A"]).rows(body)
+        assert len(calls) == reads
+
+    def test_a_zero_beside_an_exponent_in_text_reads(self) -> None:
+        class _Noted(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("name")]
+            f: Annotated[float, Label("f")]
+
+        assert CsvFile(_Noted).rows(b"name,f\nsee e-1,0\n") == [_Noted("see e-1", 0.0)]
 
     def test_a_padded_cell_in_a_long_table_raises_too(self) -> None:
         class _Wide(LongFile[_Keyed], CsvFile[_Keyed]):

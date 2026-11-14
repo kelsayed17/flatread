@@ -48,6 +48,7 @@ member's name) is no column of any header (:meth:`~flatread.core.File._stated_fi
 import codecs
 import csv
 import datetime as dt
+import functools
 import io
 import re
 import typing
@@ -291,26 +292,36 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         """Read *body* with ``read_csv``, its cells as *schema*'s columns, by name or, given *new_columns*, by place.
 
         polars' error, or its panic, is raised as a ``ReadError``: naming the row where a row's width is what polars
-        refused, else the cell that is not its type, by its column's header cell in *labels*. A number column is read
-        as text, then cast: polars' parser would take a number after spaces or a tab (`` 5``), which its cast from text
-        refuses, and a float that underflows (``1e-400`` as ``0.0``), which a 0.0 whose digits are not all zero shows.
-        The cast takes every other number the parser does (``+5``, ``.5``, ``1.``, ``1e5``, ``NaN``, ``inf``).
+        refused, else the cell that is not its type, by its column's header cell in *labels*. polars' parser takes a
+        number after spaces or a tab (`` 5``), which its cast from text refuses, and a float that underflows
+        (``1e-400`` as ``0.0``), which a 0.0 whose digits are not all zero shows; the cast takes every other number the
+        parser does (``+5``, ``.5``, ``1.``, ``1e5``, ``NaN``, ``inf``). So a body where a number may be padded
+        (:func:`_unpadded`) or underflow (a float column's 0.0 and an ``e-`` in the body) has its number columns read
+        again, as text, then cast; any other is read once, by the parser.
         """
         numbers = {name: dtype for name, dtype in schema.items() if dtype in _NUMBERS}
+        read = functools.partial(
+            pl.read_csv,
+            body,
+            has_header=self._header,
+            separator=self._separator,
+            null_values=self._null_values,
+            quote_char=quote_char,
+            new_columns=None if new_columns is None else list(new_columns),
+        )
         try:
-            text = pl.read_csv(
-                body,
-                has_header=self._header,
-                separator=self._separator,
-                schema={name: pl.String if name in numbers else dtype for name, dtype in schema.items()},
-                null_values=self._null_values,
-                quote_char=quote_char,
-                new_columns=None if new_columns is None else list(new_columns),
-            )
+            parsed = read(schema=dict(schema))
+            if not numbers or (
+                _unpadded(body, parsed, self._separator, quote_char, header=self._header)
+                and not (
+                    any(dtype is pl.Float64 and (parsed[name] == 0).any() for name, dtype in numbers.items())
+                    and pl.Series([body]).bin.contains(b"e-").item() | pl.Series([body]).bin.contains(b"E-").item()
+                )
+            ):
+                return parsed
+            text = read(schema={name: pl.String if name in numbers else dtype for name, dtype in schema.items()})
         except (pl.exceptions.PolarsError, pl.exceptions.PanicException) as e:
             self._refuse(body, schema=schema, labels=labels, quote_char=quote_char, new_columns=new_columns, e=e)
-        if not numbers:
-            return text
         frame = text.with_columns(pl.col(name).cast(dtype, strict=False) for name, dtype in numbers.items())
         # A null the cast made (a null count is kept, not counted), or a float 0.0 that may have underflowed: only
         # then are the cells looked at. polars reads a quoted empty cell as text, and a cell of spaces as no number.
@@ -1057,12 +1068,33 @@ def _full(body: bytes, frame: pl.DataFrame, separator: str, header: Sequence[str
     inside a header cell or a text cell (quoted): a short row, which polars pads with nulls, holds fewer. Counted in the
     bytes (C), with no line split: on a 79 MB file of 1.7 million rows, about 25 ms beside polars' 50 ms read.
     """
-    texts = [name for name, dtype in frame.schema.items() if dtype == pl.String]
-    inside = 0 if header is None else sum(cell.count(separator) for cell in header)
-    if texts:
-        counted = frame.select(pl.sum_horizontal(pl.col(texts).str.count_matches(separator, literal=True).fill_null(0)))
-        inside += int(counted.to_series().sum())
+    inside = (0 if header is None else sum(cell.count(separator) for cell in header)) + _inside(frame, separator)
     return body.count(separator.encode()) == (frame.height + (header is not None)) * (frame.width - 1) + inside
+
+
+def _inside(frame: pl.DataFrame, character: str) -> int:
+    """Return how often *character* is written in *frame*'s text cells: each column joined once, then counted (C)."""
+    return sum(
+        str(frame[name].str.join("").item() or "").count(character)
+        for name, dtype in frame.schema.items()
+        if dtype == pl.String
+    )
+
+
+def _unpadded(body: bytes, frame: pl.DataFrame, separator: str, quote: str | None, *, header: bool) -> bool:
+    """Return whether no cell of *body*, read as *frame*, may be a number after spaces or a tab (`` 5``).
+
+    Every space and tab in the body (but the separator's) is counted, in the bytes (C), against those inside the
+    frame's text cells and, where the body opens on a *header* (its cells quoted with *quote*), its cells: one in
+    neither may lead a number. One in a cell read otherwise (a date, a token for none) makes the body suspect too.
+    """
+    cells = _header(body, separator, quote) if header else []
+    return all(
+        blank == separator
+        or blank.encode() not in body
+        or body.count(blank.encode()) == sum(cell.count(blank) for cell in cells) + _inside(frame, blank)
+        for blank in " \t"
+    )
 
 
 def _check_widths(body: bytes, separator: str, *, quoting: bool = True, header: bool = True) -> None:

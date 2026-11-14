@@ -1,19 +1,22 @@
 """How many times a sheet reader opens the workbook and loads a sheet, per read: once, and two or three times a sheet.
 
 fastexcel parses the whole sheet on every ``load_sheet`` (an ``n_rows=1`` load costs most of a full one), so a read
-loads its sheet's text once, which serves everything around the table, and its table typed once. A table with a
-number field loads its number columns a third time, as booleans: no text tells a text cell written as a number
-(``2``) from a number cell, and fastexcel's boolean load reads only a number (or boolean) cell as a value, so the
-third load is what refuses the text cell (NumberTextSheet, which reads such text, skips it). A plain table whose every
-column holds one kind of cell, its field's, is read from one strict load, which refuses a column mixing number cells
-and number text; one with an empty cell pays a second, as text, since the strict load reads a word for none (``NA``)
-as none too; one that mixes kinds pays the failed strict load and the two or three.
+loads its sheet's text once, which serves everything around the table, and its table typed once. No text tells a
+text cell written as a number (``2``) from a number cell, so a table with a number field reads its number cells'
+kinds from the ``.xlsx`` sheet's part, where each cell opens on its own reference (its ``t`` attribute), and
+otherwise loads its number columns a third time, as booleans: fastexcel's boolean load reads only a number (or
+boolean) cell as a value (NumberTextSheet, which reads such text, does neither). A plain table whose every column
+holds one kind of cell, its field's, is read from one strict load, which refuses a column mixing number cells and
+number text; one with an empty cell pays a second, as text, since the strict load reads a word for none (``NA``) as
+none too; one that mixes kinds pays the failed strict load and the two or three.
 """
 
 import collections
 import datetime as dt
+import io
 import re
 import typing
+import zipfile
 from typing import Annotated
 
 import fastexcel
@@ -114,28 +117,38 @@ class _Answers(GroupedSheet[_Answer]):
     _empty_rows = False
 
 
+def _unreferenced(body: bytes) -> bytes:
+    """Return the workbook *body* with its sheets' cells written without a reference, each placed after the last."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(body)) as archive, zipfile.ZipFile(out, "w") as written:
+        for name in archive.namelist():
+            part = archive.read(name)
+            written.writestr(name, re.sub(rb'<c r="[A-Z]+[0-9]+"', b"<c", part) if "worksheets/" in name else part)
+    return out.getvalue()
+
+
 _TABLE = [["Name", "Count"], ["a", 1]]
 _UNDER_TITLE = [["Title"], *_TABLE]
 _READS: list[tuple[str, File[typing.Any], bytes, int, int]] = [
     ("SheetFile", SheetFile(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 1),
-    ("a column of mixed kinds", SheetFile(_Item, sheet="S"), workbook({"S": [*_TABLE, [2, 3]]}), 1, 4),
-    ("tokens for none", SheetFile(_Item, sheet="S", null_values=["."]), workbook({"S": _TABLE}), 1, 3),
-    ("BesideSheet", BesideSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count", "x"], ["a", 1, "y"]]}), 1, 3),
-    ("NotedSheet", NotedSheet(_Item, sheet="S"), workbook({"S": [*_TABLE, ["Source: x"]]}), 1, 3),
-    ("DatedSheet", DatedSheet(_Day, sheet="S"), workbook({"S": [["Day", "Value"], [_DAY, 1.5], ["note"]]}), 1, 3),
-    ("PaddedSheet", PaddedSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count"], [" a", 1]]}), 1, 3),
+    ("a column of mixed kinds", SheetFile(_Item, sheet="S"), workbook({"S": [*_TABLE, [2, 3]]}), 1, 3),
+    ("tokens for none", SheetFile(_Item, sheet="S", null_values=["."]), workbook({"S": _TABLE}), 1, 2),
+    ("BesideSheet", BesideSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count", "x"], ["a", 1, "y"]]}), 1, 2),
+    ("NotedSheet", NotedSheet(_Item, sheet="S"), workbook({"S": [*_TABLE, ["Source: x"]]}), 1, 2),
+    ("DatedSheet", DatedSheet(_Day, sheet="S"), workbook({"S": [["Day", "Value"], [_DAY, 1.5], ["note"]]}), 1, 2),
+    ("PaddedSheet", PaddedSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count"], [" a", 1]]}), 1, 2),
     ("NumberTextSheet", NumberTextSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count"], ["a", "1"]]}), 1, 2),
-    ("CellHeaderSheet", CellHeaderSheet(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 3),
-    ("a stripped header", _Stripped(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 3),
-    ("TitledSheet", _Titled(_Item, sheet="S", header_row=2), workbook({"S": _UNDER_TITLE}), 1, 3),
-    ("PreambleSheet", PreambleSheet(_Item, sheet="S"), workbook({"S": [["banner"], ["link"], *_TABLE]}), 1, 3),
-    ("OnlySheet", OnlySheet(_Item), workbook({"Any name": _TABLE}), 1, 3),
+    ("CellHeaderSheet", CellHeaderSheet(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
+    ("a stripped header", _Stripped(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
+    ("TitledSheet", _Titled(_Item, sheet="S", header_row=2), workbook({"S": _UNDER_TITLE}), 1, 2),
+    ("PreambleSheet", PreambleSheet(_Item, sheet="S"), workbook({"S": [["banner"], ["link"], *_TABLE]}), 1, 2),
+    ("OnlySheet", OnlySheet(_Item), workbook({"Any name": _TABLE}), 1, 2),
     (
         "GroupedSheet",
         _Answers(_Answer, sheet="S", header_row=2),
         workbook({"S": [["a link", "One", None, "Two"], [None, "a", "b", "a"], [_DAY, 1, None, 3]]}),
         1,
-        3,
+        2,
     ),
     (
         "SheetsFile, three sheets",
@@ -144,22 +157,23 @@ _READS: list[tuple[str, File[typing.Any], bytes, int, int]] = [
         1,
         6,
     ),
-    ("Cell fields", SheetFile(_Stated, sheet="S", header_row=2), workbook({"S": [["x", None, _DAY], *_TABLE]}), 1, 3),
+    ("Cell fields", SheetFile(_Stated, sheet="S", header_row=2), workbook({"S": [["x", None, _DAY], *_TABLE]}), 1, 2),
     (
         "a date Cell over a column of numbers",
         SheetFile(_Over, sheet="S", header_row=2),
         workbook({"S": [[None, _DAY], *_TABLE]}),
         1,
-        4,
+        3,
     ),
     (
         "a date and a time Cell over one column of numbers",
         SheetFile(_Twice, sheet="S", header_row=3),
         workbook({"S": [[None, _DAY], [None, dt.time(9, 30)], *_TABLE]}),
         1,
-        5,
+        4,
     ),
     ("SheetText", SheetText(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
+    ("cells without references", PaddedSheet(_Item, sheet="S"), _unreferenced(workbook({"S": _TABLE})), 1, 3),
 ]
 
 

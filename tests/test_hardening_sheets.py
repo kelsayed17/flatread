@@ -532,6 +532,12 @@ _TEN = "".join('<c t="n"><v>1</v></c>' for _ in range(10))
         pytest.param(_data(_A1, '<row r="2"><c\n r = "J1000000"><v>1</v></c></row>'), "1000000", id="spaced"),
         pytest.param(_data(_A1, '<row r="2"><c r="j1000000"><v>1</v></c></row>'), "1000000", id="lower case"),
         pytest.param(_data(_A1, '<row r="2"><c r="A2" r="J1000000"><v>1</v></c></row>'), "1000000", id="a second r"),
+        pytest.param(_data(_A1, '<row r="2"><c r="A2"r="J1000000"><v>1</v></c></row>'), "1000000", id="a glued r"),
+        pytest.param(
+            _data(_A1, '<row r="2"><c r="AA2"/></row>', '<row r="400000"><c r="A400000"><v>1</v></c></row>'),
+            "400000 rows by 27",
+            id="past Z and far down",
+        ),
         pytest.param(_data(_A1, '<row r="2"><c s=">" r="J1000000"><v>1</v></c></row>'), "1000000", id="> in a value"),
         pytest.param(_data(_A1, f'<row r="900000">{_TEN}</row>'), "900000 rows by 10", id="cells without r"),
         pytest.param(_data(_A1, '<row r="899999"/>', f"<row>{_TEN}</row>"), "900000 rows by 10", id="row after r"),
@@ -621,6 +627,44 @@ def test_a_sheet_loaded_again_is_bounded_once(monkeypatch: pytest.MonkeyPatch) -
     for _ in range(2):
         reader.load_sheet("S", header_row=None)
     assert spans == ["xl/worksheets/sheet1.xml"]
+
+
+class _Measure(msgspec.Struct, frozen=True, gc=False):
+    value: Annotated[float | None, Label("V")]
+
+
+_V1 = '<row r="1"><c r="A1" t="inlineStr"><is><t>V</t></is></c></row>'
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        pytest.param('<c r="A2" t="str"><f>"2"</f><v>2</v></c>', id="a formula's text"),
+        pytest.param("<c r=\"A2\" t = 'str'><v>2</v></c>", id="quoted and spaced otherwise"),
+        pytest.param('<c r="A2" s=">" t="str"><v>2</v></c>', id="after a > in a value"),
+        pytest.param('<c r="A2"t="str"><v>2</v></c>', id="glued to the reference"),
+        pytest.param('<c r="a2" t="str"><v>2</v></c>', id="a lower-case reference"),
+        pytest.param('<c r="A2" t="n" t="str"><v>2</v></c>', id="a second t"),
+    ],
+)
+def test_a_number_fields_text_cell_is_told_from_the_sheets_part(cell: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _loads(monkeypatch)
+    with pytest.raises(ReadError, match=r"the 'V' cell '2' is not a number cell: row 2"):
+        SheetFile(_Measure, sheet="S", null_values=["."]).rows(_parts(_data(_V1, f'<row r="2">{cell}</row>')))
+    assert len(calls) == 2  # the text and the typed loads: the cell's kind is the part's, not a third load's
+
+
+@pytest.mark.parametrize(
+    "cell",
+    [
+        pytest.param('<c r="A2"><v>2</v></c>', id="no t"),
+        pytest.param('<c r="A2" t="n"><v>2</v></c>', id="t n"),
+        pytest.param('<c r="A2" x:t="str" xmlns:x="u"><v>2</v></c>', id="a prefixed t"),
+    ],
+)
+def test_a_number_cell_is_told_from_the_sheets_part(cell: str) -> None:
+    sheet = _data(_V1, f'<row r="2">{cell}</row>')
+    assert SheetFile(_Measure, sheet="S", null_values=["."]).rows(_parts(sheet)) == [_Measure(2.0)]
 
 
 def test_a_zip_that_will_not_open_is_refused() -> None:
