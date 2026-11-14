@@ -369,3 +369,51 @@ class TestAFixedWidthFilesTokens:
 
         rows = _Stations(_Station, null_values=["-99"]).rows(b"ABC  1.5\nDEF  -99\n")
         assert rows == [_Station("ABC", 1.5), _Station("DEF", None)]
+
+
+class _Numbers(msgspec.Struct, frozen=True, gc=False):
+    n: Annotated[int | None, Label("n")]
+    f: Annotated[float | None, Label("f")]
+
+
+class TestACsvsNumberCells:
+    @pytest.mark.parametrize(
+        ("body", "message"),
+        [
+            (b"n,f\n 5,1\n", r"the 'n' cell ' 5' is not a whole number: row 1"),
+            (b"n,f\n1,2\n\t5,1\n", r"the 'n' cell '\\t5' is not a whole number: row 2"),
+            (b'n,f\n" 5",1\n', r"the 'n' cell ' 5' is not a whole number: row 1"),
+            (b"n,f\n5, 1.5\n", r"the 'f' cell ' 1.5' is not a number: row 1"),
+            (b"n,f\n5,1.5 \n", r"the 'f' cell '1.5 ' is not a number: row 1"),
+            (b"n,f\n1,0\n5,1e-400\n", r"the 'f' cell '1e-400' underflows a float to 0.0: row 2"),
+            (b"n,f\n5,-0.000e-999\n5,-2E-500\n", r"the 'f' cell '-2E-500' underflows a float to 0.0: row 2"),
+        ],
+        ids=["leading space", "leading tab", "quoted", "float", "trailing space", "underflow", "underflow among zeros"],
+    )
+    def test_a_padded_or_underflowing_number_raises_naming_its_label_and_row(self, body: bytes, message: str) -> None:
+        with pytest.raises(ReadError, match=message):
+            CsvFile(_Numbers).rows(body)
+
+    def test_every_number_polars_parses_still_reads_and_a_blank_cell_is_no_value(self) -> None:
+        body = b'n,f\n+5,.5\n-0,1.\n05,1E+05\n,0e5\n"",-0\n  ,  \n7,1e-5\n'
+        assert CsvFile(_Numbers).rows(body) == [
+            _Numbers(5, 0.5),
+            _Numbers(0, 1.0),
+            _Numbers(5, 100000.0),
+            _Numbers(None, 0.0),
+            _Numbers(None, -0.0),
+            _Numbers(None, None),
+            _Numbers(7, 1e-5),
+        ]
+
+    def test_a_float_that_is_no_finite_number_is_refused_as_before(self) -> None:
+        for cell in (b"NaN", b"inf", b"1e400"):
+            with pytest.raises(ReadError, match=r"hold NaN or an infinity"):
+                CsvFile(_Numbers).rows(b"n,f\n1," + cell + b"\n")
+
+    def test_a_padded_cell_in_a_long_table_raises_too(self) -> None:
+        class _Wide(LongFile[_Keyed], CsvFile[_Keyed]):
+            _keys = re.compile(r"VX[0-9]")
+
+        with pytest.raises(ReadError, match=r"the 'VX2' cell ' 2' is not a whole number: row 1"):
+            _Wide(_Keyed).rows(b"date,VX1,VX2\n2024-10-14,1, 2\n")

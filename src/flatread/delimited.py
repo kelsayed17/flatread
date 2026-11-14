@@ -8,8 +8,9 @@
   ``71`` as the year 71); a boolean by its words, ``true`` and ``false`` or its ``Flag``'s; an empty cell, quoted or
   not, is no value. Its options are the file's own: ``null_values`` (``NA``, ``--``), ``separator``,
   ``final_line_ending``. A format whose file writes no header (OCC's day's directory) sets ``_header`` false: every
-  line is a row, its cells the fields by position, which need no ``Label``. polars takes a number cell with leading
-  spaces or a tab (`` 5``) and a float that underflows (``1e-400`` is ``0.0``); a trailing space it refuses.
+  line is a row, its cells the fields by position, which need no ``Label``. A number cell is its number exactly as
+  written: one padded with whitespace (`` 5``, a tab) or a float that underflows (``1e-400``, which polars reads as
+  ``0.0``) raises, naming its label and row; a cell empty or only spaces is no value.
 * :class:`HeadersCsv`, a file published under more than one header (EIA's BALANCE files, ECB's ``ACTION``): a body's
   header must be one of ``_headers_lacking``, each the struct's labels without some fields', which read as null.
 * :class:`TrailerCsv`, a file whose last line is a trailer (FINRA's record count, Nasdaq's time stamp): it must match
@@ -91,6 +92,8 @@ __all__ = [
     "TrailerCsv",
 ]
 
+#: The polars types of a number column, which a CSV reads as text, then casts (see CsvFile._polars).
+_NUMBERS: Final = frozenset({pl.Int64, pl.Float64})
 #: A UTF-8 byte order mark, which polars and the field count skip.
 _BOM: Final = codecs.BOM_UTF8
 
@@ -288,45 +291,76 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         """Read *body* with ``read_csv``, its cells as *schema*'s columns, by name or, given *new_columns*, by place.
 
         polars' error, or its panic, is raised as a ``ReadError``: naming the row where a row's width is what polars
-        refused, else the cell that is not its type, by its column's header cell in *labels*.
+        refused, else the cell that is not its type, by its column's header cell in *labels*. A number column is read
+        as text, then cast: polars' parser would take a number after spaces or a tab (`` 5``), which its cast from text
+        refuses, and a float that underflows (``1e-400`` as ``0.0``), which a 0.0 whose digits are not all zero shows.
+        The cast takes every other number the parser does (``+5``, ``.5``, ``1.``, ``1e5``, ``NaN``, ``inf``).
         """
+        numbers = {name: dtype for name, dtype in schema.items() if dtype in _NUMBERS}
         try:
-            return pl.read_csv(
+            text = pl.read_csv(
                 body,
                 has_header=self._header,
                 separator=self._separator,
-                schema=dict(schema),
+                schema={name: pl.String if name in numbers else dtype for name, dtype in schema.items()},
                 null_values=self._null_values,
                 quote_char=quote_char,
                 new_columns=None if new_columns is None else list(new_columns),
             )
         except (pl.exceptions.PolarsError, pl.exceptions.PanicException) as e:
-            header = _header(body, self._separator, quote_char) if self._header and new_columns is None else None
-            if header is not None and header != list(labels):
-                msg = f"the header {header!r} is not the labels {list(labels)!r}"
-                raise ReadError(msg) from e
-            _check_widths(body, self._separator, quoting=quote_char is not None, header=self._header)
-            if not self._header and len(first := _header(body, self._separator, quote_char)) != len(schema):
-                msg = f"row 1 has {len(first)} fields, not the file's {len(schema)}"
-                raise RaggedRowError(msg) from e
-            self._check(body)  # its rows as wide as its header: a format's own check may name the cell polars refused
-            try:  # the rows are as wide as the header: read as text, the cell polars refused is named by its row
-                mistyped = _mistyped(
-                    pl.read_csv(
-                        body,
-                        has_header=self._header,
-                        separator=self._separator,
-                        schema=dict.fromkeys(schema, pl.String),
-                        null_values=self._null_values,
-                        quote_char=quote_char,
-                        new_columns=None if new_columns is None else list(new_columns),
-                    ),
-                    schema,
-                    labels,
-                )
-            except pl.exceptions.PolarsError, pl.exceptions.PanicException:
-                mistyped = None
-            raise ReadError(mistyped or str(e)) from e
+            self._refuse(body, schema=schema, labels=labels, quote_char=quote_char, new_columns=new_columns, e=e)
+        if not numbers:
+            return text
+        frame = text.with_columns(pl.col(name).cast(dtype, strict=False) for name, dtype in numbers.items())
+        # A null the cast made (a null count is kept, not counted), or a float 0.0 that may have underflowed: only
+        # then are the cells looked at. polars reads a quoted empty cell as text, and a cell of spaces as no number.
+        suspect = any(frame[name].null_count() != text[name].null_count() for name in numbers) or any(
+            dtype is pl.Float64 and (frame[name] == 0).any() for name, dtype in numbers.items()
+        )
+        if suspect and _mistyped(text, schema, labels, frame) is not None:
+            self._refuse(body, schema=schema, labels=labels, quote_char=quote_char, new_columns=new_columns, e=None)
+        return frame
+
+    def _refuse(  # noqa: PLR0913 (what the read was)
+        self,
+        body: bytes,
+        *,
+        schema: Mapping[str, type[pl.DataType]],
+        labels: Sequence[str],
+        quote_char: str | None,
+        new_columns: Sequence[str] | None,
+        e: BaseException | None,
+    ) -> typing.NoReturn:
+        """Raise what is wrong with *body*, which polars refused (*e*) or one of whose cells is not its type.
+
+        A header or a row's width is named first, then a format's own check, then the cell that is not its type.
+        """
+        header = _header(body, self._separator, quote_char) if self._header and new_columns is None else None
+        if header is not None and header != list(labels):
+            msg = f"the header {header!r} is not the labels {list(labels)!r}"
+            raise ReadError(msg) from e
+        _check_widths(body, self._separator, quoting=quote_char is not None, header=self._header)
+        if not self._header and len(first := _header(body, self._separator, quote_char)) != len(schema):
+            msg = f"row 1 has {len(first)} fields, not the file's {len(schema)}"
+            raise RaggedRowError(msg) from e
+        self._check(body)  # its rows as wide as its header: a format's own check may name the cell polars refused
+        try:  # the rows are as wide as the header: read as text, the cell polars refused is named by its row
+            mistyped = _mistyped(
+                pl.read_csv(
+                    body,
+                    has_header=self._header,
+                    separator=self._separator,
+                    schema=dict.fromkeys(schema, pl.String),
+                    null_values=self._null_values,
+                    quote_char=quote_char,
+                    new_columns=None if new_columns is None else list(new_columns),
+                ),
+                schema,
+                labels,
+            )
+        except pl.exceptions.PolarsError, pl.exceptions.PanicException:
+            mistyped = None
+        raise ReadError(mistyped or str(e)) from e
 
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
@@ -930,21 +964,44 @@ def _counted(text: str | None, what: str) -> int:
     return int(text)
 
 
-def _mistyped(text: pl.DataFrame, schema: Mapping[str, type[pl.DataType]], labels: Sequence[str]) -> str | None:
+def _mistyped(
+    text: pl.DataFrame,
+    schema: Mapping[str, type[pl.DataType]],
+    labels: Sequence[str],
+    typed: pl.DataFrame | None = None,
+) -> str | None:
     """Return what is wrong with the first cell of *text*, a table read as text, that is not its type in *schema*.
 
-    What polars' typed read refused, said as every reader says it: the cell, its column's header cell in *labels* (and,
-    for a label the header writes more than once, which of them), and its row.
+    What polars' read refused, or its cast from text (*typed*, where made), said as every reader says it: the cell, its
+    column's header cell in *labels* (and, for a label the header writes more than once, which of them), and its row.
+    A number cell is refused padded with whitespace (`` 5``), or a float whose digits are not all zero read as ``0.0``
+    (``1e-400``, which underflows); a cell empty or of spaces is no value.
     """
     for place, ((name, dtype), label) in enumerate(zip(schema.items(), labels, strict=True)):
+        if dtype not in _NUMBERS:
+            continue
         cells = text[name]
-        unread = cells.is_not_null() & cells.cast(dtype, strict=False).is_null()
-        if dtype is not pl.String and (at := _first(unread)) is not None:
-            what = "whole number" if dtype is pl.Int64 else "number"
+        values = typed[name] if typed is not None else cells.cast(dtype, strict=False)
+        # Only the cells the cast left null or read as 0.0 are looked at, each by its place in the column.
+        at, wrong = None, "is not a whole number" if dtype is pl.Int64 else "is not a number"
+        if values.null_count() != cells.null_count():
+            unread = (values.is_null() & cells.is_not_null()).arg_true()
+            at = _place(unread, cells.gather(unread).str.strip_chars() != "")
+        if at is None and dtype is pl.Float64 and (zeros := (values == 0).fill_null(value=False)).any():
+            zeros = zeros.arg_true()
+            # A mantissa with a digit 1 to 9 is no zero: the float underflowed.
+            at, wrong = _place(zeros, cells.gather(zeros).str.contains(r"^[^eE]*[1-9]")), "underflows a float to 0.0"
+        if at is not None:
             repeats = labels.count(label)
             which = f" (the header's {label!r} {labels[: place + 1].count(label)} of {repeats})" if repeats > 1 else ""
-            return f"the {label!r} cell {cells[at - 1]!r}{which} is not a {what}: row {at}"
+            return f"the {label!r} cell {cells[at - 1]!r}{which} {wrong}: row {at}"
     return None  # shortcut: polars refused what every cast reads; its own message says what
+
+
+def _place(places: pl.Series, mask: pl.Series) -> int | None:
+    """Return the row (from 1) of the first of *places*, a column's row indices, where *mask* is true, or ``None``."""
+    at = _first(mask)
+    return None if at is None else int(places[at - 1]) + 1
 
 
 def _csv_dtype(column: Column) -> type[pl.DataType]:
