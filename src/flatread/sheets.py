@@ -911,7 +911,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         self._refuse_leap_day(reader, frame, columns)
 
     def _number_cells(self, column: Column) -> bool:
-        """Return whether *column*'s cells must be number cells: a number field's, unless :attr:`_number_text` names it."""
+        """Return whether *column*'s cells must be number cells: a number field's that :attr:`_number_text` omits."""
         text = self._number_text
         return _reads_numbers(column) and text is not True and column.field not in (text or ())
 
