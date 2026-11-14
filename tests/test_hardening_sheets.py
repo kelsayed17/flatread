@@ -8,12 +8,15 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
 
+import fastexcel
 import msgspec
 import pytest
 from xlrd import compdoc
 
+from flatread import sheets
 from flatread.archives import ZippedFile, ZippedOrBare
 from flatread.errors import ReadError
+from flatread.fields import Cell as CellAt
 from flatread.fields import Label
 from flatread.sheets import (
     BesideSheet,
@@ -405,3 +408,291 @@ def test_an_xls_sheet_spanning_past_the_cap_is_refused_before_a_load(row: int, c
 
 def test_an_xls_sheet_spanning_under_the_cap_reads() -> None:
     sheet_grid(_moved(1_000, 30), "ngsstats 2026 (2021-2025)")
+
+
+# --- 3, its rest. A text cell written as a number, and a word for none the strict load reads as none ---
+
+
+@pytest.mark.parametrize("text", ["2", "2.5", "-3", "0"])
+@pytest.mark.parametrize(
+    ("cells", "row", "null_values"),
+    [([1], 3, []), ([], 2, []), ([1], 3, ["."])],
+    ids=["beside a number", "alone", "two loads"],
+)
+def test_a_text_cell_written_as_a_number_is_no_number_cell(
+    text: str, cells: list[Cell], row: int, null_values: list[str]
+) -> None:
+    message = f"the 'Share' cell '{re.escape(text)}' is not a number cell: row {row}"
+    with pytest.raises(ReadError, match=message):
+        SheetFile(_Share, sheet="S", null_values=null_values).rows(_sheet(*cells, text, label="Share"))
+    if text != "2.5":  # an int field's 2.5 is no whole number first
+        with pytest.raises(ReadError, match=message.replace("Share", "Count")):
+            SheetFile(_Count, sheet="S", null_values=null_values).rows(_sheet(*cells, text))
+
+
+def test_a_number_text_sheet_reads_a_text_cell_written_as_a_number() -> None:
+    assert [row.count for row in NumberTextSheet(_Count, sheet="S").rows(_sheet(1, "2", "-3"))] == [1, 2, -3]
+
+
+def test_number_cells_beside_words_for_none_and_empty_cells_read() -> None:
+    body = _sheet(1, ".", None, 0, label="Share")
+    assert [row.share for row in SheetFile(_Share, sheet="S", null_values=["."]).rows(body)] == [1.0, None, None, 0.0]
+
+
+class _StatedCount(msgspec.Struct, frozen=True, gc=False):
+    count: Annotated[int, CellAt("B1")]
+    name: Annotated[str, Label("Name")]
+
+
+def test_a_number_cell_field_over_a_text_cell_written_as_a_number_is_refused() -> None:
+    with pytest.raises(ReadError, match="the 'S' sheet's cell 'count' '7' is not a number cell"):
+        SheetFile(_StatedCount, sheet="S", header_row=2).rows(workbook({"S": [[None, "7"], ["Name"], ["a"]]}))
+    assert SheetFile(_StatedCount, sheet="S", header_row=2).rows(workbook({"S": [[None, 7], ["Name"], ["a"]]})) == [
+        _StatedCount(7, "a")
+    ]
+
+
+class _Kinds(msgspec.Struct, frozen=True, gc=False):
+    name: Annotated[str | None, Label("Name")]
+    share: Annotated[float | None, Label("Share")]
+    held: Annotated[bool | None, Label("Held")]
+    day: Annotated[dt.date | None, Label("Day")]
+
+
+_KIND_ROW: list[Cell] = ["a", 1.5, True, dt.date(2026, 1, 2)]
+
+
+@pytest.mark.parametrize("word", ["NA", "null", "#N/A", "None", "n/a"])
+@pytest.mark.parametrize(
+    ("at", "label", "what"), [(1, "Share", "number"), (2, "Held", "boolean cell"), (3, "Day", "date cell")]
+)
+def test_a_word_for_none_the_strict_load_reads_as_none_is_a_text_cell(
+    word: str, at: int, label: str, what: str
+) -> None:
+    second = list(_KIND_ROW)
+    second[at] = word
+    body = workbook({"S": [["Name", "Share", "Held", "Day"], _KIND_ROW, second]})
+    with pytest.raises(ReadError, match=f"the '{label}' cell '{re.escape(word)}' is not a {what}: row 3"):
+        SheetFile(_Kinds, sheet="S").rows(body)
+    assert getattr(SheetFile(_Kinds, sheet="S", null_values=[word]).rows(body)[1], _Kinds.__struct_fields__[at]) is None
+
+
+def test_a_text_fields_word_for_none_and_an_empty_cell_read_as_written() -> None:
+    body = workbook({"S": [["Name", "Share", "Held", "Day"], _KIND_ROW, ["NA", None, None, None]]})
+    assert SheetFile(_Kinds, sheet="S").rows(body)[1] == _Kinds("NA", None, None, None)
+
+
+# --- 6, its rest. A sparse .xlsx refused before calamine builds its grid ---
+
+
+def _parts(sheet: str, *, path: str = "xl/worksheets/sheet1.xml", target: str = "worksheets/sheet1.xml") -> bytes:
+    """Return an xlsx of one sheet ``S``: worksheet XML *sheet*, its part at *path*, its relationship's *target*."""
+    book = workbook({"S": [["x"]]})
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(book)) as archive, zipfile.ZipFile(out, "w") as patched:
+        for member in archive.namelist():
+            name, part = member, archive.read(member)
+            if member == "xl/worksheets/sheet1.xml":
+                name, part = path, sheet.encode()
+            elif member == "xl/_rels/workbook.xml.rels":
+                part = part.replace(b'Target="worksheets/sheet1.xml"', f'Target="{target}"'.encode())
+            patched.writestr(name, part)
+    return out.getvalue()
+
+
+_NS = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"'
+
+
+def _data(*rows: str) -> str:
+    return f'<?xml version="1.0"?><worksheet {_NS}><sheetData>{"".join(rows)}</sheetData></worksheet>'
+
+
+def _loads(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    calls: list[object] = []
+    load = fastexcel.ExcelReader.load_sheet
+    monkeypatch.setattr(fastexcel.ExcelReader, "load_sheet", lambda *a, **k: calls.append(a) or load(*a, **k))
+    return calls
+
+
+_A1 = '<row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c></row>'
+_TEN = "".join('<c t="n"><v>1</v></c>' for _ in range(10))
+
+
+@pytest.mark.parametrize(
+    ("sheet", "span"),
+    [
+        pytest.param(_data(_A1, '<row r="2"><c r="J1000000"><v>1</v></c></row>'), "1000000 rows by 10", id="far"),
+        pytest.param(_data(_A1, '<row r="2"><c r="ZZZZ1"><v>1</v></c></row>'), "1 rows by 475254", id="wide"),
+        pytest.param(_data('<row r="2"><c r="J1000000"><v>1</v></c></row>', _A1), "1000000 rows by 10", id="unsorted"),
+        pytest.param(_data(_A1, '<row r="2"><c t="n" r="J1000000"><v>1</v></c></row>'), "1000000", id="r after t"),
+        pytest.param(_data(_A1, "<row r='2'><c r='J1000000'><v>1</v></c></row>"), "1000000", id="single quotes"),
+        pytest.param(_data(_A1, '<row r="2"><c\n r = "J1000000"><v>1</v></c></row>'), "1000000", id="spaced"),
+        pytest.param(_data(_A1, '<row r="2"><c r="j1000000"><v>1</v></c></row>'), "1000000", id="lower case"),
+        pytest.param(_data(_A1, '<row r="2"><c r="A2" r="J1000000"><v>1</v></c></row>'), "1000000", id="a second r"),
+        pytest.param(_data(_A1, '<row r="2"><c s=">" r="J1000000"><v>1</v></c></row>'), "1000000", id="> in a value"),
+        pytest.param(_data(_A1, f'<row r="900000">{_TEN}</row>'), "900000 rows by 10", id="cells without r"),
+        pytest.param(_data(_A1, '<row r="899999"/>', f"<row>{_TEN}</row>"), "900000 rows by 10", id="row after r"),
+        pytest.param(_data(f"<row>{'<c><v>1</v></c>' * 16_385}</row>"), "1 rows by 16385 columns", id="a long row"),
+        pytest.param(
+            '<x:worksheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:sheetData>'
+            '<x:row r="1"><x:c r="A1"><x:v>1</x:v></x:c><x:c r="J1000000"><x:v>1</x:v></x:c></x:row>'
+            "</x:sheetData></x:worksheet>",
+            "1000000 rows by 10",
+            id="prefixed",
+        ),
+    ],
+)
+def test_a_sheet_spanning_past_the_cap_is_refused_before_a_load(
+    sheet: str, span: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _loads(monkeypatch)
+    with pytest.raises(ReadError, match=f"a sheet of the workbook spans {span}"):
+        SheetFile(_Note, sheet="S").rows(_parts(sheet))
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("path", "target"),
+    [("elsewhere/sheet.xml", "/elsewhere/sheet.xml"), ("xl/Worksheets/SHEET1.xml", "worksheets/sheet1.xml")],
+    ids=["from the root", "another case"],
+)
+def test_a_sheet_part_is_found_as_calamine_finds_it(path: str, target: str) -> None:
+    sheet = _data(_A1, '<row r="2"><c r="J1000000"><v>1</v></c></row>')
+    with pytest.raises(ReadError, match="spans 1000000 rows by 10 columns"):
+        SheetFile(_Note, sheet="S").rows(_parts(sheet, path=path, target=target))
+
+
+class _Wide2(msgspec.Struct, frozen=True, gc=False):
+    note: Annotated[str | None, Label("x")]
+
+
+@pytest.mark.parametrize(
+    "sheet",
+    [
+        pytest.param(_data(_A1, '<row r="150000"><c r="A150000" t="inlineStr"><is><t>y</t></is></c></row>'), id="tall"),
+        pytest.param(_data('<row r="1"><c r="A1" t="inlineStr"><is><t>x</t></is></c><c r="AD1"/></row>'), id="wide"),
+        pytest.param(_data('<row><c t="inlineStr"><is><t>x</t></is></c></row>', "<row/>" * 3), id="without r"),
+    ],
+)
+def test_a_sheet_spanning_under_the_cap_reads(sheet: str) -> None:
+    assert sheet_grid(_parts(sheet))["0"][0] == "x"
+
+
+def test_a_zip_that_will_not_open_is_refused() -> None:
+    with pytest.raises(ReadError, match="the body is a workbook's zip that will not open"):
+        SheetFile(_Note, sheet="S").rows(b"PK\x03\x04 cut")
+
+
+class _Total(msgspec.Struct, frozen=True, gc=False):
+    key: Annotated[str, Label("K")]
+    total: Annotated[float | None, Label("Total")]
+
+
+class _RequiredTotal(msgspec.Struct, frozen=True, gc=False):
+    key: Annotated[str, Label("K")]
+    total: Annotated[float, Label("Total")]
+
+
+@pytest.mark.parametrize("row", [_Total, _RequiredTotal])
+@pytest.mark.parametrize("word", ["n/a", "N/A", "NA", "null", "NULL", "None", "#N/A"])
+def test_the_one_load_names_a_word_for_none_in_a_number_field(row: type[msgspec.Struct], word: str) -> None:
+    """The strict load reads these words as none, as an empty cell; the reader declares no null_values."""
+    body = workbook({"S": [["K", "Total"], ["a", 1.5], ["b", word]]})
+    with pytest.raises(ReadError, match=f"the 'Total' cell '{re.escape(word)}' is not a number: row 3"):
+        SheetFile(row, sheet="S").rows(body)
+
+
+@pytest.mark.parametrize(
+    ("sheet", "span"),
+    [
+        (_data(_A1, '<row r="2"><c r="J1000000"><v>1</v></c></row>'), "1000000 rows by 10"),
+        (_data(_A1, f'<row r="900000">{_TEN}</row>'), "900000 rows by 10"),
+        (_data(_A1, f'<row r="2"><c r="B2" t="inlineStr"><is><t>{"y" * 100}</t></is></c></row>'), None),
+    ],
+)
+def test_a_sheet_part_is_scanned_in_chunks_no_tag_spans(
+    sheet: str, span: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sheets, "_CHUNK", 16)
+    if span is None:
+        assert sheet_grid(_parts(sheet))["0"][0] == "x"
+        return
+    with pytest.raises(ReadError, match=f"spans {span}"):
+        sheet_grid(_parts(sheet))
+
+
+def test_an_error_not_fastexcels_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*_: object, **__: object) -> None:
+        raise RuntimeError
+
+    monkeypatch.setattr(fastexcel, "read_excel", broken)
+    with pytest.raises(RuntimeError):
+        SheetFile(_Row, sheet="Data").rows(_BOOK)
+
+
+def test_an_error_not_fastexcels_in_the_one_load_passes_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*_: object, **__: object) -> None:
+        raise RuntimeError
+
+    monkeypatch.setattr(fastexcel.ExcelReader, "load_sheet", broken)
+    with pytest.raises(RuntimeError):
+        SheetFile(_Row, sheet="Data").rows(_BOOK)
+
+
+_XLS = (Path(__file__).parent / "fixtures" / "eia_ngsstats.xls").read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        pytest.param(_XLS[:8] + b"\x00" * 600, "not a readable Excel workbook", id="corrupt compound document"),
+        pytest.param(
+            _XLS.replace("Workbook".encode("utf-16-le"), "Xorkbook".encode("utf-16-le")),
+            "not a workbook",
+            id="no workbook stream",
+        ),
+        pytest.param(_zip("a.txt", b"x"), "no .xlsx workbook", id="a zip of no workbook"),
+    ],
+)
+def test_a_body_whose_span_cannot_be_read_is_refused(body: bytes, message: str) -> None:
+    with pytest.raises(ReadError, match=message):
+        sheet_grid(body)
+
+
+def test_found_sheet_refuses_a_workbook_of_no_sheet() -> None:
+    body = _parts(_data(_A1))
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(body)) as archive, zipfile.ZipFile(out, "w") as patched:
+        for name in archive.namelist():
+            part = archive.read(name)
+            patched.writestr(
+                name, re.sub(rb"<sheets>.*</sheets>", b"<sheets/>", part) if name == "xl/workbook.xml" else part
+            )
+    with pytest.raises(ReadError, match="no sheet"):
+        FoundSheet(_Note, key="note").rows(out.getvalue())
+
+
+def test_a_preamble_sheet_read_outside_frame_places_its_own_copy() -> None:
+    reader = PreambleSheet(_Row, sheet="Data")
+    assert reader._read(_PREAMBLE)["name"].to_list() == ["a"]
+    assert reader._row_one == 2  # the shared reader keeps its own rows
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        {"content.xml": b"<office:document-content/>", "mimetype": b"application/vnd.oasis.opendocument.spreadsheet"},
+        {"xl/workbook.bin": b"\x83\x01\x00", "[Content_Types].xml": b"<Types/>"},
+        {"x.csv": b"a\n1\n"},
+    ],
+    ids=["ods", "xlsb", "a zip of no workbook"],
+)
+def test_a_zip_that_is_no_xlsx_is_refused_before_a_load(parts: dict[str, bytes]) -> None:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+    with pytest.raises(
+        ReadError, match=r"^the body is a zip but no \.xlsx workbook \(an \.xlsb or \.ods is not read\)"
+    ):
+        SheetFile(_Count, sheet="S").rows(out.getvalue())

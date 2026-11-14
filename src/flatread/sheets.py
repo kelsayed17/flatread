@@ -5,17 +5,20 @@ then a row per record to the sheet's end, nothing outside the header's columns. 
 
 **How a sheet is read.** fastexcel's typed load coerces without a word (a text cell is the number its text parses as,
 or null, ``1.5`` truncates to ``1`` as a whole number, a plain number reads as a date), so a table is loaded twice: as
-text, which says what each cell holds, and typed by the struct's fields. A number field holds number cells, whose
-text is fastexcel's of a number (a text cell ``1e3``, ``1.0``, ``+5`` or ``nan`` raises; one written as fastexcel
-writes a number, ``2``, is not told from a number cell, and :class:`NumberTextSheet` reads a sheet that writes its
+text, which says what each cell holds, and typed by the struct's fields. A number field holds number cells: a text
+cell raises, ``1e3`` or ``nan`` by its text and one written as a number (``2``) by a third load, of the number columns
+as booleans, which reads only a number cell as a value (:class:`NumberTextSheet` reads a sheet that writes its
 numbers as text); a whole number is loaded as a float and checked whole and of 64 bits. A boolean field holds boolean
 cells; a date field without a ``Format`` date cells (Excel's day 60, the 1900-02-29 of its 1900 date system, raises),
 and with one, text in that format; a text field's number cell is its every digit (the text load rounds it to nine
 decimals, a float load keeps them). A cell that is not a value of its column raises, naming it, unless it is one of
 the sheet's ``null_values`` (``#N/A``). A plain table, every column of one kind, its field's, is read from one strict
-load instead (``tests/test_sheet_loads.py`` pins the load counts). fastexcel's failure on a body, and a panic of
-calamine's (pyo3's ``PanicException``, no ``Exception``), are a ReadError, as is an ``.xls`` sheet spanning more cells
-than calamine is let build (:data:`_SPAN_MAX`), refused before it loads.
+load instead, which refuses a column mixing number cells and number text, and a second, of the columns it reads empty
+cells in as text, where the strict load reads a word for none (``NA``) as none too (``tests/test_sheet_loads.py`` pins
+the load counts). fastexcel's failure on a body, and a panic of calamine's (pyo3's ``PanicException``, no
+``Exception``), are a ReadError, as is a sheet spanning more cells than calamine is let build as one dense grid
+(:data:`_SPAN_MAX`), refused before it loads: an ``.xlsx`` sheet's span is read from its cell references (a few ms a
+MB), an ``.xls`` sheet's from its records.
 
 **The switches** of :class:`SheetFile`: ``_header`` (false: no header row, fields by position), ``_gaps`` (an empty
 row inside the table is dropped) or ``_blank_rows`` (kept, a row of no values), ``_trim`` (a cell of only whitespace
@@ -44,12 +47,14 @@ irregular for :class:`SheetFile`, and :class:`BiffSheet` from an Excel 3 or 4 wo
 import contextlib
 import datetime as dt
 import functools
+import html
 import io
 import itertools
 import re
 import struct
 import typing
-from collections.abc import Callable, Generator, Mapping, Sequence
+import zipfile
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from typing import Final, Literal
 
 import fastexcel
@@ -58,6 +63,7 @@ import polars as pl
 import xlrd
 from xlrd import compdoc
 
+from flatread.archives import _UNZIP_ERRORS, _inflated
 from flatread.core import (
     _UNIT,
     Column,
@@ -218,12 +224,12 @@ def _loading(what: str) -> Generator[None]:
         raise ReadError(msg) from e
 
 
-#: The most cells a sheet of an Excel 97 workbook (``.xls``) may span, its rows by its columns from the first filled to
-#: the last, and the most columns: calamine builds the whole span, about 33 bytes a cell (a 200 KB workbook with one
-#: cell moved to row 65,536 and column 256 took 860 MB) and more a column, so a span past them is refused before a
+#: The most cells a sheet may span, its rows by its columns, and the most columns: calamine builds a sheet's whole span
+#: as one dense grid, about 33 bytes a cell and more a column (a 200 KB ``.xls`` with one cell moved to row 65,536 and
+#: column 256 took 860 MB, a 1.4 KB ``.xlsx`` with a cell at J1000000 567 MB), so a span past them is refused before a
 #: load. 2^23 cells is 1,048,576 rows by 8 columns, 4,000 times the largest real sheet among the tests' (2,006 cells);
-#: 16,384 columns is Excel's own limit. shortcut: an ``.xlsx``'s span is not checked, as only a scan of its every cell
-#: reference finds it, which would slow a read by a third; check it if workbooks come from hostile sources.
+#: 16,384 columns is Excel's own limit. An ``.xls`` sheet's span runs from its first filled cell to its last, an
+#: ``.xlsx`` sheet's from A1 to its last cell reference (a cell written empty, ``<c r="Z9"/>``, counts too).
 _SPAN_MAX: Final = 2**23
 _COLUMNS_MAX: Final = 16_384
 
@@ -236,14 +242,33 @@ _MULRK: Final = 0x00BD
 _BOF: Final = 0x0809
 
 
+def _refuse_span(rows: int, columns: int) -> None:
+    """Raise ReadError for a sheet of *rows* by *columns*, past :data:`_SPAN_MAX` cells or :data:`_COLUMNS_MAX`."""
+    if rows > 0 and (columns > _COLUMNS_MAX or rows * columns > _SPAN_MAX):  # a sheet of no cell spans none
+        msg = (
+            f"a sheet of the workbook spans {rows} rows by {columns} columns, past the {_SPAN_MAX} cells and"
+            f" {_COLUMNS_MAX} columns a sheet is read to"
+        )
+        raise ReadError(msg)
+
+
 def _check_span(body: bytes) -> None:
+    """Refuse a workbook *body* one of whose sheets spans past :data:`_SPAN_MAX` cells or its columns, before a load.
+
+    An ``.xlsx``'s sheets are bounded by :func:`_check_xlsx_span`; an ``.xls``'s by its BIFF records, walked (about
+    0.3 µs each, a quarter of a second for a million cells). A body that is neither is fastexcel's to read or refuse.
+    """
+    if body.startswith(b"PK"):
+        _check_xlsx_span(body)
+    elif body.startswith(_COMPOUND):
+        _check_xls_span(body)
+
+
+def _check_xls_span(body: bytes) -> None:
     """Refuse an Excel 97 or 95 workbook *body* one of whose sheets spans past :data:`_SPAN_MAX` or its columns.
 
-    Its records are walked (about 0.3 µs each, a quarter of a second for a million cells); a body that is no such
-    workbook is fastexcel's to read or refuse.
+    A sheet's span runs from its first filled cell to its last, as calamine builds it (a BLANK cell is none).
     """
-    if not body.startswith(_COMPOUND):
-        return
     try:
         document = compdoc.CompDoc(body, logfile=io.StringIO())
         stream = document.get_named_stream("Workbook") or document.get_named_stream("Book")
@@ -270,12 +295,167 @@ def _check_span(body: bytes) -> None:
             low_column, high_column = min(low_column, column), max(high_column, last)
     spans.append((high_row - low_row + 1, high_column - low_column + 1))
     for rows, columns in spans:
-        if rows > 0 and (columns > _COLUMNS_MAX or rows * columns > _SPAN_MAX):  # a sheet of no cell spans none
-            msg = (
-                f"a sheet of the workbook spans {rows} rows by {columns} columns, past the {_SPAN_MAX} cells and"
-                f" {_COLUMNS_MAX} columns a sheet is read to"
+        _refuse_span(rows, columns)
+
+
+#: An ``.xlsx`` part's tags that place a sheet's cells, ``<row>`` and ``<c>`` (with a namespace prefix or not), each
+#: with its attributes, quoted values whole; an attribute; a cell reference (calamine reads ``j9`` as ``J9``).
+_PLACING_TAG: Final = re.compile(rb"<(?:[A-Za-z_][\w.-]*:)?(row|c)(?![\w.:-])((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>")
+_ATTRIBUTE: Final = re.compile(rb"([\w.:-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')")
+_CELL_REFERENCE: Final = re.compile(rb"([A-Za-z]+)([0-9]+)")
+#: A workbook's ``<sheet>`` tag and a relationships part's ``<Relationship>``, each with its attributes.
+_SHEET_TAG: Final = re.compile(rb"<(?:[\w.-]+:)?sheet(?![\w.:-])((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>")
+_RELATIONSHIP_TAG: Final = re.compile(rb"<(?:[\w.-]+:)?Relationship(?![\w.:-])((?:[^>\"']|\"[^\"]*\"|'[^']*')*)>")
+#: What the scan of a sheet part counts, in one pass of polars' regex engine over each chunk of it: its ``<c>`` tags;
+#: those that open on a reference of one letter and five digits at most, and of any; its ``r`` attributes, however
+#: spaced; its ``<row>`` tags that open on a row number; and whether it holds a namespace-prefixed ``<c>`` or ``<row>``,
+#: or an attribute after a quote with no space between (``"r=``), which only a tag-by-tag read places.
+_SPAN_COUNTS: Final = {
+    "cells": r"<c[\s/>]",
+    "near": r'<c r="[A-Za-z][0-9]{1,5}"',
+    "referenced": r'<c r="[A-Za-z]+[0-9]+"',
+    "r": r"\sr\s*=",
+    "rows": r'<row r="[0-9]+"',
+    "odd": r"(?::(?:c|row)[\s/>]|[\"']r\s*=)",
+}
+_REFERENCE: Final = r'<c r="([A-Za-z]+)([0-9]+)"'
+#: How much of a part the scan inflates at once, which a tag cannot span: a chunk ends before its last ``<``.
+_CHUNK: Final = 1 << 22
+
+
+def _column_number(letters: bytes) -> int:
+    """Return the column *letters* name, 1-based (``A`` is 1, ``AA`` 27), as calamine reads them, in either case."""
+    number = 0
+    for letter in letters.upper():
+        number = number * 26 + letter - ord("A") + 1
+    return number
+
+
+def _check_xlsx_span(body: bytes) -> None:
+    """Refuse an ``.xlsx`` *body* one of whose sheets spans past :data:`_SPAN_MAX` cells or its columns.
+
+    Each sheet the workbook lists is found as calamine finds it: its ``r:id`` in ``xl/workbook.xml``, that
+    relationship's ``Target`` in ``xl/_rels/workbook.xml.rels`` (under ``xl/``, or from the root where it opens with
+    ``/``), in any case, its entities read or not.
+    Its span runs from A1 to its last cell's row and column: a cell's own reference, or, written without one, its
+    place (the next column in its row, its row's ``r`` or the row after the last). A part is counted in one pass
+    (:data:`_SPAN_COUNTS`, about 2 ms a MB with its inflating), and its references read where one passes column Z or row
+    99,999; one written otherwise is read tag by tag. A part in another encoding than UTF-8 calamine refuses to load.
+    A zip that will not open, or that holds no ``xl/workbook.xml`` and its rels (an ``.xlsb``, an ``.ods``), raises
+    ReadError.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            for name in _xlsx_sheets(archive):
+                _refuse_span(*_xlsx_span(archive, name))
+    except ReadError:  # a ValueError, as zipfile's own errors are
+        raise
+    except _UNZIP_ERRORS as e:
+        msg = f"the body is a workbook's zip that will not open: {e}"
+        raise ReadError(msg) from e
+
+
+def _xlsx_sheets(archive: zipfile.ZipFile) -> list[str]:
+    """Return the members of *archive* that hold the sheets its workbook lists, as calamine finds them (any case)."""
+    names = {name.lower(): name for name in archive.namelist()}
+    book, links = names.get("xl/workbook.xml"), names.get("xl/_rels/workbook.xml.rels")
+    if book is None or links is None:
+        # calamine also reads an .xlsb and an .ods from a zip, whose sheets this bounds not: neither is read
+        msg = "the body is a zip but no .xlsx workbook (an .xlsb or .ods is not read): it has no xl/workbook.xml"
+        raise ReadError(msg)
+    ids = {
+        value
+        for tag in _SHEET_TAG.finditer(_inflated(archive, book))
+        for name, value in _attributes(tag[1])
+        if name.rpartition(b":")[2] == b"id"
+    }
+    sheets = []
+    for tag in _RELATIONSHIP_TAG.finditer(_inflated(archive, links)):
+        attributes = dict(_attributes(tag[1]))
+        if attributes.get(b"Id") in ids and (target := attributes.get(b"Target")) is not None:
+            written = target.decode("utf-8", "replace")
+            paths = [path[1:] if path.startswith("/") else f"xl/{path}" for path in {written, html.unescape(written)}]
+            sheets.extend(names[path.lower()] for path in paths if path.lower() in names)
+    return sheets
+
+
+def _attributes(tag: bytes) -> list[tuple[bytes, bytes]]:
+    """Return the attributes in a tag's *tag* text, in order: each name and value, as written (no entity read)."""
+    return [(match[1], match[2] if match[2] is not None else match[3]) for match in _ATTRIBUTE.finditer(tag)]
+
+
+def _xlsx_span(archive: zipfile.ZipFile, name: str) -> tuple[int, int]:
+    """Return the rows and columns sheet part *name* spans, from A1 to its last cell (:func:`_check_xlsx_span`).
+
+    Where every ``<c>`` opens on its reference, and no ``r`` attribute but those and the rows' is written, each cell is
+    its reference: one letter and five digits at most bound the span by 99,999 rows and 26 columns, and any other is
+    found from the references. Any other part is placed tag by tag (:func:`_placed_span`).
+    """
+    counts = dict.fromkeys(_SPAN_COUNTS, 0)
+    with archive.open(name) as part:
+        for chunk in _chunks(part):
+            text = pl.DataFrame({"text": [chunk.decode("utf-8", "replace")]})
+            found = text.select(
+                pl.col("text").str.count_matches(pattern).alias(key) for key, pattern in _SPAN_COUNTS.items()
             )
-            raise ReadError(msg)
+            for key, count in found.row(0, named=True).items():
+                counts[key] += count
+    if counts["odd"] or counts["cells"] != counts["referenced"] or counts["r"] != counts["cells"] + counts["rows"]:
+        return _placed_span(archive, name)
+    if counts["near"] == counts["cells"]:
+        return 99_999, 26
+    rows = columns = 0
+    with archive.open(name) as part:
+        for chunk in _chunks(part):
+            text = pl.Series([chunk.decode("utf-8", "replace")])
+            parts = text.str.extract_all(_REFERENCE).explode().str.extract_groups(_REFERENCE)
+            # The largest of each, as text: a longer number (its leading zeros dropped), or name, is the larger.
+            widest = (
+                parts.struct.field("2").str.strip_chars_start("0").str.pad_start(24, "0").max(),
+                parts.struct.field("1").str.to_uppercase().str.pad_start(24, "@").max(),
+            )
+            rows = max(rows, int(str(widest[0] or 0)))
+            columns = max(columns, _column_number(str(widest[1] or "").lstrip("@").encode()))
+    return rows, columns
+
+
+def _chunks(part: typing.IO[bytes]) -> Iterator[bytes]:
+    """Yield *part* inflated, each chunk ending before the last ``<`` it holds, so that no tag spans two."""
+    rest = b""
+    while chunk := part.read(_CHUNK):
+        chunk = rest + chunk
+        cut = max(chunk.rfind(b"<"), 0)  # no "<" past the first: the chunk waits for the next
+        if cut:
+            yield chunk[:cut]
+        rest = chunk[cut:]
+    yield rest
+
+
+def _placed_span(archive: zipfile.ZipFile, name: str) -> tuple[int, int]:
+    """Return sheet part *name*'s span, each ``<row>`` and ``<c>`` placed as calamine places it, the last ``r`` winning.
+
+    A row is its ``r``, or the one after the last; a cell is its reference, or the next column in its row; a prefixed
+    attribute (``x:r``) places nothing, and a reference calamine cannot read raises in its load.
+    """
+    rows = columns = row = column = 0
+    with archive.open(name) as part:
+        for chunk in _chunks(part):
+            for tag in _PLACING_TAG.finditer(chunk):
+                place = [value for key, value in _attributes(tag[2]) if key == b"r"]
+                if tag[1] == b"row":
+                    row = int(place[-1]) if place and place[-1].isdigit() else row + 1
+                    column = 0
+                    rows = max(rows, row)
+                    continue
+                reference = _CELL_REFERENCE.fullmatch(place[-1]) if place else None
+                if reference is None:
+                    column += 1
+                    rows = max(rows, row)
+                else:
+                    column = _column_number(reference[1])
+                    rows = max(rows, int(reference[2]))
+                columns = max(columns, column)
+    return rows, columns
 
 
 def _workbook(body: bytes) -> fastexcel.ExcelReader:
@@ -302,6 +482,11 @@ def _of_kind(column: Column, cells: pl.Series) -> bool:
             cells.dt.strftime("%Y-%m-%d %H:%M:%S").drop_nulls().str.contains(shape).all()
         )
     return scalar is bool and dtype == pl.Boolean
+
+
+def _reads_numbers(column: Column) -> bool:
+    """Return whether *column* reads number cells: an ``int`` or ``float`` field's, not a ``Flag``'s."""
+    return column.scalar in {int, float} and column.flag is None and column.written is None
 
 
 def _near_leap_day(column: Column, values: pl.Series) -> bool:
@@ -345,6 +530,9 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     #: its cells top to bottom, the unit separator (U+001F) between, read as written (stripped; a blank cell is empty),
     #: and a reader that lays out the key columns (:class:`LongFile`) takes them from it.
     _above: typing.ClassVar[int] = 0
+    #: Whether a number field reads a text cell written as a number too (:class:`NumberTextSheet` sets it); otherwise
+    #: such a cell (``2``) raises, a load more telling it from a number cell.
+    _number_text: typing.ClassVar[bool] = False
 
     def __init__(self, row: type[RowT], *, sheet: str, header_row: int = 1, null_values: Sequence[str] = ()) -> None:
         """Lay out a table of *row* on the sheet named *sheet*, under its header in sheet row *header_row* (Excel's).
@@ -457,7 +645,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
                 for column in columns
             ]
         )
-        self._refuse_leap_day(reader, frame, [(column, int(table[at])) for at, column in placed.items()])
+        self._refuse_misread(reader, grid, frame, text, [(column, int(table[at])) for at, column in placed.items()])
         frame = self._completed(frame, absent, stated)
         # Dropped once typed and numbered, so an error and a numbered row still name the sheet's own row.
         return self._gapless(frame, empty) if self._gaps else frame
@@ -520,7 +708,33 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         frame = pl.DataFrame([value for value in values if value is not None])
         if frame.select(pl.all_horizontal(pl.all().is_null()).any()).item():  # an empty row, which the loads refuse
             return None
-        return self._completed(frame, [], [])
+        # The strict load reads a text cell of a word for none (``NA``, ``null``, ``#N/A``) as none, as an empty cell:
+        # a column holding none is loaded as text too, which tells them apart (one load more, only then).
+        held = {
+            name: loaded.selected_columns[at].absolute_index
+            for at, name in enumerate(table.columns)
+            if table[name].null_count()
+        }
+        return self._completed(frame, [], []) if not held or self._empty_where_none(reader, table, held) else None
+
+    def _empty_where_none(self, reader: fastexcel.ExcelReader, table: pl.DataFrame, held: Mapping[str, int]) -> bool:
+        """Return whether each cell the strict load *table* reads as none in its columns *held* is empty.
+
+        *held* maps each column's name to its sheet column (``A`` is 0). An empty cell's text is none or ``""``; any
+        other (``NA``) is a text cell, which the two loads name.
+        """
+        texts = self._load(
+            reader, self._sheet, skip_rows=self._header_row, dtypes="string", use_columns=sorted(held.values())
+        )
+        # A row the text load ends before holds no text: an empty cell in each column.
+        rows = min(texts.height, table.height)
+        found = texts.head(rows).select(
+            pl.any_horizontal(
+                table[name].head(rows).is_null() & pl.col(str(at)).is_not_null() & (pl.col(str(at)) != "")
+                for name, at in held.items()
+            ).any()
+        )
+        return not found.item()
 
     def _one_kind(self, column: Column, cells: pl.Series) -> pl.Series | None:
         """Return *column*'s values from its strictly loaded *cells*, or ``None`` where they are not all its kind."""
@@ -682,6 +896,56 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             frame.columns = [str(column.absolute_index) for column in loaded.selected_columns]
         return frame
 
+    def _refuse_misread(
+        self,
+        reader: fastexcel.ExcelReader,
+        grid: pl.DataFrame,
+        frame: pl.DataFrame,
+        text: pl.DataFrame,
+        columns: Sequence[tuple[Column, int]],
+    ) -> None:
+        """Refuse a cell the two loads read as another (:meth:`_refuse_number_text`, :meth:`_refuse_leap_day`)."""
+        self._refuse_number_text(reader, grid, frame, text, columns)
+        self._refuse_leap_day(reader, frame, columns)
+
+    def _refuse_number_text(
+        self,
+        reader: fastexcel.ExcelReader,
+        grid: pl.DataFrame,
+        frame: pl.DataFrame,
+        text: pl.DataFrame,
+        columns: Sequence[tuple[Column, int]],
+    ) -> None:
+        """Refuse a number field's text cell that holds a value: one written as a number (``2``) reads as it typed.
+
+        No text tells such a cell from a number cell, so the table's number columns, and the cells its number ``Cell``
+        fields state, are loaded once more, as booleans: fastexcel reads a number cell so (``0`` is false) and a text
+        cell as none. *frame* holds the table's values and *text* its cells (both a row per sheet row under the header),
+        *grid* the sheet's text; *columns*, each column and its sheet column (``A`` is 0). A format whose numbers are
+        written as text (:attr:`_number_text`) loads nothing.
+        """
+        numbers = [(column, at) for column, at in columns if _reads_numbers(column)]
+        cells = [
+            (column, column.cell)
+            for column in self._columns
+            if column.cell is not None and _reads_numbers(column) and str(column.cell[1]) in grid.columns
+        ]
+        if self._number_text or not (numbers or cells):
+            return
+        top = min([self._header_row, *(row - 1 for _, (row, _) in cells)])
+        ats = sorted({*(at for _, at in numbers), *(at for _, (_, at) in cells)})
+        kinds = self._load(reader, self._sheet, skip_rows=top, dtypes=dict.fromkeys(ats, "boolean"), use_columns=ats)
+        for column, at in numbers:
+            kind = kinds[str(at)].slice(self._header_row - top, frame.height)
+            kind = kind.extend_constant(None, frame.height - kind.len())  # the sheet's last rows, empty here
+            held = frame[column.field].is_not_null() & kind.is_null()
+            _refuse(text[column.field].alias(column.label or column.field), held, "number cell", self._row_one)
+        for column, (row, at) in cells:
+            cell = _cell_at(grid, row - 1, at).cast(pl.String).str.strip_chars(" ")[0]
+            if cell not in {None, "", *self._null_values} and _cell_at(kinds, row - 1 - top, at)[0] is None:
+                msg = f"the {self._sheet!r} sheet's cell {column.label!r} {cell!r} is not a number cell"
+                raise ReadError(msg)
+
     def _refuse_leap_day(
         self, reader: fastexcel.ExcelReader, frame: pl.DataFrame, columns: Sequence[tuple[Column, int]]
     ) -> None:
@@ -796,9 +1060,8 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             checks = [(~cell.is_in(_BOOLEAN_CELLS) | number.is_null(), "boolean cell")]
         else:
             # ... a boolean cell as a number (true is 1.0), and a text cell as the number its text is (``1e3``). A
-            # number cell's text is fastexcel's of a number. shortcut: a text cell written as fastexcel writes a number
-            # (``2``, ``2.5``) still reads as that number, as no load but one more tells it from a number cell (a mixed
-            # table's read 35% slower); read a sheet that writes numbers as text by NumberTextSheet.
+            # number cell's text is fastexcel's of a number; a text cell written so (``2``) is refused by its kind
+            # (:meth:`_refuse_number_text`).
             wrong = number.is_null() | ~cell.str.contains(_NUMBER_CELL)
             checks = (
                 [
@@ -874,7 +1137,10 @@ class NumberTextSheet[RowT: msgspec.Struct](SheetFile[RowT]):
     digit; a float field's a decimal (``-1.03``, ``.5``; no exponent, ``nan`` or ``inf``). A number cell, whose text is
     a decimal too, keeps every digit it holds. A text cell that is no such number, or a boolean, date or time cell,
     raises. Composed after a piece that cleans the text (``class _Sheet(PaddedSheet[RowT], NumberTextSheet[RowT])``).
+    Reading text as numbers, it pays no load to tell a text cell from a number cell (:attr:`SheetFile._number_text`).
     """
+
+    _number_text = True
 
     @typing.override
     def _value(self, column: Column, text: pl.Series, typed: pl.Series) -> pl.Series:

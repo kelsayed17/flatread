@@ -132,12 +132,14 @@ parser's own error, or its panic (polars' and calamine's are `BaseException`s), 
 
 **Hostile bodies.** A read is bounded by its body: a zip member inflates to at most 1 GiB in all, a PDF's streams
 decode to at most 128 MiB and its forms nest 16 deep, an SDMX message holds at most 1 MiB outside its series, and an
-`.xls` sheet spans at most 2^23 cells. Past a bound the read raises `ReadError`, before it holds the rest.
+`.xlsx` or `.xls` sheet spans at most 2^23 cells and 16,384 columns. Past a bound the read raises `ReadError`, before
+it holds the rest.
 
-**Known limits**, each kept because closing it would slow the read it guards (measured, in the code's `shortcut:`
-comments): a CSV number cell with leading whitespace (`" 5"`) or a float that underflows (`1e-400`) reads as polars
-reads it; a sheet's text cell written exactly as a number (`"2"`) reads as that number; and an `.xlsx` whose cells
-stand far apart is loaded as dense as calamine builds it.
+**Strictness costs time, by choice.** A CSV's number columns are read as text and then cast, so a cell padded with
+whitespace (`" 5"`) or a float that underflows (`1e-400`) raises; it makes a CSV read 10-30% slower. A sheet's number
+columns get a third load, which tells a text cell from a number cell, so text written as a number (`"2"`) or as a
+token (`n/a`, `NA`) in a number field raises; and an `.xlsx`'s span is read from its cell references before calamine
+builds it. Together these make a sheet read 40-55% slower. An `.xlsb` or `.ods` is not read.
 
 ## From 5.0
 

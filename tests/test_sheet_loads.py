@@ -1,8 +1,13 @@
-"""How many times a sheet reader opens the workbook and loads a sheet, per read: once, and twice a sheet.
+"""How many times a sheet reader opens the workbook and loads a sheet, per read: once, and two or three times a sheet.
 
 fastexcel parses the whole sheet on every ``load_sheet`` (an ``n_rows=1`` load costs most of a full one), so a read
-loads its sheet's text once, which serves everything around the table, and its table typed once. A plain table whose
-every column holds one kind of cell, its field's, is read from one strict load; one that mixes kinds pays a third.
+loads its sheet's text once, which serves everything around the table, and its table typed once. A table with a
+number field loads its number columns a third time, as booleans: no text tells a text cell written as a number
+(``2``) from a number cell, and fastexcel's boolean load reads only a number (or boolean) cell as a value, so the
+third load is what refuses the text cell (NumberTextSheet, which reads such text, skips it). A plain table whose every
+column holds one kind of cell, its field's, is read from one strict load, which refuses a column mixing number cells
+and number text; one with an empty cell pays a second, as text, since the strict load reads a word for none (``NA``)
+as none too; one that mixes kinds pays the failed strict load and the two or three.
 """
 
 import collections
@@ -113,24 +118,24 @@ _TABLE = [["Name", "Count"], ["a", 1]]
 _UNDER_TITLE = [["Title"], *_TABLE]
 _READS: list[tuple[str, File[typing.Any], bytes, int, int]] = [
     ("SheetFile", SheetFile(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 1),
-    ("a column of mixed kinds", SheetFile(_Item, sheet="S"), workbook({"S": [*_TABLE, [2, 3]]}), 1, 3),
-    ("tokens for none", SheetFile(_Item, sheet="S", null_values=["."]), workbook({"S": _TABLE}), 1, 2),
-    ("BesideSheet", BesideSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count", "x"], ["a", 1, "y"]]}), 1, 2),
-    ("NotedSheet", NotedSheet(_Item, sheet="S"), workbook({"S": [*_TABLE, ["Source: x"]]}), 1, 2),
-    ("DatedSheet", DatedSheet(_Day, sheet="S"), workbook({"S": [["Day", "Value"], [_DAY, 1.5], ["note"]]}), 1, 2),
-    ("PaddedSheet", PaddedSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count"], [" a", 1]]}), 1, 2),
+    ("a column of mixed kinds", SheetFile(_Item, sheet="S"), workbook({"S": [*_TABLE, [2, 3]]}), 1, 4),
+    ("tokens for none", SheetFile(_Item, sheet="S", null_values=["."]), workbook({"S": _TABLE}), 1, 3),
+    ("BesideSheet", BesideSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count", "x"], ["a", 1, "y"]]}), 1, 3),
+    ("NotedSheet", NotedSheet(_Item, sheet="S"), workbook({"S": [*_TABLE, ["Source: x"]]}), 1, 3),
+    ("DatedSheet", DatedSheet(_Day, sheet="S"), workbook({"S": [["Day", "Value"], [_DAY, 1.5], ["note"]]}), 1, 3),
+    ("PaddedSheet", PaddedSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count"], [" a", 1]]}), 1, 3),
     ("NumberTextSheet", NumberTextSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count"], ["a", "1"]]}), 1, 2),
-    ("CellHeaderSheet", CellHeaderSheet(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
-    ("a stripped header", _Stripped(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
-    ("TitledSheet", _Titled(_Item, sheet="S", header_row=2), workbook({"S": _UNDER_TITLE}), 1, 2),
-    ("PreambleSheet", PreambleSheet(_Item, sheet="S"), workbook({"S": [["banner"], ["link"], *_TABLE]}), 1, 2),
-    ("OnlySheet", OnlySheet(_Item), workbook({"Any name": _TABLE}), 1, 2),
+    ("CellHeaderSheet", CellHeaderSheet(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 3),
+    ("a stripped header", _Stripped(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 3),
+    ("TitledSheet", _Titled(_Item, sheet="S", header_row=2), workbook({"S": _UNDER_TITLE}), 1, 3),
+    ("PreambleSheet", PreambleSheet(_Item, sheet="S"), workbook({"S": [["banner"], ["link"], *_TABLE]}), 1, 3),
+    ("OnlySheet", OnlySheet(_Item), workbook({"Any name": _TABLE}), 1, 3),
     (
         "GroupedSheet",
         _Answers(_Answer, sheet="S", header_row=2),
         workbook({"S": [["a link", "One", None, "Two"], [None, "a", "b", "a"], [_DAY, 1, None, 3]]}),
         1,
-        2,
+        3,
     ),
     (
         "SheetsFile, three sheets",
@@ -139,20 +144,20 @@ _READS: list[tuple[str, File[typing.Any], bytes, int, int]] = [
         1,
         6,
     ),
-    ("Cell fields", SheetFile(_Stated, sheet="S", header_row=2), workbook({"S": [["x", None, _DAY], *_TABLE]}), 1, 2),
+    ("Cell fields", SheetFile(_Stated, sheet="S", header_row=2), workbook({"S": [["x", None, _DAY], *_TABLE]}), 1, 3),
     (
         "a date Cell over a column of numbers",
         SheetFile(_Over, sheet="S", header_row=2),
         workbook({"S": [[None, _DAY], *_TABLE]}),
         1,
-        3,
+        4,
     ),
     (
         "a date and a time Cell over one column of numbers",
         SheetFile(_Twice, sheet="S", header_row=3),
         workbook({"S": [[None, _DAY], [None, dt.time(9, 30)], *_TABLE]}),
         1,
-        4,
+        5,
     ),
     ("SheetText", SheetText(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
 ]
@@ -219,7 +224,8 @@ def test_one_load_reads_a_plain_table_as_the_two_loads_do(monkeypatch: pytest.Mo
         fastexcel.ExcelReader, "load_sheet", _counted(calls, "load_sheet", fastexcel.ExcelReader.load_sheet)
     )
     frame = SheetFile(_Kinds, sheet="S").frame(body)
-    assert calls["load_sheet"] == 1
+    # The strict load, and the empty cells' columns as text: a word for none (NA) is none to the strict load too.
+    assert calls["load_sheet"] == 2
     assert frame.equals(expected)
     assert frame.schema == expected.schema
 
