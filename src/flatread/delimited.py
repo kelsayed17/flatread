@@ -281,15 +281,19 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         del body
         return self._quote_char
 
-    def _polars(
+    def _polars(  # noqa: PLR0913 (what the read is)
         self,
         body: bytes,
         schema: Mapping[str, type[pl.DataType]],
         labels: Sequence[str],
         quote_char: str | None,
         new_columns: Sequence[str] | None,
-    ) -> pl.DataFrame:
+        *,
+        header: Sequence[str] | None,
+    ) -> tuple[pl.DataFrame, _Tally]:
         """Read *body* with ``read_csv``, its cells as *schema*'s columns, by name or, given *new_columns*, by place.
+
+        And return its :func:`_tally`, its *header*'s cells (``None`` for none) and text cells counted in.
 
         polars' error, or its panic, is raised as a ``ReadError``: naming the row where a row's width is what polars
         refused, else the cell that is not its type, by its column's header cell in *labels*. polars' parser takes a
@@ -311,9 +315,10 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         )
         try:
             parsed = read(schema=dict(schema))
+            tally = _tally(body, parsed, self._separator, header)
             floats = [name for name, dtype in numbers.items() if dtype is pl.Float64]
             if not numbers or (
-                _unpadded(body, parsed, self._separator, quote_char, header=self._header)
+                _unpadded(tally, self._separator)
                 and not (
                     floats
                     and parsed.select(pl.any_horizontal((pl.col(floats) == 0).any())).item()
@@ -321,7 +326,7 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
                     and pl.select(pl.lit(body).bin.contains(b"e-") | pl.lit(body).bin.contains(b"E-")).item()
                 )
             ):
-                return parsed
+                return parsed, tally
             text = read(schema={name: pl.String if name in numbers else dtype for name, dtype in schema.items()})
         except (pl.exceptions.PolarsError, pl.exceptions.PanicException) as e:
             self._refuse(body, schema=schema, labels=labels, quote_char=quote_char, new_columns=new_columns, e=e)
@@ -333,7 +338,7 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         )
         if suspect and _mistyped(text, schema, labels, frame) is not None:
             self._refuse(body, schema=schema, labels=labels, quote_char=quote_char, new_columns=new_columns, e=None)
-        return frame
+        return frame, tally  # its text cells the parsed read's
 
     def _refuse(  # noqa: PLR0913 (what the read was)
         self,
@@ -440,8 +445,8 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         else:
             schema, new_columns = self._schema, None
             labels = [self._schema_labels[name] for name in schema]
-        frame = self._polars(body, schema, labels, quote, new_columns)
-        if not _full(body, frame, self._separator, header):
+        frame, tally = self._polars(body, schema, labels, quote, new_columns, header=header)
+        if not _full(frame, tally, self._separator, header=header is not None):
             # names the row the count found
             _check_widths(body, self._separator, quoting=quote is not None, header=self._header)
             msg = "the body's separators are not as many as its rows, each as wide as the header, hold"
@@ -1064,39 +1069,51 @@ def _header(body: bytes, separator: str, quote: str | None = '"') -> list[str]:
     return header
 
 
-def _full(body: bytes, frame: pl.DataFrame, separator: str, header: Sequence[str] | None) -> bool:
-    """Return whether every row of *body* is as wide as its *header* (its cells), *frame* being polars' read of it.
+def _full(frame: pl.DataFrame, tally: _Tally, separator: str, *, header: bool) -> bool:
+    """Return whether every row of a body is as wide as its header, *frame* being polars' read of it, *tally* its count.
 
     Full rows hold ``(rows + 1) * (columns - 1)`` separators (``rows * (columns - 1)`` with no *header*), plus the ones
     inside a header cell or a text cell (quoted): a short row, which polars pads with nulls, holds fewer. Counted in the
     bytes (C), with no line split: on a 79 MB file of 1.7 million rows, about 25 ms beside polars' 50 ms read.
     """
-    inside = (0 if header is None else sum(cell.count(separator) for cell in header)) + _inside(frame, separator)
-    return body.count(separator.encode()) == (frame.height + (header is not None)) * (frame.width - 1) + inside
+    return tally.written[separator] == (frame.height + header) * (frame.width - 1) + tally.inside[separator]
 
 
-def _inside(frame: pl.DataFrame, character: str) -> int:
-    """Return how often *character* is written in *frame*'s text cells: their columns joined in a pass, counted (C)."""
-    texts = [name for name, dtype in frame.schema.items() if dtype == pl.String]
-    if not texts:
-        return 0
-    return sum(str(cells or "").count(character) for cells in frame.select(pl.col(texts).str.join("")).row(0))
+class _Tally(typing.NamedTuple):
+    """How often a body writes its separator, a space and a tab: in all (*written*), and *inside* its cells' text."""
+
+    written: Mapping[str, int]
+    inside: Mapping[str, int]
 
 
-def _unpadded(body: bytes, frame: pl.DataFrame, separator: str, quote: str | None, *, header: bool) -> bool:
-    """Return whether no cell of *body*, read as *frame*, may be a number after spaces or a tab (`` 5``).
+def _tally(body: bytes, frame: pl.DataFrame, separator: str, header: Sequence[str] | None) -> _Tally:
+    """Count *separator*, a space and a tab in *body*, and inside *header*'s cells and *frame*'s text cells (C).
 
-    Every space and tab in the body (but the separator's) is counted, in the bytes (C), against those inside the
-    frame's text cells and, where the body opens on a *header* (its cells quoted with *quote*), its cells: one in
-    neither may lead a number. One in a cell read otherwise (a date, a token for none) makes the body suspect too.
+    The body is one pass, its every other byte deleted (:func:`_others`); the text cells one select, each column
+    joined.
     """
-    cells = _header(body, separator, quote) if header else []
-    return all(
-        blank == separator
-        or blank.encode() not in body
-        or body.count(blank.encode()) == sum(cell.count(blank) for cell in cells) + _inside(frame, blank)
-        for blank in " \t"
-    )
+    characters = dict.fromkeys((separator, " ", "\t"))
+    left = body.translate(None, _others(separator))
+    texts = [name for name, dtype in frame.schema.items() if dtype == pl.String]
+    joined = frame.select(pl.col(texts).str.join("")).row(0) if texts else ()
+    cells = "".join([*(header or ()), *(str(column or "") for column in joined)])
+    return _Tally({c: left.count(c.encode()) for c in characters}, {c: cells.count(c) for c in characters})
+
+
+@functools.cache
+def _others(separator: str) -> bytes:
+    """Return every byte but *separator*'s, a space's and a tab's: what :func:`_tally` deletes from a body."""
+    kept = {*separator.encode(), *b" \t"}
+    return bytes(byte for byte in range(256) if byte not in kept)
+
+
+def _unpadded(tally: _Tally, separator: str) -> bool:
+    """Return whether no cell of a body, by its *tally*, may be a number after spaces or a tab (`` 5``).
+
+    Every space and tab in the body (but the separator's) is one inside its header's or text cells: one elsewhere
+    may lead a number, and one in a cell read otherwise (a date, a token for none) makes the body suspect too.
+    """
+    return all(blank == separator or tally.written[blank] == tally.inside[blank] for blank in " \t")
 
 
 def _check_widths(body: bytes, separator: str, *, quoting: bool = True, header: bool = True) -> None:
