@@ -66,6 +66,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.24.0",  # asyncio_mode = "auto" above: StreamedZip reads async chunks
     "pytest-cov>=7.1.0",
+    "pytest-codspeed>=5.0.3",  # benchmarks/test_speed.py, the CodSpeed job
     "ruff>=0.16.7",
     "ty>=0.0.86",
     "deptry>=0.25.1",  # [tool.deptry]: the dependencies against what src/ imports
@@ -133,6 +134,8 @@ ban-relative-imports = "all"
 # Python 3.14 evaluates an annotation when it is read, so a name imported only under TYPE_CHECKING breaks
 # inspect.signature on the public API (tests/test_signatures_resolve.py): src keeps its imports at runtime.
 "src/**" = ["TC001", "TC002", "TC003"]
+# A benchmark's name says what it times; pytest collects the directory without a package.
+"benchmarks/**" = ["D1", "INP001"]
 "tests/**" = [
     # Docstrings are required in src; a test's name says what it checks.
     "D1", "D205",
