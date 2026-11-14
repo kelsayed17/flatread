@@ -311,11 +311,13 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         )
         try:
             parsed = read(schema=dict(schema))
+            floats = [name for name, dtype in numbers.items() if dtype is pl.Float64]
             if not numbers or (
                 _unpadded(body, parsed, self._separator, quote_char, header=self._header)
                 and not (
-                    any(dtype is pl.Float64 and (parsed[name] == 0).any() for name, dtype in numbers.items())
-                    and pl.Series([body]).bin.contains(b"e-").item() | pl.Series([body]).bin.contains(b"E-").item()
+                    floats
+                    and parsed.select(pl.any_horizontal((pl.col(floats) == 0).any())).item()
+                    and (b"e-" in body or b"E-" in body)
                 )
             ):
                 return parsed
@@ -1073,12 +1075,11 @@ def _full(body: bytes, frame: pl.DataFrame, separator: str, header: Sequence[str
 
 
 def _inside(frame: pl.DataFrame, character: str) -> int:
-    """Return how often *character* is written in *frame*'s text cells: each column joined once, then counted (C)."""
-    return sum(
-        str(frame[name].str.join("").item() or "").count(character)
-        for name, dtype in frame.schema.items()
-        if dtype == pl.String
-    )
+    """Return how often *character* is written in *frame*'s text cells: their columns joined in a pass, counted (C)."""
+    texts = [name for name, dtype in frame.schema.items() if dtype == pl.String]
+    if not texts:
+        return 0
+    return sum(str(cells or "").count(character) for cells in frame.select(pl.col(texts).str.join("")).row(0))
 
 
 def _unpadded(body: bytes, frame: pl.DataFrame, separator: str, quote: str | None, *, header: bool) -> bool:

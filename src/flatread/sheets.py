@@ -549,15 +549,15 @@ class _BoundedXlsx(fastexcel.ExcelReader):
         found = []
         with _unzipped(self._body) as archive, archive.open(parts[0]) as part:
             for chunk in _chunks(part):
-                cells = pl.Series([chunk.decode("utf-8", "replace")]).str.extract_all(unnumbered).explode()
-                found.append(cells.drop_nulls().str.extract_groups(unnumbered))
-        return (
-            pl.concat(found)
-            .struct.unnest()
-            .select(
-                pl.col("1").str.to_uppercase().replace_strict(letters, return_dtype=pl.Int64).alias("at"),
-                pl.col("2").cast(pl.Int64).alias("row"),
-            )
+                cells = pl.col("part").str.extract_all(unnumbered).explode().drop_nulls().str.extract_groups(unnumbered)
+                found.append(pl.DataFrame({"part": [chunk.decode("utf-8", "replace")]}).select(cells))
+        return pl.concat(found).select(
+            pl.col("part")
+            .struct.field("1")
+            .str.to_uppercase()
+            .replace_strict(letters, return_dtype=pl.Int64)
+            .alias("at"),
+            pl.col("part").struct.field("2").cast(pl.Int64).alias("row"),
         )
 
 
@@ -1055,8 +1055,10 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         height = last - top
         found = reader.unnumbered(self._sheet, ats) if isinstance(reader, _BoundedXlsx) else None
         if found is not None:
-            rows = pl.int_range(top + 1, last + 1, dtype=pl.Int64, eager=True)
-            return pl.DataFrame({str(at): rows.is_in(found.filter(pl.col("at") == at)["row"].implode()) for at in ats})
+            rows = pl.int_range(top + 1, last + 1, dtype=pl.Int64)
+            return pl.select(
+                rows.is_in(pl.lit(found.filter(pl.col("at") == at)["row"]).implode()).alias(str(at)) for at in ats
+            )
         kinds = self._load(reader, self._sheet, skip_rows=top, dtypes=dict.fromkeys(ats, "boolean"), use_columns=ats)
         # The sheet's last rows, empty here, hold no number text.
         return pl.DataFrame(
