@@ -1,7 +1,8 @@
 """An export whose header is found below any title lines by its labels, each column read by its label.
 
 :class:`FoundTable` finds the header by its key field's words and reads each column under the field its cell names;
-:class:`FoundCsv` reads the export's lines from a CSV, :class:`FoundSheet` from a workbook's first sheet.
+:class:`FoundCsv` reads the export's lines from a CSV, and :class:`flatread.sheets.FoundSheet` from a workbook's first
+sheet (the ``excel`` extra), so this module needs no extra.
 """
 
 import abc
@@ -10,15 +11,13 @@ import io
 import typing
 from collections.abc import Collection, Sequence
 
-import fastexcel
 import msgspec
 import polars as pl
 
 from flatread.core import TextFile, _Column, _decoded
 from flatread.errors import LayoutError, ReadError
-from flatread.sheets import text_sheet
 
-__all__ = ["FoundCsv", "FoundSheet", "FoundTable"]
+__all__ = ["FoundCsv", "FoundTable"]
 
 
 class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
@@ -140,17 +139,3 @@ class FoundCsv[RowT: msgspec.Struct](FoundTable[RowT]):
     @typing.override
     def _lines(self, body: bytes) -> list[list[str]]:
         return list(csv.reader(io.StringIO(_decoded(body, ("utf-8-sig", "latin-1")), newline="")))
-
-
-class FoundSheet[RowT: msgspec.Struct](FoundTable[RowT]):
-    """A :class:`FoundTable` on the first sheet of a workbook (``.xlsx``, ``.xls``), its cells as text."""
-
-    @typing.override
-    def _lines(self, body: bytes) -> list[list[str]]:
-        try:
-            reader = fastexcel.read_excel(body)
-            sheet = text_sheet(reader, reader.sheet_names[0])
-        except fastexcel.FastExcelError as e:
-            msg = f"the body is not a workbook: {e}"
-            raise ReadError(msg) from e
-        return [[cell or "" for cell in line] for line in sheet.iter_rows()]

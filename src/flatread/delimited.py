@@ -53,8 +53,8 @@ from flatread.core import (
     _MOMENTS,
     _NUL,
     File,
-    GridFile,
     Thousands,
+    _check_ending,
     _Column,
     _first,
     _flagged,
@@ -64,10 +64,10 @@ from flatread.core import (
     _stated,
     _temporal,
     _typed,
-    check_ending,
 )
 from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
 from flatread.fields import Flag, Format
+from flatread.grids import GridFile
 
 __all__ = [
     "CsvFile",
@@ -272,7 +272,7 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
             msg = "the body is empty"
             raise EmptyBodyError(msg)
         if self._final_line_ending is not None:
-            check_ending(body, final_line_ending=self._final_line_ending)
+            _check_ending(body, final_line_ending=self._final_line_ending)
         if body.startswith((b"\n", b"\r\n"), len(_BOM) if body.startswith(_BOM) else 0):  # no copy of the body
             msg = "the body opens with a blank line, not its header"
             raise ReadError(msg)

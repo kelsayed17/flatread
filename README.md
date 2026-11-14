@@ -46,14 +46,15 @@ consumer installs no extra and loads no HTML, PDF or workbook library (the impor
 | Module | Reads | Extra |
 |---|---|---|
 | `flatread.fields` | a row field's markers: `Label`, `Format`, `Flag`, `Cell`, `Joined`, `Span`, `Shape`, `Link` | |
-| `flatread.core` | `File`, the base every reader composes on; `TextFile`, `GridFile`, `Reshaped`, `Carried`, `Thousands` | |
+| `flatread.core` | `File`, the base every reader composes on; `TextFile`, `Reshaped`, `Carried`, `Thousands` | |
+| `flatread.grids` | a table cut from a grid of text cells: `GridFile`, `TitledGrid`, `FilledHeader`, `BlankEnded`, `BesideGrid` | |
 | `flatread.delimited` | CSV and delimited text: `CsvFile`, `CsvText`, `HeadersCsv`, `NamedCsv`, `PaddedCsv`, `PreambleCsv`, `SectionedCsv`, `SpilledCsv`, `ThousandsCsv`, `TitledCsv`, `TrailerCsv` | |
 | `flatread.fixed` | fixed-width text: `FixedWidthFile` | |
 | `flatread.layout` | a wide table read long: `LongFile` | |
 | `flatread.archives` | a file in a zip or a legacy encoding: `ZippedFile`, `ZippedFiles`, `ZippedOrBare`, `StreamedZip`, `Transcoded` | |
 | `flatread.reports` | a table laid out for print: `ReportFile`, `LongReport` | |
-| `flatread.sheets` | xlsx and xls workbooks: `SheetFile`, `SheetsFile`, `SheetText`, and a class per sheet shape | `excel` |
-| `flatread.found` | a table whose header is found by its labels: `FoundCsv`, `FoundSheet`, `FoundTable` | `excel` |
+| `flatread.sheets` | xlsx and xls workbooks: `SheetFile`, `SheetsFile`, `SheetText`, `FoundSheet`, and a class per sheet shape | `excel` |
+| `flatread.found` | a table whose header is found by its labels: `FoundTable`, `FoundCsv` (`FoundSheet` is in `flatread.sheets`) | |
 | `flatread.markup` | XML: `XmlFile`, `NestedXml` | `xml` |
 | `flatread.sdmx` | SDMX-CSV and SDMX-ML: `SdmxCsv`, `SdmxStructure`, `SdmxSeries`, `SdmxObservations` | `xml` |
 | `flatread.pages` | HTML tables and records: `HtmlFile`, `HtmlRecords` | `html` |

@@ -41,7 +41,7 @@ long, a :class:`CellHeaderSheet` reads a header of date cells as their text, so 
 
 fastexcel's ``dtypes="string"`` load rounds a number cell to 9 decimal places: ``13442.008862616791`` in the XML
 comes back as ``13442.008862617`` and ``1e-10`` as ``0`` (measured on fastexcel 0.21.0, the latest, 2026-11-09), so a
-decoder that types the text loses the rest. :func:`text_sheet` loads the sheet a second time as floats and, for each
+decoder that types the text loses the rest. :func:`_text_sheet` loads the sheet a second time as floats and, for each
 cell whose text reads as a different number, takes the float's shortest round-trip form instead. Text cells
 (``'1.50'`` stays ``1.50``), dates and numbers the text already holds exactly stay as the text load writes them.
 """
@@ -63,7 +63,6 @@ import xlrd
 from flatread.core import (
     _UNIT,
     File,
-    GridFile,
     _check_above,
     _Column,
     _first,
@@ -76,6 +75,8 @@ from flatread.core import (
     _temporal,
 )
 from flatread.errors import LayoutError, ReadError
+from flatread.found import FoundTable
+from flatread.grids import GridFile
 from flatread.layout import LongFile
 
 __all__ = [
@@ -83,6 +84,7 @@ __all__ = [
     "BiffSheet",
     "CellHeaderSheet",
     "DatedSheet",
+    "FoundSheet",
     "GroupedSheet",
     "NotedSheet",
     "NumberTextSheet",
@@ -94,7 +96,6 @@ __all__ = [
     "SheetsFile",
     "TitledSheet",
     "sheet_grid",
-    "text_sheet",
 ]
 
 #: The fastexcel type each field scalar's column is loaded as: a whole number as a float, which is then checked whole
@@ -441,7 +442,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             stated.append(self._stated(column, text, value))
         return typed.slice(self._header_row - start), stated
 
-    def frame_on(self, reader: fastexcel.ExcelReader, body: bytes) -> pl.DataFrame:
+    def _frame_on(self, reader: fastexcel.ExcelReader, body: bytes) -> pl.DataFrame:
         """Read *body*'s table as :meth:`frame` does, from *reader*, the workbook open for it: one open, many sheets."""
         return self._placed(reader).frame(body)
 
@@ -760,7 +761,7 @@ class SheetsFile[RowT: msgspec.Struct](File[RowT]):
         frames = []
         for name, group in zip(names, groups, strict=True):
             try:
-                frame = self._each(name).frame_on(reader, body)
+                frame = self._each(name)._frame_on(reader, body)  # noqa: SLF001 (a sheet reader of its own)
             except ValueError as e:
                 msg = f"the {name!r} sheet: {e}"
                 # A sheet's reader is built here too: a misdeclared one stays a LayoutError, an empty sheet empty.
@@ -868,7 +869,7 @@ def _text_grid(reader: fastexcel.ExcelReader, sheet: str, null_values: Sequence[
         msg = f"the workbook has no sheet {sheet!r}; its sheets are {reader.sheet_names!r}"
         raise ReadError(msg)
     try:
-        text = text_sheet(reader, sheet)
+        text = _text_sheet(reader, sheet)
     except fastexcel.FastExcelError as e:
         msg = f"the workbook's {sheet!r} sheet will not load: {e}"
         raise ReadError(msg) from e
@@ -886,7 +887,7 @@ class SheetText[RowT: msgspec.Struct](GridFile[RowT]):
     reads the workbook's one sheet, whatever its name.
     """
 
-    #: The workbook :meth:`frame_on` was handed, open: the grid is read from it, not from the body.
+    #: The workbook :meth:`_frame_on` was handed, open: the grid is read from it, not from the body.
     _opened: fastexcel.ExcelReader | None = None
 
     def __init__(
@@ -896,7 +897,7 @@ class SheetText[RowT: msgspec.Struct](GridFile[RowT]):
         super().__init__(row, header_row=header_row, null_values=null_values)
         self._sheet = sheet
 
-    def frame_on(self, reader: fastexcel.ExcelReader, body: bytes) -> pl.DataFrame:
+    def _frame_on(self, reader: fastexcel.ExcelReader, body: bytes) -> pl.DataFrame:
         """Read *body*'s table as :meth:`frame` does, from *reader*, the workbook open for it: one open, many sheets."""
         placed = object.__new__(type(self))
         vars(placed).update(vars(self), _opened=reader)
@@ -1021,7 +1022,7 @@ class GroupedSheet[RowT: msgspec.Struct](LongFile[RowT], CellHeaderSheet[RowT]):
         return named
 
 
-def text_sheet(reader: fastexcel.ExcelReader, name: str) -> pl.DataFrame:
+def _text_sheet(reader: fastexcel.ExcelReader, name: str) -> pl.DataFrame:
     """Load sheet *name* of *reader* with no header row, every cell as text, each decimal number to its last digit.
 
     Row *i* of the frame is the sheet's row *i* + 1, as Excel numbers it, leading empty rows kept. Columns start at
@@ -1045,3 +1046,17 @@ def text_sheet(reader: fastexcel.ExcelReader, name: str) -> pl.DataFrame:
         .alias(names[column])
         for column in text.columns
     )
+
+
+class FoundSheet[RowT: msgspec.Struct](FoundTable[RowT]):
+    """A :class:`FoundTable` on the first sheet of a workbook (``.xlsx``, ``.xls``), its cells as text."""
+
+    @typing.override
+    def _lines(self, body: bytes) -> list[list[str]]:
+        try:
+            reader = fastexcel.read_excel(body)
+            sheet = _text_sheet(reader, reader.sheet_names[0])
+        except fastexcel.FastExcelError as e:
+            msg = f"the body is not a workbook: {e}"
+            raise ReadError(msg) from e
+        return [[cell or "" for cell in line] for line in sheet.iter_rows()]

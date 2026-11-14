@@ -17,19 +17,7 @@ import pytest
 
 from flatread import fields, sheets
 from flatread.archives import Transcoded, ZippedFile, ZippedFiles, ZippedOrBare
-from flatread.core import (
-    BesideGrid,
-    BlankEnded,
-    Carried,
-    File,
-    FilledHeader,
-    GridFile,
-    Reshaped,
-    TextFile,
-    Thousands,
-    TitledGrid,
-    _Column,
-)
+from flatread.core import Carried, File, Reshaped, TextFile, Thousands, _Column
 from flatread.delimited import (
     CsvFile,
     CsvText,
@@ -46,7 +34,8 @@ from flatread.delimited import (
 from flatread.errors import LayoutError, ReadError
 from flatread.fields import Flag, Format, Joined, Label, Shape, Span
 from flatread.fixed import FixedWidthFile
-from flatread.found import FoundCsv, FoundSheet
+from flatread.found import FoundCsv
+from flatread.grids import BesideGrid, BlankEnded, FilledHeader, GridFile, TitledGrid
 from flatread.layout import LongFile
 from flatread.markup import NestedXml, XmlFile
 from flatread.reports import LongReport, ReportFile
@@ -55,6 +44,7 @@ from flatread.sheets import (
     BiffSheet,
     CellHeaderSheet,
     DatedSheet,
+    FoundSheet,
     GroupedSheet,
     NotedSheet,
     NumberTextSheet,

@@ -289,11 +289,11 @@ Monthly rows quoted cleanly, then prose notes cut at fixed widths that misquote 
 
 ### `BlankEnded`
 
-[`blank_ended.csv`](blank_ended.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[g17_mv_sales_sf].yaml`, interaction 0. Read by [`BlankEnded`](../../src/flatread/core.py), in federal_reserve `_SeasonalFactors` (`mv_sales_sf`).
+[`blank_ended.csv`](blank_ended.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[g17_mv_sales_sf].yaml`, interaction 0. Read by [`BlankEnded`](../../src/flatread/grids.py), in federal_reserve `_SeasonalFactors` (`mv_sales_sf`).
 
 The months stop at a blank row; a `Last Updated:` note stands below it. The excerpt keeps the first two and last three months.
 
-Its twins: [`GridFile`](../../src/flatread/core.py) reads every filled row to the grid's end, skipping blank ones; [`NotedSheet`](#notedsheet) ends at its first row with nothing past column A, where this ends at a row with nothing at all.
+Its twins: [`GridFile`](../../src/flatread/grids.py) reads every filled row to the grid's end, skipping blank ones; [`NotedSheet`](#notedsheet) ends at its first row with nothing past column A, where this ends at a row with nothing at all.
 
 ```
                                                           ,Monthly Seasonal Factors for,,,,,
@@ -312,7 +312,7 @@ Last Updated:  9-30-2026,,,,,,
 
 ### `TitledGrid`
 
-[`titled_grid.csv`](titled_grid.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[g17_seasadj_spec].yaml`, interaction 0. Read by [`TitledGrid`](../../src/flatread/core.py), in federal_reserve `_SeasonalSpecs` and `_Holidays` (each with `BlankEnded`).
+[`titled_grid.csv`](titled_grid.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[g17_seasadj_spec].yaml`, interaction 0. Read by [`TitledGrid`](../../src/flatread/grids.py), in federal_reserve `_SeasonalSpecs` and `_Holidays` (each with `BlankEnded`).
 
 Prose, then two tables, each under a row that is its title alone (`I. Specifications for individual IP indexes`, `II. User-defined holiday variables`). The excerpt keeps two rows of the first table and one of the second.
 
@@ -337,7 +337,7 @@ Jan1972,-1.7000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,-0.4182,
 
 ### `BesideGrid`
 
-[`beside_grid.csv`](beside_grid.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[payments_NACHA_Same_Day_Entry_Fee].yaml`, interaction 0. Read by [`BesideGrid`](../../src/flatread/core.py), in federal_reserve `_SameDayAch` (columns B to D) and `_SameDayAchAdjustments` (F on).
+[`beside_grid.csv`](beside_grid.csv), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[payments_NACHA_Same_Day_Entry_Fee].yaml`, interaction 0. Read by [`BesideGrid`](../../src/flatread/grids.py), in federal_reserve `_SameDayAch` (columns B to D) and `_SameDayAchAdjustments` (F on).
 
 Two fee reviews side by side, with an empty column between, their header cells holding line breaks. The excerpt keeps the first ten columns, written out again as CSV.
 
@@ -747,7 +747,7 @@ Its twin: [`SheetFile`](#sheetfile) has fastexcel load one typed table under the
 
 ### `FilledHeader`
 
-[`filled_header.txt`](filled_header.txt), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[disclosures_talf-transaction-specific-disclosures-01-11-24].yaml`, interaction 0, sheet `TALF Material Investors`. Read by [`FilledHeader`](../../src/flatread/core.py), in federal_reserve `_DisclosureSheet` (each sheet of `_Disclosures`, a `SheetsFile`).
+[`filled_header.txt`](filled_header.txt), recorded in `tests/federal_reserve/cassettes/test_recorded/test_file[disclosures_talf-transaction-specific-disclosures-01-11-24].yaml`, interaction 0, sheet `TALF Material Investors`. Read by [`FilledHeader`](../../src/flatread/grids.py), in federal_reserve `_DisclosureSheet` (each sheet of `_Disclosures`, a `SheetsFile`).
 
 The header is row 2, under a one-cell title: the first row filling at least two cells and at most three fewer than the fullest. Each release words its titles and labels its own way, so no label finds it. The one-cell note at the end is no record.
 
@@ -1211,7 +1211,7 @@ Year,Type,Count
 
 ### `FoundSheet`
 
-[`found_sheet.txt`](found_sheet.txt), recorded in `tests/sec/cassettes/test_recorded/test_body[file_municipal_advisors_2026_11].yaml` interaction 0. Read by [`FoundSheet`](../../src/flatread/found.py), in sec `_SheetExport`.
+[`found_sheet.txt`](found_sheet.txt), recorded in `tests/sec/cassettes/test_recorded/test_body[file_municipal_advisors_2026_11].yaml` interaction 0. Read by [`FoundSheet`](../../src/flatread/sheets.py), in sec `_SheetExport`.
 
 a workbook's first sheet: two title rows, the header found in row 3, merged cells leaving blank columns between labels
 

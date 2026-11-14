@@ -18,7 +18,7 @@ from collections.abc import Mapping
 import msgspec
 import polars as pl
 
-from flatread.core import _MOMENTS, File, _first, _lines, _typed
+from flatread.core import _MOMENTS, File, _check_ending, _first, _lines, _typed
 from flatread.errors import EmptyBodyError, LayoutError, ReadError
 
 __all__ = ["FixedWidthFile"]
@@ -84,10 +84,8 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         if not body or body.isspace():
             msg = "the body is empty"
             raise EmptyBodyError(msg)
-        if self._final_line_ending is not None and body.endswith((b"\n", b"\r")) != self._final_line_ending:
-            written = "always ends its last line" if self._final_line_ending else "never ends its last line"
-            msg = f"the body's end is not the file's, which {written} with a line ending: it was cut"
-            raise ReadError(msg)
+        if self._final_line_ending is not None:
+            _check_ending(body, final_line_ending=self._final_line_ending)
         lines, stated = self._table(_lines(body))
         if stated.keys() != self._stated:
             msg = f"the format states {sorted(stated)}, not the fields {sorted(self._stated)}"

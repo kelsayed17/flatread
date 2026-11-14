@@ -19,7 +19,7 @@ from collections.abc import Collection, Sequence
 import msgspec
 import polars as pl
 
-from flatread.core import TextFile, _decoded, _first, _lines
+from flatread.core import TextFile, _check_ending, _decoded, _first, _lines
 from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
 
 __all__ = ["LongReport", "ReportFile"]
@@ -89,10 +89,8 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
         if not body.strip():
             msg = "the body is empty"
             raise EmptyBodyError(msg)
-        if self._final_line_ending is not None and body.endswith((b"\n", b"\r")) != self._final_line_ending:
-            written = "always ends its last line" if self._final_line_ending else "never ends its last line"
-            msg = f"the body's end is not the report's, which {written} with a line ending: it was cut"
-            raise ReadError(msg)
+        if self._final_line_ending is not None:
+            _check_ending(body, final_line_ending=self._final_line_ending)
         lines, first = self._split(body)
         if self._end is not None:
             last = next((line for line in reversed(lines) if line.strip()), "")

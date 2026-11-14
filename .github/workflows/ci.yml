@@ -98,9 +98,9 @@ jobs:
           python-version: "3.14"
       - run: uv venv "$RUNNER_TEMP/core" && uv pip install --python "$RUNNER_TEMP/core/bin/python" .
       # The plain-text readers import on the core dependencies alone; each extra brings its own family's modules.
-      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.archives, flatread.delimited, flatread.fixed, flatread.layout, flatread.reports"'
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.archives, flatread.delimited, flatread.fixed, flatread.found, flatread.grids, flatread.layout, flatread.reports"'
       - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[excel]"
-      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.sheets, flatread.found"'
+      - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.sheets"'
       - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[xml]"
       - run: '"$RUNNER_TEMP/core/bin/python" -c "import flatread.markup, flatread.sdmx"'
       - run: uv pip install --python "$RUNNER_TEMP/core/bin/python" ".[html]"

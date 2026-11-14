@@ -28,8 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 # Each extra brings one format family's parsers; a module of another family never imports them (the import-linter
 # contracts below), so a CSV-only consumer installs none.
-# flatread.sheets, and flatread.found, which reads a found sheet through it: xlsx through fastexcel (calamine),
-# legacy .xls through xlrd.
+# flatread.sheets: xlsx through fastexcel (calamine), legacy .xls through xlrd.
 excel = ["fastexcel>=0.21", "polars[calamine]>=2.0", "xlrd>=2.0.2"]
 # flatread.markup and flatread.sdmx: XML through lxml's strict etree.
 xml = ["lxml>=6.1.1"]
@@ -186,17 +185,17 @@ root_packages = ["flatread"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-# A module per format family, each importing only the ones below it: fields < core < layout, archives
-# < delimited | sheets | fixed | markup < reports, found < pages | pdf | sdmx, and errors under them all. layout reads a
-# stacked header through File._joined_header, so it never imports sheets.
+# A module per format family, each importing only the ones below it, and errors under them all. layout reads a stacked
+# header through File._joined_header, so it never imports sheets; sheets reads a found table's lines from a workbook,
+# so found sits below it.
 name = "The readers are layered by format family"
 type = "layers"
 containers = ["flatread"]
 layers = [
     "pages | pdf | sdmx",
-    "reports | found",
+    "reports",
     "delimited | sheets | fixed | markup",
-    "layout | archives",
+    "layout | archives | found | grids",
     "core",
     "fields",
     "errors",
@@ -214,14 +213,15 @@ source_modules = [
     "flatread.errors",
     "flatread.fields",
     "flatread.fixed",
+    "flatread.found",
+    "flatread.grids",
     "flatread.layout",
     "flatread.sheets",
 ]
 forbidden_modules = ["lxml", "pdfminer", "scrapling"]
 
 [[tool.importlinter.contracts]]
-# Only a workbook's readers load the workbook libraries (the excel extra): sheets, and found's FoundSheet, which reads
-# through it.
+# Only the workbook readers, flatread.sheets, load the workbook libraries (the excel extra).
 name = "Only the workbook readers load fastexcel and xlrd"
 type = "forbidden"
 source_modules = [
@@ -231,6 +231,8 @@ source_modules = [
     "flatread.errors",
     "flatread.fields",
     "flatread.fixed",
+    "flatread.found",
+    "flatread.grids",
     "flatread.layout",
     "flatread.markup",
     "flatread.pages",
