@@ -1,8 +1,8 @@
 """SDMX messages read natively into their row struct's fields: one piece per message kind, each set by class attributes.
 
 SDMX (Statistical Data and Metadata eXchange) publishes data and its structure as messages. Each kind is a piece a
-format subclasses, setting its class attributes, and composes with the pieces of :mod:`flatread` (a zip's
-member is ``class _Structure(ZippedFile, SdmxStructure)``):
+format subclasses, setting its class attributes, and composes with the pieces of :mod:`flatread` (a zip's member is
+``class _Structure(ZippedFile[RowT], SdmxStructure[RowT])``, the member inflated whole before it is read):
 
 * :class:`SdmxCsv`, an SDMX-CSV data message: a header, the key, the dimensions, ``TIME_PERIOD``, ``OBS_VALUE`` and
   the attributes, then a row per observation. Each column is its field upper-cased, a trailing ``ACTION`` (the last
@@ -15,13 +15,16 @@ member is ``class _Structure(ZippedFile, SdmxStructure)``):
   set's series, a row each (their attributes, then their annotations' texts), and its observations, long (the series'
   key, then each observation's period, value and status). Its element names, its status code list and its no-value
   markers are a format's class attributes. The message is read with lxml's ``iterparse`` from a stream (a zip's member
-  as it inflates, ``_member``), each series cleared once read, so a message of hundreds of MB is never held whole.
+  as it inflates, ``_zipped_member``, where composing with :class:`~flatread.archives.ZippedFile` would inflate it
+  whole first), each series cleared once read and each data set dropped once the next opens, and at most
+  :data:`_LOOSE` bytes read outside its series (its header, what lies between them), so what a read holds of the
+  message is about one series, its header and its last data set's element, never the whole message.
 
 A data message is parsed hardened as every XML reader here is: no entity resolved, nothing fetched, no DTD loaded,
 libxml2's size limits kept. Every part of a series must be one its format reads: its annotations, then observations,
 each of its three attributes alone; a series holding anything else, a data set holding anything but series, a value
 that is not a number, a status off its code list or a period not written in the format's date format raises
-``ValueError``, naming the file.
+``ReadError``, naming the file.
 """
 
 import contextlib
@@ -29,8 +32,6 @@ import io
 import re
 import types
 import typing
-import zipfile
-import zlib
 from collections.abc import Collection, Generator, Iterator, Mapping
 from typing import IO, Final, Literal
 
@@ -38,9 +39,10 @@ import msgspec
 import polars as pl
 from lxml import etree
 
-from flatread.archives import _INFLATED_MAX, _unzipped
+from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzipped
 from flatread.core import File
 from flatread.delimited import HeadersCsv
+from flatread.errors import LayoutError, ReadError
 from flatread.markup import NestedXml
 
 __all__ = ["SdmxCsv", "SdmxData", "SdmxObservations", "SdmxSeries", "SdmxStructure"]
@@ -92,20 +94,19 @@ class SdmxCsv[RowT: msgspec.Struct](HeadersCsv[RowT]):
     is a value, and a header alone is a table of no rows.
     """
 
-    _finite = False
+    _non_finite = (_OBS_VALUE.lower(),)
     _rows_required = False
 
     def __init__(self, row: type[RowT]) -> None:
         """Lay out an SDMX-CSV of *row*, each field its column upper-cased, in the file's order.
 
-        Raises ``ValueError`` for a struct with no ``obs_value``, the column every SDMX-CSV holds.
+        Raises ``LayoutError`` for a struct with no ``obs_value``, the column every SDMX-CSV holds.
         """
         if _OBS_VALUE.lower() not in row.__struct_fields__:
             msg = f"{row.__name__} has no obs_value field, which every SDMX-CSV holds"
-            raise ValueError(msg)
-        labels = tuple(name.upper() for name in row.__struct_fields__)
+            raise LayoutError(msg)
         # Without ACTION, where the struct ends with it: a file writes it only at times.
-        self._headers = {labels, labels[:-1]} if row.__struct_fields__[-1] == _ACTION else {labels}
+        self._headers_lacking = ((), (_ACTION,)) if row.__struct_fields__[-1] == _ACTION else ((),)
         super().__init__(row, final_line_ending=True)
 
     @typing.override
@@ -124,7 +125,7 @@ class SdmxCsv[RowT: msgspec.Struct](HeadersCsv[RowT]):
         unread = cells.is_not_null() & (~cells.str.contains(_CSV_NUMBER) | (~finite & ~cells.str.contains(_NON_FINITE)))
         if (wrong := unread.arg_true()).len():
             msg = f"the OBS_VALUE cell {cells[wrong[0]]!r} is not a number: row {wrong[0] + 1}"
-            raise ValueError(msg)
+            raise ReadError(msg)
 
 
 # --- Structure messages ---------------------------------------------------------------------------------------------
@@ -149,13 +150,13 @@ class SdmxStructure[RowT: msgspec.Struct](NestedXml[RowT]):
     def __init__(self, row: type[RowT], structure: Structure) -> None:
         """Lay out *row*'s records, each one of the message's *structure* (``codes``), as the version writes them.
 
-        Raises ``ValueError`` for a kind of structure the version's messages do not list, or what
+        Raises ``LayoutError`` for a kind of structure the version's messages do not list, or what
         :class:`~flatread.markup.NestedXml` refuses.
         """
         records = _RECORDS[self._version]
         if structure not in records:
             msg = f"an SDMX-ML {self._version} structure message lists no {structure}, only {sorted(records)}"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         super().__init__(row, root=_ROOTS[self._version], record=records[structure])
 
 
@@ -163,6 +164,35 @@ class SdmxStructure[RowT: msgspec.Struct](NestedXml[RowT]):
 
 #: How many observations are held as Python text before polars takes them: the memory a read holds beyond its frame.
 _CHUNK: Final = 1 << 20
+#: The most bytes of a message read outside its series in a row (its header, what lies between two series): the
+#: parsed elements a read holds beside its series, which only a series' end clears.
+_LOOSE: Final = 1 << 20
+
+
+class _Metered:
+    """A message's stream for iterparse, which refuses more than :data:`_LOOSE` bytes in a row read outside a series."""
+
+    def __init__(self, name: str, stream: IO[bytes] | _Inflating) -> None:
+        self._name = name
+        self._stream = stream
+        #: Whether the parse is outside any series: the reader sets it as each series starts and ends.
+        self.outside = True
+        self._loose = 0
+
+    def read(self, size: int = -1) -> bytes:
+        """Return up to *size* more bytes of the message, counting those read outside a series."""
+        data = self._stream.read(size)
+        if self.outside:
+            self._loose += len(data)
+            if self._loose > _LOOSE:
+                msg = f"{self._name} holds over {_LOOSE} bytes outside its series"
+                raise ReadError(msg)
+        return data
+
+    def series(self, *, started: bool) -> None:
+        """Note a series started, or ended (the bytes outside a series counted again from none)."""
+        self.outside = not started
+        self._loose = 0
 
 
 class SdmxData[RowT: msgspec.Struct](File[RowT]):
@@ -172,8 +202,9 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
     ``_root``, ``_data_set`` (whose ``_data_set_id`` attribute names it), ``_observation`` and ``_annotations``, the
     element holding a series' annotations; a series is any element named ``_series`` in a data set, since a compact
     message writes each data set's series in its key family's own namespace. The first field of the row struct is the
-    attribute naming each series (its key). With ``_member``, the body is a zip and the message its one member whose
-    name matches it, read as it inflates.
+    attribute naming each series (its key). With ``_zipped_member``, the body is a zip and the message its one member
+    whose name matches it, read as it inflates; a zip :mod:`flatread.archives` refuses (a name listed twice, a member
+    that will not inflate or that inflates past its cap) raises ``ReadError`` naming the member.
     """
 
     #: The format's own prefixes, beside SDMX-ML 1.0's ``message:`` and ``common:`` (the Board's ``frb:``).
@@ -188,8 +219,9 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
     #: An observation's element, and the element holding a series' annotations, which precedes its observations.
     _observation: typing.ClassVar[str]
     _annotations: typing.ClassVar[str]
-    #: The regex the zip's member's whole name matches, where the message is one (``[^/]*_data\.xml``).
-    _member: typing.ClassVar[re.Pattern[str] | None] = None
+    #: The regex the zip's member's whole name matches, where the message is one (``[^/]*_data\.xml``), streamed as it
+    #: inflates. Not ``_member``, :class:`~flatread.archives.ZippedFile`'s, which composes with this class too.
+    _zipped_member: typing.ClassVar[re.Pattern[str] | None] = None
 
     def __init__(self, row: type[RowT], data_set: str) -> None:
         """Read the data set *data_set* (its ``_data_set_id``, ``H41``) into rows of *row*, fields named as in SDMX."""
@@ -212,7 +244,7 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
         prefix, _, local = name.partition(":")
         if prefix not in self._namespaces:
             msg = f"the element {name!r} writes a prefix the format's namespaces do not bind"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         return f"{{{self._namespaces[prefix]}}}{local}"
 
     @typing.override
@@ -220,36 +252,40 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
         return name.upper()
 
     @contextlib.contextmanager
-    def _opened(self, body: bytes) -> Generator[tuple[str, IO[bytes]]]:
-        """Open the message in *body*, named for errors: the body itself, or the zip's ``_member`` as it inflates."""
-        if self._member is None:
+    def _opened(self, body: bytes) -> Generator[tuple[str, IO[bytes] | _Inflating]]:
+        """Open the message in *body*, named for errors: the body itself, or the zip's ``_zipped_member`` inflating."""
+        if self._zipped_member is None:
             yield "the body", io.BytesIO(body)
             return
         with _unzipped(body, None) as archive:
             names = archive.namelist()
-            found = [name for name in names if self._member.fullmatch(name)]
+            found = [name for name in names if self._zipped_member.fullmatch(name)]
             if len(found) != 1:
-                msg = f"the zip holds {len(found)} members matching {self._member.pattern}, not one: {names[:5]!r}"
-                raise ValueError(msg)
+                pattern = self._zipped_member.pattern
+                msg = f"the zip holds {len(found)} members matching {pattern}, not one: {names[:5]!r}"
+                raise ReadError(msg)
             if (size := archive.getinfo(found[0]).file_size) > _INFLATED_MAX:
                 msg = f"the zip's {found[0]!r} inflates to {size} bytes, over {_INFLATED_MAX}"
-                raise ValueError(msg)
+                raise ReadError(msg)
             try:
-                with archive.open(found[0]) as member:
-                    yield found[0], member
-            except (zipfile.BadZipFile, zlib.error, EOFError) as e:  # a damaged header, a cut stream, a CRC that fails
+                member = archive.open(found[0])
+            except _UNZIP_ERRORS as e:  # a damaged header, an encrypted member, a method zipfile lacks
                 msg = f"the zip's {found[0]!r} will not inflate: {e}"
-                raise ValueError(msg) from e
+                raise ReadError(msg) from e
+            with member:  # its reads raise ReadError as it inflates, a cut stream or a CRC that fails
+                yield found[0], _Inflating(found[0], member)
 
     def _each(self, body: bytes) -> Iterator[tuple[str, etree._Element]]:
         """Yield the message's name and each series of the data set read, every part checked; each is cleared after.
 
-        Raises ``ValueError`` for a message that is not well-formed, whose root is not ``_root``, with a series
+        Raises ``ReadError`` for a message that is not well-formed, whose root is not ``_root``, with a series
         outside a data set, a data set holding anything but series, a series holding anything but its annotations
-        and observations, and for a message holding no series of the data set.
+        and observations, more than :data:`_LOOSE` bytes in a row outside its series, and for a message holding no
+        series of the data set.
         """
         data_set, series_tag, root_tag = self._set_tag, f"{{*}}{self._series}", self._root_tag
-        with self._opened(body) as (name, stream):
+        with self._opened(body) as (name, opened):
+            stream = _Metered(name, opened)
             sets: list[str] = []
             found = 0
             last: etree._Element | None = None
@@ -267,28 +303,31 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
                 for event, element in ((event, element) for event, element in parsed if etree.iselement(element)):
                     if not sets and (root := element.getroottree().getroot().tag) != root_tag:
                         msg = f"the root of {name} is <{root}>, not <{root_tag}>"
-                        raise ValueError(msg)
+                        raise ReadError(msg)
                     if element.tag == data_set:
                         if event == "start":
                             _between_sets(element, data_set, name, first=not sets)
                             sets.append(element.get(self._data_set_id, ""))
                         else:
                             _only_series(element, self._series, sets[-1], name)
+                            if last is not None and (root := last.getparent()) is not None:  # the one before, read
+                                root.remove(last)
                             last = element
                         continue
+                    stream.series(started=event == "start")
                     if event == "start":
                         continue
                     parent = element.getparent()
                     if parent is None or parent.tag != data_set:
                         msg = f"a <{element.tag}> of {name} sits outside any <{data_set}>"
-                        raise ValueError(msg)
+                        raise ReadError(msg)
                     if sets[-1] == self._wanted:
                         if self._stray(element):
                             msg = (
                                 f"the series {element.get(self._key)!r} of the {self._wanted} data set of {name} holds"
                                 " other than its annotations and observations"
                             )
-                            raise ValueError(msg)
+                            raise ReadError(msg)
                         found += 1
                         yield name, element
                     # clear(keep_tail=True), which lxml's stubs lack: the text after a series may be parsed already,
@@ -299,20 +338,20 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
                     _drop_read(element, parent, self._series, sets[-1], name)
             except etree.XMLSyntaxError as e:
                 msg = f"{name} is not well-formed XML: {e}"
-                raise ValueError(msg) from e
+                raise ReadError(msg) from e
             self._ended(name, sets, last, found=found)
 
     def _ended(self, name: str, sets: list[str], last: etree._Element | None, *, found: int) -> None:
         """Refuse a whole message holding more after its last data set (*last*), or no series of the data set read."""
         if last is not None and (last.getnext() is not None or not _blank(last.tail)):
             msg = f"{name} holds other than data sets after its last"
-            raise ValueError(msg)
+            raise ReadError(msg)
         if self._wanted not in sets:
             msg = f"{name} holds no {self._wanted} data set; it holds {sets!r}"
-            raise ValueError(msg)
+            raise ReadError(msg)
         if not found:
             msg = f"the {self._wanted} data set of {name} holds no series"
-            raise ValueError(msg)
+            raise ReadError(msg)
 
     def _stray(self, series: etree._Element) -> bool:
         """Whether *series* holds other than its annotations, first and once, and its observations, each empty."""
@@ -328,6 +367,15 @@ def _blank(text: str | None) -> bool:
     return text is None or not text.strip()
 
 
+def _named(node: etree._Element, local: str) -> bool:
+    """Whether *node* is an element of the local name *local*, in any namespace or none.
+
+    Not ``etree.QName``, which raises ``ValueError`` for a tag whose prefix no namespace binds (``k:Series``).
+    """
+    tag = node.tag
+    return isinstance(tag, str) and str(tag).rpartition("}")[2] == local
+
+
 def _between_sets(data_set: etree._Element, tag: str, name: str, *, first: bool) -> None:
     """Refuse a data set that is not the root's child, or one after another with anything between them."""
     parent = data_set.getparent()
@@ -338,29 +386,30 @@ def _between_sets(data_set: etree._Element, tag: str, name: str, *, first: bool)
         or not (first or (before is not None and before.tag == tag and _blank(before.tail)))
     ):
         msg = f"{name} holds a data set somewhere other than after the last, in its root"
-        raise ValueError(msg)
+        raise ReadError(msg)
 
 
 def _drop_read(series: etree._Element, parent: etree._Element, local: str, data_set: str, name: str) -> None:
     """Delete the series before *series* in its data set *parent*, each read and cleared: anything else raises."""
     if series.getprevious() is None and not _blank(parent.text):
         msg = f"in the {data_set} data set, {name} holds {parent.text[:200]!r} where a series should be"
-        raise ValueError(msg)
+        raise ReadError(msg)
     while (before := series.getprevious()) is not None:
-        if not isinstance(before.tag, str) or etree.QName(before).localname != local or not _blank(before.tail):
-            msg = f"in the {data_set} data set, {name} holds {etree.tostring(before)[:200]!r} where a series should be"
-            raise ValueError(msg)
+        if not _named(before, local):
+            stray = f"<{before.tag}>" if isinstance(before.tag, str) else repr((before.text or "")[:200])
+            msg = f"in the {data_set} data set, {name} holds {stray} where a series should be"
+            raise ReadError(msg)
+        if not _blank(before.tail):
+            msg = f"in the {data_set} data set, {name} holds {before.tail.strip()[:200]!r} where a series should be"
+            raise ReadError(msg)
         del parent[0]
 
 
 def _only_series(data_set: etree._Element, local: str, set_id: str, name: str) -> None:
     """Refuse a closed data set holding anything after its series, the last of which is still in it, cleared."""
-    if not _blank(data_set.text) or any(
-        not isinstance(child.tag, str) or etree.QName(child).localname != local or not _blank(child.tail)
-        for child in data_set
-    ):
+    if not _blank(data_set.text) or any(not _named(child, local) or not _blank(child.tail) for child in data_set):
         msg = f"in the {set_id} data set, {name} holds other than series"
-        raise ValueError(msg)
+        raise ReadError(msg)
 
 
 class SdmxSeries[RowT: msgspec.Struct](SdmxData[RowT]):
@@ -413,7 +462,7 @@ class SdmxSeries[RowT: msgspec.Struct](SdmxData[RowT]):
                     f"the series {series.get(self._key)!r} of the {self._wanted} data set of {name} carries "
                     f"{sorted(series.attrib)!r}, not {concepts!r}"
                 )
-                raise ValueError(msg)
+                raise ReadError(msg)
             for column in self._columns:
                 if column.field not in self._described:
                     columns[column.field].append(series.attrib[column.label])
@@ -422,14 +471,14 @@ class SdmxSeries[RowT: msgspec.Struct](SdmxData[RowT]):
                     f"the series {series.get(self._key)!r} of the {self._wanted} data set of {name} lacks its "
                     f"annotations {list(self._described.values())!r}"
                 )
-                raise ValueError(msg)
+                raise ReadError(msg)
             for column, text in zip(described, texts, strict=True):
                 columns[column.field].append(text)
         frame = pl.DataFrame(columns, schema=dict.fromkeys(self._fields, pl.String))
         key = self._fields[0]
         if len(duplicated := frame.filter(pl.col(key).is_duplicated())[key]):
             msg = f"the {self._wanted} data set of {name} lists the series {duplicated[0]!r} twice"
-            raise ValueError(msg)
+            raise ReadError(msg)
         return frame
 
 
@@ -462,7 +511,7 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
         attributes = [column.label for column in self._columns[1:]]
         if sorted(attributes) != sorted((self._period, self._value, self._status)):
             msg = f"{row.__name__}'s fields after the key are {attributes}, not an observation's three attributes"
-            raise ValueError(msg)
+            raise LayoutError(msg)
         obs = self._observation
         self._attributes = [
             etree.XPath(obs + "/@" + label, namespaces=self._namespaces, smart_strings=False) for label in attributes
@@ -477,7 +526,7 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
                 f"the {self._wanted} observation of {row[self._key]!r} on {row[self._period]!r} in {name} "
                 f"(status {row[self._status]!r}, value {row[self._value]!r}) {what}"
             )
-            raise ValueError(msg)
+            raise ReadError(msg)
 
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
@@ -489,7 +538,7 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
             key = series.get(self._key)
             if key is None:
                 msg = f"a series of the {self._wanted} data set of {name} carries no {self._key}"
-                raise ValueError(msg)
+                raise ReadError(msg)
             found = [cells for path in self._attributes if isinstance(cells := path(series), list)]
             # Three lists as long as the observations, and three attributes an observation in all: each holds its
             # three alone.
@@ -499,7 +548,7 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
                     f"an observation of the series {key!r} of the {self._wanted} data set of {name} carries other than"
                     f" {labels[1:]}"
                 )
-                raise ValueError(msg)
+                raise ReadError(msg)
             held[0].extend([key] * count)
             for column, cells in zip(held[1:], found, strict=True):
                 column.extend(cells)

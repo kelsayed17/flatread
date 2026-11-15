@@ -1,14 +1,22 @@
-"""How many times a sheet reader opens the workbook and loads a sheet, per read: once, and twice a sheet.
+"""How many times a sheet reader opens the workbook and loads a sheet, per read: once, and two or three times a sheet.
 
 fastexcel parses the whole sheet on every ``load_sheet`` (an ``n_rows=1`` load costs most of a full one), so a read
-loads its sheet's text once, which serves everything around the table, and its table typed once. A plain table whose
-every column holds one kind of cell, its field's, is read from one strict load; one that mixes kinds pays a third.
+loads its sheet's text once, which serves everything around the table, and its table typed once. No text tells a
+text cell written as a number (``2``) from a number cell, so a table with a number field reads its number cells'
+kinds from the ``.xlsx`` sheet's part, where each cell opens on its own reference (its ``t`` attribute), and
+otherwise loads its number columns a third time, as booleans: fastexcel's boolean load reads only a number (or
+boolean) cell as a value (NumberTextSheet, which reads such text, does neither). A plain table whose every column
+holds one kind of cell, its field's, is read from one strict load, which refuses a column mixing number cells and
+number text; one with an empty cell pays a second, as text, since the strict load reads a word for none (``NA``) as
+none too; one that mixes kinds pays the failed strict load and the two or three.
 """
 
 import collections
 import datetime as dt
+import io
 import re
 import typing
+import zipfile
 from typing import Annotated
 
 import fastexcel
@@ -109,6 +117,16 @@ class _Answers(GroupedSheet[_Answer]):
     _empty_rows = False
 
 
+def _unreferenced(body: bytes) -> bytes:
+    """Return the workbook *body* with its sheets' cells written without a reference, each placed after the last."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(body)) as archive, zipfile.ZipFile(out, "w") as written:
+        for name in archive.namelist():
+            part = archive.read(name)
+            written.writestr(name, re.sub(rb'<c r="[A-Z]+[0-9]+"', b"<c", part) if "worksheets/" in name else part)
+    return out.getvalue()
+
+
 _TABLE = [["Name", "Count"], ["a", 1]]
 _UNDER_TITLE = [["Title"], *_TABLE]
 _READS: list[tuple[str, File[typing.Any], bytes, int, int]] = [
@@ -155,6 +173,7 @@ _READS: list[tuple[str, File[typing.Any], bytes, int, int]] = [
         4,
     ),
     ("SheetText", SheetText(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
+    ("cells without references", PaddedSheet(_Item, sheet="S"), _unreferenced(workbook({"S": _TABLE})), 1, 3),
 ]
 
 
@@ -219,7 +238,8 @@ def test_one_load_reads_a_plain_table_as_the_two_loads_do(monkeypatch: pytest.Mo
         fastexcel.ExcelReader, "load_sheet", _counted(calls, "load_sheet", fastexcel.ExcelReader.load_sheet)
     )
     frame = SheetFile(_Kinds, sheet="S").frame(body)
-    assert calls["load_sheet"] == 1
+    # The strict load, and the empty cells' columns as text: a word for none (NA) is none to the strict load too.
+    assert calls["load_sheet"] == 2
     assert frame.equals(expected)
     assert frame.schema == expected.schema
 
