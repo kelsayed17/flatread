@@ -461,39 +461,29 @@ class HeadersCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     :attr:`~flatread.core.File._blank_columns`) may stand anywhere in any of them, and a field a piece states
     (:meth:`~flatread.core.File._stated_fields`) is in none. A format whose headers follow a rule rather than a list
     overrides :meth:`_check_header` instead (Treasury's rates: ``Date``, then that year's columns); a file whose header
-    may name its columns in any order is a :class:`NamedCsv`.
+    may name its columns in any order is a :class:`NamedCsv`. Raises :class:`~flatread.errors.LayoutError` when built
+    for a format with no header line (``_header`` false), a lacked field that is none of the struct's columns, or one
+    that holds a value on every row, which a header without its column could never give it.
     """
 
     #: The headers the file has been published with, each by the fields it lacks; ``()`` is the struct's whole header.
     _headers_lacking: Collection[Collection[str]] = ((),)
 
-    def __init__(
-        self,
-        row: type[RowT],
-        *,
-        null_values: Sequence[str] = (),
-        final_line_ending: bool | None = None,
-        separator: str = ",",
-    ) -> None:
-        """Lay out a file of *row* (see :class:`CsvFile`), published under each header of :attr:`_headers_lacking`.
-
-        Raises :class:`~flatread.errors.LayoutError` for a format with no header line (``_header`` false), a lacked
-        field that is none of *row*'s columns, or one that holds a value on every row, which a header without its
-        column could never give it.
-        """
+    @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
         if not self._header:
             msg = f"{type(self).__name__} reads its file by its header, and _header is false"
             raise LayoutError(msg)
-        super().__init__(row, null_values=null_values, final_line_ending=final_line_ending, separator=separator)
         lacked = {field for lacking in self._headers_lacking for field in lacking}
         if stray := lacked - {column.field for column in self._columns}:
-            msg = f"the headers lack {sorted(stray)}, which are no fields of {row.__name__} read from a column"
+            msg = f"the headers lack {sorted(stray)}, which are no fields of {self._row.__name__} read from a column"
             raise LayoutError(msg)
         if held := lacked & set(self._required):
             msg = f"a header lacking {sorted(held)} could never be read: each holds a value on every row"
             raise LayoutError(msg)
         if not self._headers_lacking:
-            msg = f"the {row.__name__} file is published under no header: _headers_lacking is empty"
+            msg = f"the {self._row.__name__} file is published under no header: _headers_lacking is empty"
             raise LayoutError(msg)
 
     def _published_headers(self) -> list[tuple[str, ...]]:
@@ -530,7 +520,9 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     :attr:`_required_fields`: its column is in every header, though its cells may be empty. A field a piece states
     (:meth:`~flatread.core.File._stated_fields`) is in no header. A field's ``Label`` may name *alternatives*, other
     words a header writes it in (``Label("file_number", alternatives=("file_no",))``), and a format whose headers write
-    its labels another way folds each header cell with :meth:`_heading` (SEC's, in any case).
+    its labels another way folds each header cell with :meth:`_heading` (SEC's, in any case). Raises
+    :class:`~flatread.errors.LayoutError` when built for a format with no header line, a word two fields' labels share,
+    or a required field that is none of the struct's columns.
     """
 
     _by_name = True
@@ -538,33 +530,27 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     #: needs no listing. A format's subclass (or its constructor) sets them.
     _required_fields: Collection[str] = ()
 
-    def __init__(
-        self,
-        row: type[RowT],
-        *,
-        null_values: Sequence[str] = (),
-        final_line_ending: bool | None = None,
-        separator: str = ",",
-    ) -> None:
-        """Lay out a file of *row* (see :class:`CsvFile`); refuse a label two fields share or a stray required field.
-
-        Raises :class:`~flatread.errors.LayoutError` for those, and for a format with no header line.
-        """
+    @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
         if not self._header:
             msg = f"{type(self).__name__} reads its file by its header, and _header is false"
             raise LayoutError(msg)
-        super().__init__(row, null_values=null_values, final_line_ending=final_line_ending, separator=separator)
-        words = [(word, column.label) for column in self._columns for word in (column.label, *column.aliases)]
-        self._labeled = dict(words)
-        if len(self._labeled) != len(words):
-            msg = f"two fields of {row.__name__} share a label: {sorted(word for word, _ in words)}"
-            raise LayoutError(msg)
+        self._words()
         if stray := set(self._required_fields) - {column.field for column in self._columns}:
-            msg = f"the required fields {sorted(stray)} are no fields of {row.__name__} read from a column"
+            msg = f"the required fields {sorted(stray)} are no fields of {self._row.__name__} read from a column"
             raise LayoutError(msg)
-        required = {*self._required, *self._required_fields} - {self._numbered, *self._stated_fields()}
-        self._required_columns = [column.label for column in self._columns if column.field in required]
-        self._dropped = {*self._unread, *self._blank_columns}
+
+    def _words(self) -> dict[str, str]:
+        """Return the label each word a header may write names: each field's label and its alternatives.
+
+        Raises :class:`~flatread.errors.LayoutError` for a word two fields share.
+        """
+        words = [(word, column.label) for column in self._columns for word in (column.label, *column.aliases)]
+        if len(labeled := dict(words)) != len(words):
+            msg = f"two fields of {self._row.__name__} share a label: {sorted(word for word, _ in words)}"
+            raise LayoutError(msg)
+        return labeled
 
     def _heading(self, cell: str) -> str:
         """Return the label a header *cell* writes: the cell, unless a format folds its headers' wording."""
@@ -573,11 +559,14 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     @typing.override
     def _header_names(self, header: list[str]) -> list[str]:
         # A cell no field's word names may head a column read and dropped, as written.
-        labels = [self._labeled.get(self._heading(cell), cell if cell in self._dropped else None) for cell in header]
+        words, dropped = self._words(), {*self._unread, *self._blank_columns}
+        labels = [words.get(self._heading(cell), cell if cell in dropped else None) for cell in header]
         # Read under the header's own cells, in its order, so polars refuses a long row (an inserted column would
         # take its cell) and the count finds a short one: as fast as a fixed header.
         names = self._named(header, labels)
-        if missing := [label for label in self._required_columns if label not in labels]:
+        required = {*self._required, *self._required_fields} - {self._numbered, *self._stated_fields()}
+        columns = [column.label for column in self._columns if column.field in required]
+        if missing := [label for label in columns if label not in labels]:
             msg = f"the header {header!r} lacks {missing}, which every one names"
             raise ReadError(msg)
         return names
@@ -590,32 +579,19 @@ class TrailerCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     A group named ``count`` is the file's number of rows, checked; a group named for a field is that field's value on
     every row (the time the file was written), typed as the field (:func:`_stated`), a field no column holds, which
     takes no ``Label``; any other group raises ``LayoutError``. The trailer is what a cut body lacks, so it vouches for
-    the table it closes, a table of no rows too.
+    the table it closes, a table of no rows too. Raises :class:`~flatread.errors.LayoutError` when built for a format
+    that names no :attr:`_trailer` (a ``str`` regex), or a group of it that is neither ``count`` nor a field.
     """
 
     _rows_required = False
     #: The regex a file's last line matches; each format's subclass sets it.
     _trailer: typing.ClassVar[re.Pattern[str]]
 
-    def __init__(
-        self,
-        row: type[RowT],
-        *,
-        null_values: Sequence[str] = (),
-        final_line_ending: bool | None = None,
-        separator: str = ",",
-    ) -> None:
-        """Lay out a file of *row* (see :class:`CsvFile`), each field a trailer's group names stated, not a column.
-
-        Raises :class:`~flatread.errors.LayoutError` for a format that names no :attr:`_trailer` (a ``str`` regex),
-        or a group of it that is neither ``count`` nor a field of *row*.
-        """
-        _check_groups(self, row, "_trailer", "the regex its last line matches", [getattr(self, "_trailer", None)])
-        super().__init__(row, null_values=null_values, final_line_ending=final_line_ending, separator=separator)
-        self._trailed = self._stated_columns(self._trailer.groupindex)
-
     @typing.override
     def _stated_fields(self) -> frozenset[str]:
+        # Asked as the struct is laid out, so the trailer is checked here, as a zip's member is.
+        trailer = [getattr(self, "_trailer", None)]
+        _check_groups(self, self._row, "_trailer", "the regex its last line matches", trailer)
         return super()._stated_fields() | (self._trailer.groupindex.keys() - {"count"})
 
     @typing.override
@@ -636,7 +612,7 @@ class TrailerCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         if "count" in self._trailer.groupindex and _counted(match["count"], "trailer") != frame.height:
             msg = f"the trailer counts {match['count']} rows, and the body holds {frame.height}"
             raise ReadError(msg)
-        return self._stating(frame, self._trailed, match.groupdict())
+        return self._stating(frame, self._stated_columns(self._trailer.groupindex), match.groupdict())
 
 
 class SectionedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
@@ -708,41 +684,33 @@ class SpilledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     #: What may stand for the separator inside the field while polars reads: the first of these the body lacks.
     _CARRIERS: typing.ClassVar[Sequence[str]] = (chr(0x1F), chr(0x1E), chr(0x1D), chr(0x1C))
 
-    def __init__(
-        self,
-        row: type[RowT],
-        *,
-        null_values: Sequence[str] = (),
-        final_line_ending: bool | None = None,
-        separator: str = ",",
-    ) -> None:
-        """Lay out a file of *row* (see :class:`CsvFile`), whose :attr:`_spilled` field is a text one."""
+    @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
         if not isinstance(getattr(self, "_spilled", None), str):
             msg = f"the {type(self).__name__} format names no _spilled, the text field that may hold the separator"
             raise LayoutError(msg)
-        super().__init__(row, null_values=null_values, final_line_ending=final_line_ending, separator=separator)
         if not self._header or self._quote_char is not None:
             msg = "a spilled field is read from a file with a header line that quotes nothing"
             raise LayoutError(msg)
         columns = [column for column in self._columns if column.field == self._spilled]
         if not columns or columns[0].scalar is not str or self._spilled in self._stated_fields():
-            msg = f"the spilled field {self._spilled!r} is no text field of {row.__name__} read from a column"
+            msg = f"the spilled field {self._spilled!r} is no text field of {self._row.__name__} read from a column"
             raise LayoutError(msg)
-        self._spilled_label = columns[0].label
-        (self._spilled_name,) = (name for name, field in self._names.items() if field == self._spilled)
 
     @typing.override
     def _table(self, body: bytes) -> pl.DataFrame:
         header = _header(body, self._separator)
-        if self._spilled_label not in header:
-            msg = f"the header {header!r} lacks {self._spilled_label!r}, the label of the field that holds it"
+        label = next(column.label for column in self._columns if column.field == self._spilled)
+        if label not in header:
+            msg = f"the header {header!r} lacks {label!r}, the label of the field that holds it"
             raise ReadError(msg)
         carrier = next((text for text in self._CARRIERS if text.encode() not in body), None)
         if carrier is None:
             msg = f"the body holds every character this reader carries the separator in a cell by: {self._CARRIERS!r}"
             raise ReadError(msg)
         separator = self._separator.encode()
-        at, width = header.index(self._spilled_label), len(header)
+        at, width = header.index(label), len(header)
         lines = body.split(b"\n")
         for number, line in enumerate(lines):
             ending = b"\r" if line.endswith(b"\r") else b""
@@ -751,7 +719,8 @@ class SpilledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
                 joined = carrier.encode().join(cells[at : at + extra + 1])
                 lines[number] = separator.join([*cells[:at], joined, *cells[at + extra + 1 :]]) + ending
         frame = super()._table(b"\n".join(lines))
-        spilled = pl.col(self._spilled_name).str.replace_all(carrier, self._separator, literal=True)
+        (name,) = (name for name, field in self._names.items() if field == self._spilled)
+        spilled = pl.col(name).str.replace_all(carrier, self._separator, literal=True)
         return frame.with_columns(spilled)
 
 
@@ -762,36 +731,22 @@ class TitledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     matching its whole line, decoded as UTF-8 (a blank line is ``re.compile("")``). A group named ``count`` is the
     file's number of rows, checked; a group named for a field is that field's value on every row (the week a title is
     as of), typed as the field (:func:`_stated`), a field no column holds, which takes no ``Label``; any other group
-    raises ``LayoutError``.
+    raises ``LayoutError``, as does a format that names no :attr:`_titles` (``str`` regexes), when built.
     """
 
     #: The regexes the lines above the header match, one a line; each format's subclass (or its constructor) sets them.
     _titles: Sequence[re.Pattern[str]]
-
-    def __init__(
-        self,
-        row: type[RowT],
-        *,
-        null_values: Sequence[str] = (),
-        final_line_ending: bool | None = None,
-        separator: str = ",",
-    ) -> None:
-        """Lay out a file of *row* (see :class:`CsvFile`), each field a title's group names stated, not a column.
-
-        Raises :class:`~flatread.errors.LayoutError` for a format that names no :attr:`_titles` (``str`` regexes), or
-        a group of one that is neither ``count`` nor a field of *row*.
-        """
-        titles = getattr(self, "_titles", None)
-        titles = titles if isinstance(titles, Sequence) else [None]
-        _check_groups(self, row, "_titles", "its title lines' regexes", titles)
-        super().__init__(row, null_values=null_values, final_line_ending=final_line_ending, separator=separator)
-        self._titled = self._stated_columns(self._title_groups())
 
     def _title_groups(self) -> set[str]:
         return {group for title in self._titles for group in title.groupindex if group != "count"}
 
     @typing.override
     def _stated_fields(self) -> frozenset[str]:
+        # Asked as the struct is laid out, so the titles are checked here, as a zip's member is.
+        titles = getattr(self, "_titles", None)
+        _check_groups(
+            self, self._row, "_titles", "its title lines' regexes", titles if isinstance(titles, Sequence) else [None]
+        )
         return super()._stated_fields() | self._title_groups()
 
     @typing.override
@@ -820,7 +775,7 @@ class TitledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         if counted and _counted(count, "title") != frame.height:
             msg = f"the title counts {count} rows, and the body holds {frame.height}"
             raise ReadError(msg)
-        return self._stating(frame, self._titled, stated)
+        return self._stating(frame, self._stated_columns(self._title_groups()), stated)
 
 
 class PreambleCsv[RowT: msgspec.Struct](CsvFile[RowT]):
