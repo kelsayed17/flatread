@@ -51,8 +51,8 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --locked
-      # Statements plus branches; the floor sits under the 99.42% measured on 2026-11-13. Raise it as coverage grows.
-      - run: uv run python -m pytest --cov --cov-report=term-missing --cov-fail-under=99
+      # Statements plus branches; the floor sits under the 99.94% measured on Linux on 2026-11-16. Raise it as coverage grows.
+      - run: uv run python -m pytest --cov --cov-report=term-missing --cov-fail-under=99.9
 
   benchmarks:
     name: Benchmarks (CodSpeed)
