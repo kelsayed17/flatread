@@ -97,16 +97,16 @@ install loads no HTML, PDF, XML or workbook library (the import-linter contracts
 | Module | Reads | Extra |
 |---|---|---|
 | `flatread.fields` | a row field's markers: `Label`, `Format`, `Flag`, `Joined`, `Shape`, `Span`, `Cell`, `Link` | |
-| `flatread.errors` | `ReadError` (`EmptyBodyError`, `RaggedRowError`) and `LayoutError` | |
+| `flatread.errors` | `ReadError` (`EmptyBodyError`, `RaggedRowError`, `TruncatedFileError`, `ControlTotalError`, `UnknownLayoutError`, `CorruptArchiveError`, `EncodingError`) and `LayoutError` | |
 | `flatread.core` | `File`, the base every reader composes on; `TextFile`; `Thousands`, `Carried`, `Reshaped` | |
 | `flatread.grids` | a table cut from a grid of text cells: `GridFile`, `TitledGrid`, `FilledHeader`, `BlankEnded`, `BesideGrid` | |
 | `flatread.delimited` | CSV and delimited text: `CsvFile`, `HeadersCsv`, `NamedCsv`, `TrailerCsv`, `TitledCsv`, `PreambleCsv`, `SectionedCsv`, `SpilledCsv`, `PaddedCsv`, `ThousandsCsv`, `CsvText` | |
 | `flatread.fixed` | fixed-width text: `FixedWidthFile` | |
-| `flatread.reports` | a table laid out for print: `ReportFile`, `LongReport` | |
+| `flatread.reports` | a table laid out for print: `ReportFile`, `KeyedReport` | |
 | `flatread.layout` | a wide table read long: `LongFile` | |
 | `flatread.found` | a table whose header is found by its labels: `FoundTable`, `FoundCsv` | |
 | `flatread.archives` | a file in a zip or a legacy encoding: `ZippedFile`, `ZippedFiles`, `ZippedOrBare`, `StreamedZip`, `Transcoded`, `zip_names`, `zipped_member` | |
-| `flatread.sheets` | xlsx and xls workbooks: `SheetFile` and a class per sheet shape, `SheetsFile`, `SheetText`, `BiffSheet`, `FoundSheet`, `sheet_grid` | `excel` |
+| `flatread.sheets` | xlsx and xls workbooks: `SheetFile` and a class per sheet shape, `EverySheet`, `SheetText`, `BiffSheet`, `FoundSheet`, `sheet_grid` | `excel` |
 | `flatread.markup` | XML: `XmlFile`, `NestedXml`, `parse_xml` | `xml` |
 | `flatread.sdmx` | SDMX-CSV and SDMX-ML: `SdmxCsv`, `SdmxStructure`, `SdmxSeries`, `SdmxObservations` | `xml` |
 | `flatread.pages` | HTML tables and records: `HtmlFile`, `HtmlRecords`, `parse_html` and its cell helpers | `html` |
@@ -121,8 +121,19 @@ before its 256-level limit. Elsewhere lxml bundles 2.14.
 Every error a read raises is one of two kinds, both `ValueError`s:
 
 - `flatread.errors.ReadError`: the body is not the file its reader describes. Its message names where: the row, the
-  cell, the line or the member. `EmptyBodyError` (nothing to read) and `RaggedRowError` (a row wider or narrower than
-  its header) are the two kinds worth telling apart.
+  cell, the line or the member. Its subclasses are the kinds worth telling apart:
+
+  | class | the body |
+  |---|---|
+  | `EmptyBodyError` | holds nothing to read |
+  | `RaggedRowError` | has a row wider or narrower than its header |
+  | `TruncatedFileError` | was cut: it ends inside a zip member, before a title or trailer, or not as the file ends |
+  | `ControlTotalError` | states a count, in a trailer or a title, that is not the rows it holds |
+  | `UnknownLayoutError` | is laid out as another file: a header, root, sheet, title or zip member not the reader's |
+  | `CorruptArchiveError` | is a zip that will not open, or holds a member that will not inflate or fails its CRC-32 |
+  | `EncodingError` | is not the text encoding it is written in, or declares a charset no codec reads |
+
+  A cell that is not its type, or a body past a bound (below), is a plain `ReadError`.
 - `flatread.errors.LayoutError`: the reader is declared wrong (a date field with no `Format`, spans that overlap, a
   switch left unset or naming a field the struct lacks, pieces composed in an order that cannot read). It is raised
   when the reader is built; only a few show at the first read (an inner reader whose columns are not the fields).
@@ -144,6 +155,12 @@ calamine builds it, a pass over the sheet's XML. In CodSpeed's simulation (`benc
 costs about 1.1 times what it did in 5.0 and a sheet read about 1.25 times; a wide or row-by-row CSV read costs
 less. An `.xlsb` or `.ods` is not read.
 
+## From 7.0
+
+7.1 adds five kinds of `ReadError`: `TruncatedFileError`, `ControlTotalError`, `UnknownLayoutError`,
+`CorruptArchiveError` and `EncodingError`. Each is a `ReadError`, so code that catches one catches them, and the
+messages are 7.0's. A `FoundCsv` cell past `csv`'s field size limit is a `ReadError`, where 7.0 let `csv.Error` out.
+
 ## From 6.0
 
 A reader declared for 6.0 reads the same files the same way, but for these:
@@ -153,6 +170,21 @@ A reader declared for 6.0 reads the same files the same way, but for these:
   same `LayoutError` when built; where it has two faults, which one is named first may differ.
 - A `NamedCsv`'s empty or mistyped cell is named by the header's label, as every other reader names it, not by its
   field.
+- Blank handling is one switch per reader, in one vocabulary: `SheetFile._gaps = True` → `_blank_rows = "drop"`,
+  `SheetFile._blank_rows = True` → `_blank_rows = "keep"` (the default is `"refuse"`); `ReportFile._skip_blank =
+  False` → `_blank_lines = "read"` (the default is `"drop"`); `LongFile._empty_rows = False` → `_empty_cells = "drop"`
+  (the default is `"keep"`); `LongFile._spacers` → `_spacer_columns`. An old name, or a value none of these, is a
+  `LayoutError` when built, so a format not yet moved is not read otherwise.
+- A `TitledSheet` title with a group (`count`, or one named for a field) is a `LayoutError` when built: a sheet's title
+  states no field and counts no rows, which it ignored before. A `TitledSheet` with no `_titles` is one too.
+- Seven readers and switches have plain names: `SheetsFile` → `EverySheet`, `CellHeaderSheet` →
+  `TypedHeaderSheet`, `NumberTextSheet` → `TextNumbersSheet`, `OnlySheet` → `OneSheet`, `LongReport` → `KeyedReport`
+  (it is no `LongFile`), `FoundTable._row_count` → `_numbered_rows`, `LongFile._bare_header_refused` →
+  `_header_needs_rows`. The old names are gone.
+- A name is a method on every piece that has it, or a value on every piece that has it, since pieces that compose
+  share one class (`tests/test_switch_names.py` checks): `FixedWidthFile._stated` → `_outside_fields` (the fields
+  the lines above or below its table state), `SdmxObservations._value` → `_value_label` (the observation's value
+  attribute). The other six such names were internal. A switch set under its 6.0 name is a `LayoutError` when built.
 
 ## From 5.0
 
@@ -193,7 +225,7 @@ A reader declared for 6.0 reads the same files the same way, but for these:
 ## Install
 
 ```
-uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v6.0.0"
+uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v7.1.0"
 ```
 
 Python 3.14; polars and msgspec, plus each extra's parsers: `excel` fastexcel and xlrd, `xml` lxml, `html` lxml and

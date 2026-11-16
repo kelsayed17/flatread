@@ -8,21 +8,28 @@ the first row) and the framing's (:attr:`~ReportFile._framing`), and optionally 
 (:attr:`~ReportFile._last_line`, so a cut report is refused). Header and framing lines are dropped wherever they stand,
 a framing group named for a field states it for every row below until a line states it again (a title's date, a
 section's name carried down over its rows), and any line of no kind raises, naming it. Its cells are typed as a
-:class:`~flatread.core.TextFile`'s. :class:`LongReport` reads a report long, a row per key its header line names.
+:class:`~flatread.core.TextFile`'s. :class:`KeyedReport` reads a report long, a row per key its header line names.
 """
 
 import re
 import typing
 from collections.abc import Collection, Sequence
-from typing import Final
+from typing import Final, Literal
 
 import msgspec
 import polars as pl
 
-from flatread.core import TextFile, _check_ending, _decoded, _first, _lines
-from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
+from flatread.core import TextFile, _check_ending, _check_switch, _decoded, _first, _lines
+from flatread.errors import (
+    EmptyBodyError,
+    LayoutError,
+    RaggedRowError,
+    ReadError,
+    TruncatedFileError,
+    UnknownLayoutError,
+)
 
-__all__ = ["LongReport", "ReportFile"]
+__all__ = ["KeyedReport", "ReportFile"]
 
 
 class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
@@ -49,9 +56,9 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
     _framing: Sequence[re.Pattern[str]] = ()
     #: The report's last line that is not blank, when it writes one (``END OF REPORT``); it frames too.
     _last_line: typing.ClassVar[re.Pattern[str] | None] = None
-    #: Whether a blank line is skipped: a format whose blank line is no line of its table's sets it false, and it is
-    #: then a line like any other (a row, framing, or refused).
-    _skip_blank: typing.ClassVar[bool] = True
+    #: What a blank line is: ``"drop"``, skipped; ``"read"``, a line like any other (a row, framing, or refused), for a
+    #: format whose blank line is a line of its table's.
+    _blank_lines: typing.ClassVar[Literal["drop", "read"]] = "drop"
     #: Whether the lines are ``str.splitlines``' of the text (a form feed, ``\x0b`` and ``\r\r\n`` end a line), UTF-8 or
     #: else latin-1, rather than polars' lines (``\n`` and ``\r\n``, UTF-8 only).
     _text_lines: typing.ClassVar[bool] = False
@@ -83,6 +90,11 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
         self._final_line_ending = final_line_ending
 
     @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
+        _check_switch(self, "_blank_lines", ("drop", "read"), {"_skip_blank": '_blank_lines = "read" (or "drop")'})
+
+    @typing.override
     def _label(self, name: str) -> str | None:
         return name
 
@@ -98,7 +110,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             last = next((line for line in reversed(lines) if line.strip()), "")
             if self._last_line.fullmatch(last) is None:
                 msg = f"the report ends with {last[:200]!r}, not {self._last_line.pattern!r}: it was cut"
-                raise ReadError(msg)
+                raise TruncatedFileError(msg)
         records, read = self._report_rows(lines, first)
         if not records and self._rows_required:
             msg = "the report holds no rows"
@@ -126,7 +138,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             if (row := self._line.fullmatch(line)) is not None:
                 records.append(row.groupdict() | stated)
                 read.append((number, row))
-            elif line.strip() or not self._skip_blank:
+            elif line.strip() or self._blank_lines == "read":
                 framed = next((match for kind in self._kinds if (match := kind.fullmatch(line))), None)
                 if framed is None:
                     msg = f"line {number} {line[:200]!r} is neither a row nor a line framing the table"
@@ -152,7 +164,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
         )
         if (first := next(found, None)) is None:
             msg = f"the body holds no run of the header's lines {[kind.pattern for kind in self._header_lines]}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return lines, first
 
     def _check_lines(self, read: Sequence[tuple[int, re.Match[str]]]) -> None:
@@ -169,10 +181,10 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             for at in range(len(above) - size + 1)
         ):
             msg = f"the lines above the first row hold no column header {[kind.pattern for kind in self._header_lines]}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
 
 
-class LongReport[RowT: msgspec.Struct](ReportFile[RowT]):
+class KeyedReport[RowT: msgspec.Struct](ReportFile[RowT]):
     """A report read long, a row per key: a line's last cells, a run per key, the keys its header line names.
 
     The row struct is the long row: its leading fields are the record's (a row's groups, or stated), then the key, then

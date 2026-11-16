@@ -160,6 +160,15 @@ class _ObsOf[RowT: msgspec.Struct](_Data[RowT], SdmxObservations[RowT]):
     _date_format = "%Y-%m"
 
 
+class _OldValue(_ObsOf[_Obs]):
+    _value = "OBS_VALUE"
+
+
+def test_the_value_attribute_set_under_its_6_0_name_is_refused_when_built() -> None:
+    with pytest.raises(LayoutError, match=r"sets \['_value'\], renamed in 7.0: \['_value_label'\]"):
+        _OldValue(_Obs, "D")
+
+
 class _Zipped[RowT: msgspec.Struct](_ObsOf[RowT]):
     _zipped_member = re.compile(r"[^/]*\.xml")
 

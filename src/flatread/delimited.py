@@ -75,7 +75,16 @@ from flatread.core import (
     _temporal,
     _typed,
 )
-from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
+from flatread.errors import (
+    ControlTotalError,
+    EmptyBodyError,
+    EncodingError,
+    LayoutError,
+    RaggedRowError,
+    ReadError,
+    TruncatedFileError,
+    UnknownLayoutError,
+)
 from flatread.fields import Flag, Format
 from flatread.grids import GridFile
 
@@ -253,13 +262,13 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         """
         if unknown := [cell for cell, label in zip(header, labels, strict=True) if label not in self._label_names]:
             msg = f"the header names {unknown}, which no field of {self._row.__name__} labels"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         names: list[str] = []
         taken: dict[str, int] = {}
         for label in typing.cast("list[str]", labels):
             if (at := taken.get(label, 0)) >= len(self._label_names[label]):
                 msg = f"the header {header!r} names a column twice"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             names.append(self._label_names[label][at])
             taken[label] = at + 1
         return names
@@ -343,7 +352,7 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         header = _header(body, self._separator, quote_char) if self._header and new_columns is None else None
         if header is not None and header != list(labels):
             msg = f"the header {header!r} is not the labels {list(labels)!r}"
-            raise ReadError(msg) from e
+            raise UnknownLayoutError(msg) from e
         _check_widths(body, self._separator, quoting=quote_char is not None, header=self._header)
         if not self._header and len(first := _header(body, self._separator, quote_char)) != len(schema):
             msg = f"row 1 has {len(first)} fields, not the file's {len(schema)}"
@@ -376,7 +385,7 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
             _check_ending(body, final_line_ending=self._final_line_ending)
         if body.startswith((b"\n", b"\r\n"), len(_BOM) if body.startswith(_BOM) else 0):  # no copy of the body
             msg = "the body opens with a blank line, not its header"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         # A long table's key columns keep their labels, and its key and value fields have no column: not strict, and
         # a field without a column is not parsed.
         frame = self._table(body).rename(self._names, strict=False)
@@ -500,7 +509,7 @@ class HeadersCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         unread = {*self._unread, *self._blank_columns}
         if tuple(label for label in header if label not in unread) not in (headers := self._published_headers()):
             msg = f"the header {header!r} is none of the {self._row.__name__} file's {[list(h) for h in headers]}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
 
     @typing.override
     def _header_names(self, header: list[str]) -> list[str]:
@@ -568,7 +577,7 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         columns = [column.label for column in self._columns if column.field in required]
         if missing := [label for label in columns if label not in labels]:
             msg = f"the header {header!r} lacks {missing}, which every one names"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return names
 
 
@@ -602,16 +611,16 @@ class TrailerCsv[RowT: msgspec.Struct](CsvFile[RowT]):
             last = body[cut + 1 : end].removesuffix(b"\r").decode()
         except UnicodeDecodeError as e:
             msg = f"the last line, the file's trailer, is not UTF-8: {e}"
-            raise ReadError(msg) from e
+            raise EncodingError(msg) from e
         if cut < 0 or (match := self._trailer.fullmatch(last)) is None:
             msg = f"the last line {last!r} is not the file's trailer: the body was cut"
-            raise ReadError(msg)
+            raise TruncatedFileError(msg)
         # shortcut: the table is copied without its trailer, since polars 2.1 has no option that ends a read at a line
         # (``n_rows`` still parses the lines past it, and a trailer is no row); about one body's bytes at the peak.
         frame = super()._table(body[: cut + 1])
         if "count" in self._trailer.groupindex and _counted(match["count"], "trailer") != frame.height:
             msg = f"the trailer counts {match['count']} rows, and the body holds {frame.height}"
-            raise ReadError(msg)
+            raise ControlTotalError(msg)
         return self._stating(frame, self._stated_columns(self._trailer.groupindex), match.groupdict())
 
 
@@ -662,7 +671,7 @@ class SectionedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         starts = [match.start() for match in self._starts.finditer(body)]
         if starts[:1] != [0] or len(starts) != self._sections:
             msg = f"the body has {len(starts)} tables, at bytes {starts}, not {self._sections} from the first byte"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         # shortcut: the table is copied, as a trailer's is: polars has no option that ends a read at a line
         return super()._table(body[starts[self._which] : (*starts, len(body))[self._which + 1]])
 
@@ -704,7 +713,7 @@ class SpilledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         label = next(column.label for column in self._columns if column.field == self._spilled)
         if label not in header:
             msg = f"the header {header!r} lacks {label!r}, the label of the field that holds it"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         carrier = next((text for text in self._CARRIERS if text.encode() not in body), None)
         if carrier is None:
             msg = f"the body holds every character this reader carries the separator in a cell by: {self._CARRIERS!r}"
@@ -732,6 +741,9 @@ class TitledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     file's number of rows, checked; a group named for a field is that field's value on every row (the week a title is
     as of), typed as the field (:func:`_stated`), a field no column holds, which takes no ``Label``; any other group
     raises ``LayoutError``, as does a format that names no :attr:`_titles` (``str`` regexes), when built.
+
+    Example: ``docs/examples/titled_csv.csv``. Its twin :class:`PreambleCsv` drops any number of lines it does not read
+    (``docs/examples/preamble_csv.csv``), where this matches each line above the header and may state a field from it.
     """
 
     #: The regexes the lines above the header match, one a line; each format's subclass (or its constructor) sets them.
@@ -756,15 +768,15 @@ class TitledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         for number, title in enumerate(self._titles, 1):
             if (end := body.find(b"\n", at)) < 0:
                 msg = f"the body ends before line {number}, the file's title {title.pattern!r}"
-                raise ReadError(msg)
+                raise TruncatedFileError(msg)
             try:
                 line = body[at:end].removesuffix(b"\r").decode()
             except UnicodeDecodeError as e:
                 msg = f"line {number}, the file's title {title.pattern!r}, is not UTF-8: {e}"
-                raise ReadError(msg) from e
+                raise EncodingError(msg) from e
             if (match := title.fullmatch(line)) is None:
                 msg = f"line {number} {line[:200]!r} is not the file's title {title.pattern!r}"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             if "count" in title.groupindex:
                 counted, count = True, match["count"]
             stated |= {group: text for group, text in match.groupdict().items() if text is not None}
@@ -774,7 +786,7 @@ class TitledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         frame = super()._table(body[at:])
         if counted and _counted(count, "title") != frame.height:
             msg = f"the title counts {count} rows, and the body holds {frame.height}"
-            raise ReadError(msg)
+            raise ControlTotalError(msg)
         return self._stating(frame, self._stated_columns(self._title_groups()), stated)
 
 
@@ -783,6 +795,9 @@ class PreambleCsv[RowT: msgspec.Struct](CsvFile[RowT]):
 
     The header is the first line whose first cell is the struct's first label, quoted or not. The lines above it are
     dropped unread; a body with no such line raises.
+
+    Example: ``docs/examples/preamble_csv.csv``. Its twin :class:`TitledCsv` matches each line above the header to a
+    known regex (``docs/examples/titled_csv.csv``), where this finds the header wherever it stands.
     """
 
     @typing.override
@@ -798,7 +813,7 @@ class PreambleCsv[RowT: msgspec.Struct](CsvFile[RowT]):
                 return super()._table(body[at:])  # shortcut: copied without its preamble, as TitledCsv's titles
             at = end + 1
         msg = f"no line opens with the header's first label {first!r}"
-        raise ReadError(msg)
+        raise UnknownLayoutError(msg)
 
 
 class _TextCsv[RowT: msgspec.Struct](CsvFile[RowT]):
@@ -886,7 +901,7 @@ class CsvText[RowT: msgspec.Struct](GridFile[RowT]):
             text = body.decode("utf-8-sig")
         except UnicodeDecodeError as e:
             msg = f"the body is not UTF-8: {e}"
-            raise ReadError(msg) from e
+            raise EncodingError(msg) from e
         if not text or text.isspace():
             msg = "the body is empty"
             raise EmptyBodyError(msg)
@@ -1023,12 +1038,12 @@ def _header(body: bytes, separator: str, quote: str | None = '"') -> list[str]:
         text = line.decode()
     except UnicodeDecodeError as e:
         msg = f"the header is not UTF-8: {e}"
-        raise ReadError(msg) from e
+        raise EncodingError(msg) from e
     try:
         (header,) = csv.reader([text], delimiter=separator)
     except csv.Error as e:  # a line ending inside the first line: lines ended by CR alone
         msg = f"the header line is not one row of cells: {e}"
-        raise ReadError(msg) from e
+        raise UnknownLayoutError(msg) from e
     return header
 
 
@@ -1097,7 +1112,7 @@ def _check_widths(body: bytes, separator: str, *, quoting: bool = True, header: 
             text = body.removeprefix(_BOM).decode("utf-8")
         except UnicodeDecodeError as e:
             msg = f"the body is not UTF-8: {e}"
-            raise ReadError(msg) from e
+            raise EncodingError(msg) from e
         try:
             quote = csv.QUOTE_MINIMAL if quoting else csv.QUOTE_NONE
             reader = csv.reader(io.StringIO(text, newline=""), delimiter=separator, quoting=quote, strict=True)

@@ -20,7 +20,7 @@ import polars as pl
 from lxml import etree
 
 from flatread.core import TextFile
-from flatread.errors import EmptyBodyError, LayoutError, ReadError
+from flatread.errors import EmptyBodyError, LayoutError, ReadError, UnknownLayoutError
 
 __all__ = ["NestedXml", "XmlFile", "parse_xml"]
 
@@ -72,7 +72,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
         super().__init__(row, null_values=null_values)
         self._root = self._qualified(root)
         self._record_path = record
-        self._record = self._record_tag(record)
+        self._record_element = self._record_tag(record)
 
     def _record_tag(self, record: str) -> str:
         """Return the tag every record is, *record* qualified."""
@@ -95,26 +95,26 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
         root = parse_xml(body)
         if root.tag != self._root:
             msg = f"the document's root is <{root.tag}>, not <{self._root}>"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return root
 
     def _rows(self, root: etree._Element) -> list[list[str | None]]:
         """Return each record's cells under *root*, in order, one per label: the root's children, each its leaves."""
-        tag = self._record
+        tag = self._record_element
         if not _blank(root.text):
             msg = f"the <{root.tag}> root holds the text {root.text.strip()[:200]!r} before its first record"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         cells: list[list[str | None]] = []
         for n, record in enumerate(root, 1):
             tags = [child.tag for child in record]
             if record.tag != tag or tags != self._labels or any(len(child) for child in record):
                 msg = f"record {n} is <{record.tag}> of {tags!r}, not <{tag}> of leaf elements {self._labels!r}"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             if stray := next(
                 (text for text in (record.text, record.tail, *(c.tail for c in record)) if not _blank(text)), None
             ):
                 msg = f"record {n} holds the text {stray.strip()[:200]!r} beside its leaf elements"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             cells.append([child.text for child in record])
         return cells
 

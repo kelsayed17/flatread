@@ -9,8 +9,8 @@ spaces is no value, as is a cell that is one of *null_values* once stripped, and
 :class:`~flatread.core.TextFile`'s are (so :class:`~flatread.core.Thousands` composes with it). A line of another
 length, a character between columns or another header raises, naming the row. A format subclasses it for what sits
 around the table: ``_header`` false for a file that writes none (its fields need no ``Label``), and
-:meth:`~FixedWidthFile._table` to read lines above or below it, returning the text of the ``_stated`` fields, which a
-title writes once for every row (OCC's report date). A field another piece states (a zip member's name,
+:meth:`~FixedWidthFile._table` to read lines above or below it, returning the text of the ``_outside_fields``,
+which a title writes once for every row (OCC's report date). A field another piece states (a zip member's name,
 :meth:`~flatread.core.File._stated_fields`) takes no ``Span`` either, and that piece adds it.
 """
 
@@ -20,8 +20,8 @@ from collections.abc import Mapping, Sequence
 import msgspec
 import polars as pl
 
-from flatread.core import _MOMENTS, File, _check_ending, _first, _lines, _typed
-from flatread.errors import EmptyBodyError, LayoutError, ReadError
+from flatread.core import _MOMENTS, File, _check_ending, _check_renamed, _first, _lines, _typed
+from flatread.errors import EmptyBodyError, LayoutError, ReadError, UnknownLayoutError
 
 __all__ = ["FixedWidthFile"]
 
@@ -34,7 +34,7 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
     _header: typing.ClassVar[bool] = True
     #: The fields a format reads from above the table, once for every row (a title's date), not from a column: they
     #: take no ``Span``, and the format's :meth:`_table` returns their text.
-    _stated: typing.ClassVar[frozenset[str]] = frozenset[str]()
+    _outside_fields: typing.ClassVar[frozenset[str]] = frozenset[str]()
 
     def __init__(
         self, row: type[RowT], *, null_values: Sequence[str] = (), final_line_ending: bool | None = None
@@ -54,13 +54,14 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
             msg = f"{type(self).__name__} lists {after} after its fixed-width reader, whose read never reaches them"
             raise LayoutError(msg)
         super().__init__(row)
-        if stray := self._stated - set(self._fields):
+        _check_renamed(self, {"_stated": "_outside_fields"})
+        if stray := self._outside_fields - set(self._fields):
             msg = f"the format states {sorted(stray)}, which are no fields of {row.__name__}"
             raise LayoutError(msg)
         stated = self._stated_fields()
         spanned = [column for column in self._columns if column.field not in stated]
         # The fields this reader types: its columns and its own stated ones, not another piece's (a member's name).
-        self._typed = [column for column in self._columns if column.field not in stated - self._stated]
+        self._typed_columns = [column for column in self._columns if column.field not in stated - self._outside_fields]
         for column in self._columns:
             if (column.span is None) != (column.field in stated):
                 msg = f"the field {column.field!r} needs a Span, its column's place, and a stated field takes none"
@@ -86,7 +87,7 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
 
     @typing.override
     def _stated_fields(self) -> frozenset[str]:
-        return super()._stated_fields() | self._stated
+        return super()._stated_fields() | self._outside_fields
 
     @typing.override
     def _label(self, name: str) -> str | None:
@@ -107,8 +108,8 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         if self._final_line_ending is not None:
             _check_ending(body, final_line_ending=self._final_line_ending)
         lines, stated = self._table(_lines(body))
-        if stated.keys() != self._stated:
-            msg = f"the format states {sorted(stated)}, not the fields {sorted(self._stated)}"
+        if stated.keys() != self._outside_fields:
+            msg = f"the format states {sorted(stated)}, not the fields {sorted(self._outside_fields)}"
             raise LayoutError(msg)
         header = int(self._header)
         line = pl.col("line")
@@ -129,7 +130,7 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         if header:
             if cells.is_empty() or list(cells.row(0)) != labels:
                 msg = f"the header {lines[0] if len(lines) else None!r} is not the labels {labels} in their places"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             cells = cells.slice(1)
         named = {column.field: column.label for column in self._columns}
         cells = cells.with_columns(pl.lit(text, pl.String).alias(named[field]) for field, text in stated.items())
@@ -138,6 +139,6 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         return pl.DataFrame(
             [
                 _typed(column, self._clean(cells[column.label], column), f"{column.label!r} cell")
-                for column in self._typed
+                for column in self._typed_columns
             ]
         )

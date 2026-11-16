@@ -50,7 +50,14 @@ from typing import Final, Literal
 import msgspec
 import polars as pl
 
-from flatread.errors import EmptyBodyError, LayoutError, ReadError
+from flatread.errors import (
+    EmptyBodyError,
+    EncodingError,
+    LayoutError,
+    ReadError,
+    TruncatedFileError,
+    UnknownLayoutError,
+)
 from flatread.fields import Cell, Flag, Format, Joined, Label, Shape, Span
 
 __all__ = ["Carried", "Column", "File", "Reshaped", "TextFile", "Thousands"]
@@ -136,6 +143,25 @@ def _check_above(above: int, header_row: int) -> None:
     """Refuse *above* rows heading a table's columns that do not fit over its header in row *header_row*."""
     if above and not 0 < above < header_row:
         msg = f"the {above} rows over the header do not fit above its row {header_row}"
+        raise LayoutError(msg)
+
+
+def _check_switch(reader: object, switch: str, choices: Collection[object], renamed: Mapping[str, str]) -> None:
+    """Refuse *reader*'s *switch* set to none of *choices*, or a switch of *renamed* set under its old name.
+
+    *renamed* maps each old name to what it is now (``_gaps`` to ``_blank_rows = "drop"``): a format that still sets one
+    would have it ignored, and read otherwise, so it is refused when built.
+    """
+    if (value := getattr(reader, switch)) not in choices:
+        msg = f"the {type(reader).__name__} format's {switch} is {value!r}, not one of {list(choices)!r}"
+        raise LayoutError(msg)
+    _check_renamed(reader, renamed)
+
+
+def _check_renamed(reader: object, renamed: Mapping[str, str]) -> None:
+    """Refuse a switch of *renamed* that *reader* sets under its old name, which it would ignore, reading otherwise."""
+    if old := [name for name in renamed if hasattr(reader, name)]:
+        msg = f"the {type(reader).__name__} format sets {old}, renamed in 7.0: {[renamed[name] for name in old]}"
         raise LayoutError(msg)
 
 
@@ -755,7 +781,7 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
         columns = self._columns if (layout := self._layout(text.columns)) is None else layout
         if text.columns != (labels := [column.label for column in columns]):
             msg = f"the header {text.columns} is not {labels}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         # A cell holding nothing, or only whitespace, holds no value, but for a field the format keeps as written.
         written = [column.label for column in columns if column.field in self._as_written]
         blank = pl.col(pl.String).exclude(*written) if written else pl.col(pl.String)
@@ -845,7 +871,7 @@ class Reshaped[RowT: msgspec.Struct](File[RowT]):
     def __init__(self, row: type[RowT], inner: File[typing.Any]) -> None:
         """Read a file of *row* as *inner* reads it, then shaped; *row*'s fields name no columns of their own."""
         super().__init__(row)
-        self._inner = inner
+        self._inner_reader = inner
 
     @typing.override
     def _label(self, name: str) -> str | None:
@@ -857,7 +883,7 @@ class Reshaped[RowT: msgspec.Struct](File[RowT]):
 
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
-        return self._shape(self._inner.frame(body))
+        return self._shape(self._inner_reader.frame(body))
 
 
 def _decoded(body: bytes, encodings: Sequence[str], *, lossy: bool = False) -> str:
@@ -880,7 +906,7 @@ def _decoded(body: bytes, encodings: Sequence[str], *, lossy: bool = False) -> s
     if lossy and tried:
         return body.decode(tried[-1], errors="replace")
     msg = f"the body is not {' or '.join(encodings)}: {error}"
-    raise ReadError(msg)
+    raise EncodingError(msg)
 
 
 def _lines(body: bytes) -> pl.Series:
@@ -892,7 +918,7 @@ def _lines(body: bytes) -> pl.Series:
         lines = pl.read_csv(body, has_header=False, separator=_NUL, quote_char=None, schema={"line": pl.String})
     except pl.exceptions.PolarsError as e:
         msg = f"the body is not UTF-8: {e}"
-        raise ReadError(msg) from e
+        raise EncodingError(msg) from e
     return lines["line"].fill_null("")
 
 
@@ -1062,4 +1088,4 @@ def _check_ending(body: bytes, *, final_line_ending: bool) -> None:
     if body.endswith((b"\n", b"\r")) != final_line_ending:
         written = "always ends its last line" if final_line_ending else "never ends its last line"
         msg = f"the body's end is not the file's, which {written} with a line ending: it was cut"
-        raise ReadError(msg)
+        raise TruncatedFileError(msg)

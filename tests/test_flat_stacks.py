@@ -30,7 +30,7 @@ from flatread.fields import Format, Label, Span
 from flatread.fixed import FixedWidthFile
 from flatread.found import FoundCsv
 from flatread.layout import LongFile
-from flatread.reports import LongReport
+from flatread.reports import KeyedReport
 from flatread.sheets import BesideSheet, DatedSheet, SheetFile, SheetText
 from tests.support.xlsx import workbook
 
@@ -52,10 +52,10 @@ class _Regional(msgspec.Struct, frozen=True, gc=False):
 class _RegionalSheet(LongFile[_Regional], DatedSheet[_Regional]):
     """eia's ``_Regional``: dates down, a column a region, notes under the dates, blank-looking cells empty."""
 
-    _empty_rows = False
+    _empty_cells = "drop"
     _rows_required = False
-    _bare_header_refused = True
-    _spacers = True
+    _header_needs_rows = True
+    _spacer_columns = True
     _trim = True
     _strip = True
     _keys = re.compile(r".+", re.DOTALL)
@@ -166,7 +166,7 @@ class TestByKey:
         class Sparse(LongFile[_Series], CsvFile[_Series]):
             _keys = re.compile(r".+")
             _by_key = True
-            _empty_rows = False
+            _empty_cells = "drop"
 
         body = b"Series Description,A,B\n2026-01-02,,1\n2026-01-09,2,\n2026-01-16,3,4\n"
         assert [(row.series, row.day) for row in Sparse(_Series).rows(body)] == [
@@ -177,7 +177,7 @@ class TestByKey:
         ]
 
 
-# --- Thousands + LongReport: the Fed's currency tables ---
+# --- Thousands + KeyedReport: the Fed's currency tables ---
 
 
 class _Amount(msgspec.Struct, frozen=True, gc=False):
@@ -186,7 +186,7 @@ class _Amount(msgspec.Struct, frozen=True, gc=False):
     value: float
 
 
-class _Amounts(Thousands[_Amount], LongReport[_Amount]):
+class _Amounts(Thousands[_Amount], KeyedReport[_Amount]):
     """A block of years over each holder's amounts, grouped in thousands, read long."""
 
     _key_field = "year"
@@ -200,7 +200,7 @@ Peru    -4,000  999
 """
 
 
-class TestAThousandsLongReport:
+class TestAThousandsKeyedReport:
     def test_each_cell_is_its_number_its_groups_joined(self) -> None:
         assert _Amounts(_Amount).rows(_AMOUNTS) == [
             _Amount("Japan", 2026, 1782319.5),
@@ -227,7 +227,7 @@ class _Factors(Carried[_Factor], BesideSheet[_Factor]):
     """federal_reserve's ``_RiskFactors``: right of a title column, a group written once, gaps between groups."""
 
     _columns_at = (1, 2, 3)
-    _gaps = True
+    _blank_rows = "drop"
     _carried = ("asset_class",)
 
 
@@ -276,9 +276,9 @@ class _Wpsr(LongFile[_Stub], Thousands[_Stub], Transcoded[_Stub], SectionedCsv[_
     _encodings = ("cp1252",)
     _eof = bytes([0x1A])
     _section = re.compile(rb'^"?STUB_1"?,', re.MULTILINE)
-    _empty_rows = False
+    _empty_cells = "drop"
     _rows_required = False
-    _bare_header_refused = True
+    _header_needs_rows = True
     _repeats = True
     _key_count = 2
     _keys = re.compile(r"(?!STUB_)\s*(?P<heading>.*?)\s*", re.DOTALL)

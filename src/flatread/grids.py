@@ -24,7 +24,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import TextFile, _check_above, _first, _repeated, _stacked
-from flatread.errors import EmptyBodyError, LayoutError, ReadError
+from flatread.errors import EmptyBodyError, LayoutError, ReadError, UnknownLayoutError
 
 __all__ = ["BesideGrid", "BlankEnded", "FilledHeader", "GridFile", "TitledGrid"]
 
@@ -92,7 +92,7 @@ class GridFile[RowT: msgspec.Struct](TextFile[RowT]):
             return []
         if at - 1 - self._above < 0:
             msg = f"the header in row {at} has not the {self._above} rows over it that head its columns too"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         rows = [grid.row(row) for row in range(at - 1 - self._above, at)]
         if not self._above:
             header: list[str] = [cell or "" for cell in rows[-1]]
@@ -110,7 +110,7 @@ class GridFile[RowT: msgspec.Struct](TextFile[RowT]):
         # A stacked header names each column by its heading and label: two alike are no columns a format tells apart.
         if self._above and len(set(header)) != len(header):
             msg = f"the header {header} heads two columns alike, which no format of the grid tells apart"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         below = self._rows_below(grid, at)
         if (past := below.select(grid.columns[len(header) :])).width and past.null_count().sum_horizontal()[0] != (
             past.width * past.height
@@ -121,7 +121,7 @@ class GridFile[RowT: msgspec.Struct](TextFile[RowT]):
         # A label written twice is two columns, named by their place as fastexcel names them (``Rate``, ``Rate_1``).
         if len(set(header := _repeated(header, "{label}_{n}", 1))) != len(header):
             msg = f"the header {header} leaves two cells empty, which no format of the sheet reads"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         rows.columns = header
         if self._unread:
             rows = rows.select(label for label in header if label not in self._unread)
@@ -178,7 +178,7 @@ class TitledGrid[RowT: msgspec.Struct](GridFile[RowT]):
         alone = (first == self._title) & pl.all_horizontal(rest.is_null()) if grid.width > 1 else first == self._title
         if (title := _first(grid.select(alone.fill_null(value=False)).to_series(), 1)) is None:
             msg = f"no row is the title {self._title!r} alone"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         filled = grid.slice(title).select(~pl.all_horizontal(pl.all().is_null())).to_series()
         if (header := _first(filled, title + 1)) is None:
             msg = f"the title {self._title!r} has no table below it"

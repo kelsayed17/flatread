@@ -1,6 +1,7 @@
 """``flatread``: a flat file read natively, as a frame of its row struct's fields or typed rows."""
 
 import codecs
+import csv
 import datetime as dt
 import io
 import re
@@ -38,23 +39,23 @@ from flatread.found import FoundCsv
 from flatread.grids import BesideGrid, BlankEnded, FilledHeader, GridFile, TitledGrid
 from flatread.layout import LongFile
 from flatread.markup import NestedXml, XmlFile
-from flatread.reports import LongReport, ReportFile
+from flatread.reports import KeyedReport, ReportFile
 from flatread.sheets import (
     BesideSheet,
     BiffSheet,
-    CellHeaderSheet,
     DatedSheet,
+    EverySheet,
     FoundSheet,
     GroupedSheet,
     NotedSheet,
-    NumberTextSheet,
-    OnlySheet,
+    OneSheet,
     PaddedSheet,
     PreambleSheet,
     SheetFile,
-    SheetsFile,
     SheetText,
+    TextNumbersSheet,
     TitledSheet,
+    TypedHeaderSheet,
     sheet_grid,
 )
 from tests.support.workbooks import swapped
@@ -1118,7 +1119,7 @@ class TestASheetFile:
 
     def test_a_sheet_with_gaps_drops_its_empty_rows_and_names_its_own_rows(self) -> None:
         class Gapped(SheetFile[_Sheet]):
-            _gaps = True
+            _blank_rows = "drop"
 
         sheet = Gapped(_Sheet, sheet="S")
         assert [row.name for row in sheet.rows(_book(_HEADER, _LINE, [], _with(Name="b")))] == ["a", "b"]
@@ -1127,7 +1128,7 @@ class TestASheetFile:
 
 
 class _Gapped[RowT: msgspec.Struct](SheetFile[RowT]):
-    _gaps = True
+    _blank_rows = "drop"
 
 
 class _Line(msgspec.Struct, frozen=True, gc=False):
@@ -1144,7 +1145,7 @@ class TestASheetWithGaps:
 class TestABlankRowSheet:
     def test_a_sheet_numbering_its_rows_by_place_keeps_a_blank_row(self) -> None:
         class Blank(SheetFile[_Optional]):
-            _blank_rows = True
+            _blank_rows = "keep"
 
         rows = Blank(_Optional, sheet="S").rows(_book(["Name", "Count"], ["a", 1], [], [None, 2]))
         assert [(row.name, row.count) for row in rows] == [("a", 1), (None, None), (None, 2)]
@@ -1192,8 +1193,8 @@ class _Stacked(msgspec.Struct, frozen=True, gc=False):
 class _StackedSheet(LongFile[_Stacked], DatedSheet[_Stacked]):
     _above = 1
     _key_count = 2
-    _empty_rows = False
-    _spacers = True
+    _empty_cells = "drop"
+    _spacer_columns = True
     _keys = re.compile(r"(?P<group>[^\x1f]+)\x1f(?P<series>[^\x1f]+)")
 
 
@@ -1250,7 +1251,7 @@ class _Scattered(msgspec.Struct, frozen=True, gc=False):
 
 
 class _ScatteredSheet(LongFile[_Scattered], DatedSheet[_Scattered]):
-    _empty_rows = False
+    _empty_cells = "drop"
     _scattered = True
     _keys = re.compile(r".+")
 
@@ -1273,13 +1274,13 @@ class _Year(msgspec.Struct, frozen=True, gc=False):
     name: Annotated[str, Label("Name")]
 
 
-class TestASheetsFile:
+class TestAnEverySheet:
     @staticmethod
-    def _reader() -> SheetsFile[_Year]:
+    def _reader() -> EverySheet[_Year]:
         class _Inner(msgspec.Struct, frozen=True, gc=False):
             name: Annotated[str, Label("Name")]
 
-        return SheetsFile(
+        return EverySheet(
             _Year, sheets=re.compile(r"Report (?P<year>\d{4})"), each=lambda sheet: SheetFile(_Inner, sheet=sheet)
         )
 
@@ -1301,7 +1302,7 @@ class TestASheetsFile:
         class _Inner(msgspec.Struct, frozen=True, gc=False):
             name: Annotated[str, Label("Name")]
 
-        reader = SheetsFile(
+        reader = EverySheet(
             _Year, sheets=re.compile(r"Report (?P<year>\d{4})"), each=lambda sheet: SheetText(_Inner, sheet=sheet)
         )
         body = workbook({"Report 2025": [["Name"], ["a"]], "Report 2026": [["Name"], ["b"]]})
@@ -1318,7 +1319,7 @@ class TestASheetsFile:
         assert len(opens) == 1
 
 
-class TestASheetsFileOfNoRows:
+class TestAnEverySheetOfNoRows:
     def test_a_year_of_no_rows_is_an_empty_frame_typed_as_the_rest(self) -> None:
         class Inner(msgspec.Struct, frozen=True, gc=False):
             name: Annotated[str, Label("Name")]
@@ -1326,7 +1327,7 @@ class TestASheetsFileOfNoRows:
         class Open(SheetFile[Inner]):
             _rows_required = False
 
-        class Years(SheetsFile[_Year]):
+        class Years(EverySheet[_Year]):
             _rows_required = False
 
         reader = Years(_Year, sheets=re.compile(r"Report (?P<year>\d{4})"), each=lambda sheet: Open(Inner, sheet=sheet))
@@ -1356,7 +1357,7 @@ class TestASheetOfLines:
             text: Annotated[str | None, Label("Notes")]
 
         class Lines(SheetFile[Line]):
-            _gaps = True
+            _blank_rows = "drop"
 
             @typing.override
             def _gapless(self, frame: pl.DataFrame, empty: pl.Series) -> pl.DataFrame:
@@ -1382,7 +1383,7 @@ class _Tables(Transcoded[_Cell], LongFile[_Cell], SectionedCsv[_Cell], CsvFile[_
     _encodings = ("cp1252",)
     _eof = bytes([0x1A])
     _section = re.compile(rb'^"LINE"', re.MULTILINE)
-    _empty_rows = False
+    _empty_cells = "drop"
     _repeats = True
     _key_count = 2
     _keys = re.compile(r"(?P<heading>.*)", re.DOTALL)
@@ -1624,9 +1625,9 @@ class TestATrimmedSheet:
 
 
 class _SpacerSheet(LongFile[_Scattered], DatedSheet[_Scattered]):
-    _empty_rows = False
+    _empty_cells = "drop"
     _scattered = True
-    _spacers = True
+    _spacer_columns = True
     _trim = True
     _keys = re.compile(r".+")
 
@@ -1638,9 +1639,9 @@ class _NoLabel(msgspec.Struct, frozen=True, gc=False):
 
 
 class _NoLabelSheet(LongFile[_NoLabel], DatedSheet[_NoLabel]):
-    _empty_rows = False
+    _empty_cells = "drop"
     _scattered = True
-    _spacers = True
+    _spacer_columns = True
     _keys = re.compile(r".+")
 
 
@@ -1707,7 +1708,7 @@ class TestALongSheetsHeadings:
         class MaybeSheet(LongFile[Maybe], DatedSheet[Maybe]):
             _above = 1
             _key_count = 2
-            _empty_rows = False
+            _empty_cells = "drop"
             _keys = re.compile(r"(?P<group>[^\x1f]*)\x1f(?P<series>[^\x1f]+)")
 
         class Needed(msgspec.Struct, frozen=True, gc=False):
@@ -1719,7 +1720,7 @@ class TestALongSheetsHeadings:
         class NeededSheet(LongFile[Needed], DatedSheet[Needed]):
             _above = 1
             _key_count = 2
-            _empty_rows = False
+            _empty_cells = "drop"
             _keys = MaybeSheet._keys
 
         body = _book([None, None, "Stocks"], ["Day", "East", "West"], [_D1, 1, 2])
@@ -1733,7 +1734,7 @@ class TestALongSheetsHeadings:
 class TestATableOfNoValues:
     class Quiet(_StackedSheet):
         _rows_required = False
-        _bare_header_refused = True
+        _header_needs_rows = True
 
     def test_dated_rows_with_no_value_are_an_empty_answer_and_no_rows_are_none(self) -> None:
         head: list[list[Cell]] = [[None, "Stocks"], ["Day", "East"]]
@@ -1887,6 +1888,18 @@ class TestATitledSheet:
         with pytest.raises(ReadError, match=message):
             _TitledSheet(_Sheet, sheet="S", header_row=header_row).rows(body)
 
+    def test_a_title_that_would_state_a_field_or_a_count_is_refused_when_built(self) -> None:
+        class Counted(TitledSheet[_Sheet]):
+            _titles = (re.compile(r"(?P<count>\d+) rates"),)
+
+        class Untitled(TitledSheet[_Sheet]):
+            pass
+
+        with pytest.raises(LayoutError, match=r"the _titles groups \['count'\] state nothing"):
+            Counted(_Sheet, sheet="S", header_row=2)
+        with pytest.raises(LayoutError, match="the Untitled format names no _titles"):
+            Untitled(_Sheet, sheet="S", header_row=2)
+
 
 class TestAPreambleSheet:
     def test_its_header_is_the_first_row_whose_first_cell_is_its_first_label(self) -> None:
@@ -1933,9 +1946,9 @@ class TestATableOpeningPastColumnA:
         )
 
 
-class TestAnOnlySheet:
+class TestAOneSheet:
     def test_it_reads_the_one_sheet_whatever_its_name(self) -> None:
-        sheet = OnlySheet(_Sheet)
+        sheet = OneSheet(_Sheet)
         assert [row.name for row in sheet.rows(_book(_HEADER, _LINE, sheet="RGDP"))] == ["a"]
         assert [row.name for row in sheet.rows(_book(_HEADER, _LINE, sheet="Median_Level"))] == ["a"]
 
@@ -1950,7 +1963,7 @@ class TestAnOnlySheet:
     )
     def test_a_workbook_of_another_count_raises(self, body: bytes, message: str) -> None:
         with pytest.raises(ReadError, match=message):
-            OnlySheet(_Sheet).rows(body)
+            OneSheet(_Sheet).rows(body)
 
 
 class _Spaced(msgspec.Struct, frozen=True, gc=False):
@@ -2741,7 +2754,7 @@ class _Titled(FixedWidthFile[_Dates]):
     """A title line, a date, written once above a table of no header (OCC's volume files)."""
 
     _header = False
-    _stated = frozenset({"as_of"})
+    _outside_fields = frozenset({"as_of"})
 
     @typing.override
     def _table(self, lines: pl.Series) -> tuple[pl.Series, dict[str, str]]:
@@ -2990,7 +3003,7 @@ class _Shares(msgspec.Struct, frozen=True, gc=False):
     share: float | None
 
 
-class _Held(LongReport[_Shares]):
+class _Held(KeyedReport[_Shares]):
     """A block a year: its months over a holder's value and share for each."""
 
     _key_field = "month"
@@ -3007,7 +3020,7 @@ Japan   5.5 50
 """
 
 
-class TestALongReport:
+class TestAKeyedReport:
     def test_each_key_is_a_row_its_block_header_naming_the_keys(self) -> None:
         rows = _Held(_Shares, null_values=("-",)).rows(_HELD)
         assert rows == [
@@ -3282,7 +3295,7 @@ class TestALongFile:
 
         class FilledCsv(LongFile[Filled], CsvFile[Filled]):
             _keys = re.compile(r"H(?P<key>\d+)")
-            _empty_rows = False
+            _empty_cells = "drop"
 
         assert FilledCsv(Filled).rows(_WIDE) == [
             Filled("a", dt.date(2026, 1, 2), 2, 1.5),
@@ -3495,11 +3508,11 @@ class _Rates(msgspec.Struct, frozen=True, gc=False):
     share: Annotated[float | None, Label("Share")]
 
 
-class _PaddedNumbers(PaddedSheet[_Rates], NumberTextSheet[_Rates]):
+class _PaddedNumbers(PaddedSheet[_Rates], TextNumbersSheet[_Rates]):
     pass
 
 
-class TestANumberTextSheet:
+class TestATextNumbersSheet:
     def test_a_number_written_as_text_reads_as_its_number_beside_number_cells(self) -> None:
         body = workbook(
             {"S": [["Day", "Count", "Share"], [dt.date(2026, 1, 1), " 2", " 1.03"], [dt.date(2026, 1, 2), 3, 0.6]]}
@@ -3552,7 +3565,7 @@ class _NotesBeside(SheetFile[_Rates]):
     _unread = ("", "notes")
 
 
-class _NotesBetween(PaddedSheet[_Rates], NumberTextSheet[_Rates]):
+class _NotesBetween(PaddedSheet[_Rates], TextNumbersSheet[_Rates]):
     _unread = ("notes",)
 
 
@@ -3608,7 +3621,7 @@ class TestUnreadColumns:
             _unread = ("notes",)
             _trim = True
             _strip = True
-            _gaps = True
+            _blank_rows = "drop"
 
         body = workbook(
             {
@@ -3824,10 +3837,10 @@ class _TickerDay(msgspec.Struct, frozen=True, gc=False):
     value: float
 
 
-class _TickerSheet(LongFile[_TickerDay], CellHeaderSheet[_TickerDay]):
+class _TickerSheet(LongFile[_TickerDay], TypedHeaderSheet[_TickerDay]):
     _keys = re.compile(r"(?P<key>\d{4}-\d{2}-\d{2}) 00:00:00")
-    _empty_rows = False
-    _gaps = True
+    _empty_cells = "drop"
+    _blank_rows = "drop"
 
 
 class _Rowed(msgspec.Struct, frozen=True, gc=False):
@@ -3837,16 +3850,16 @@ class _Rowed(msgspec.Struct, frozen=True, gc=False):
     value: float
 
 
-class _RowedSheet(LongFile[_Rowed], CellHeaderSheet[_Rowed]):
+class _RowedSheet(LongFile[_Rowed], TypedHeaderSheet[_Rowed]):
     _keys = _TickerSheet._keys
-    _empty_rows = False
+    _empty_cells = "drop"
     _numbered = "row"
 
 
 _JAN, _FEB = dt.date(2026, 1, 31), dt.date(2026, 2, 28)
 
 
-class TestACellHeaderSheetReadLong:
+class TestATypedHeaderSheetReadLong:
     def test_its_date_cells_are_the_keys_and_blank_rows_and_headings_are_no_rows(self) -> None:
         body = workbook({"S": [["Ticker", _JAN, _FEB], ["A", 1, None], [None], ["Heading"], ["B", 2, 3]]})
         assert _TickerSheet(_TickerDay, sheet="S").rows(body) == [
@@ -3880,7 +3893,7 @@ class TestACellHeaderSheetReadLong:
 
 
 class _GappedRows(_RowedSheet):
-    _gaps = True
+    _blank_rows = "drop"
 
 
 class TestANumberedSheet:
@@ -3907,7 +3920,7 @@ class _NumberedNames(SheetFile[_NumberedName]):
 
 class _PlainLong(LongFile[_TickerDay], SheetFile[_TickerDay]):
     _keys = _TickerSheet._keys
-    _empty_rows = False
+    _empty_cells = "drop"
 
 
 class _Offset3(msgspec.Struct, frozen=True, gc=False):
@@ -3944,7 +3957,7 @@ class _FoundCsv(FoundCsv[_Found]):
 
 
 class _CountedCsv(_FoundCsv):
-    _row_count = True
+    _numbered_rows = True
 
 
 class TestAFoundCsv:
@@ -3954,6 +3967,10 @@ class TestAFoundCsv:
     def test_the_header_is_found_below_any_title_lines_and_blank_and_rule_lines_are_skipped(self) -> None:
         body = b"Title,,\nAs of,2026,\n\nYEAR,Kind,Note\n-----,---,\n,,\n2026,a,x\n   \n2025,NULL,\n"
         assert self._rows(body) == [_Found(None, 2026, "a", "x"), _Found(None, 2025, None, None)]
+
+    def test_a_cell_past_csvs_field_size_limit_is_a_read_error(self) -> None:
+        with pytest.raises(ReadError, match="the body is no delimited file: field larger than field limit"):
+            self._rows(b"Year,Note\n2026," + b"x" * (csv.field_size_limit() + 1) + b"\n")
 
     def test_a_short_row_raises_a_field_the_header_lacks_is_null_and_no_rows_is_empty(self) -> None:
         with pytest.raises(ReadError, match=r"line 2 has 1 cells, not the header's 2"):
@@ -4043,7 +4060,7 @@ class _WideCsv(LongFile[_Wide], FoundCsv[_Wide]):
     _open = True
     _as_written = ("id",)
     _keys = re.compile(r"(?s).+")
-    _empty_rows = False
+    _empty_cells = "drop"
 
     @typing.override
     def _heading(self, cell: str) -> str:
@@ -4079,13 +4096,13 @@ class _Text(ReportFile[_Names]):
     _rows_required = False
     _line = re.compile(r"(?P<name>[a-z]+)")
     _header_lines = (re.compile(r"NAME"), re.compile(r"-+"))
-    _skip_blank = False
+    _blank_lines = "read"
     _text_lines = True
     _preamble = True
 
 
 class _Plain(_Text):
-    _skip_blank = True
+    _blank_lines = "drop"
     _text_lines = False
     _preamble = False
 
@@ -4288,7 +4305,7 @@ class _Answer(msgspec.Struct, frozen=True, gc=False):
 
 class _Answers(GroupedSheet[_Answer]):
     _groups_row = 1
-    _empty_rows = False
+    _empty_cells = "drop"
 
 
 class _Tagged(msgspec.Struct, frozen=True, gc=False):
@@ -4390,7 +4407,7 @@ class _Lined(msgspec.Struct, frozen=True, gc=False):
 
 class _LinedCsv(LongFile[_Lined], CsvFile[_Lined]):
     _keys = re.compile(r".+")
-    _empty_rows = False
+    _empty_cells = "drop"
     _numbered = "row"
 
 
@@ -4466,3 +4483,76 @@ class TestABesideSheetOfLists:
             _columns_at = (1, 2)
 
         assert Plain(_Listing, sheet="S").rows(shifted) == [_Listing("AA", 1)]
+
+
+class _OldEmptyRows(_LongCsv):
+    _empty_rows = False
+
+
+class _OldSpacers(_LongCsv):
+    _spacers = True
+
+
+class _NoEmptyCells(_LongCsv):
+    _empty_cells = "none"  # ty: ignore[invalid-assignment]
+
+
+class _OldSkipBlank(_Sales):
+    _skip_blank = False
+
+
+class _NoBlankLines(_Sales):
+    _blank_lines = "skip"  # ty: ignore[invalid-assignment]
+
+
+class _OldGaps(SheetFile[_Sheet]):
+    _gaps = True
+
+
+class _BoolBlankRows(SheetFile[_Sheet]):
+    _blank_rows = True  # ty: ignore[invalid-assignment]
+
+
+class TestABlankSwitchSetWrong:
+    """A blank-handling switch set under its 6.0 name, or to no value it takes, is refused, not read otherwise."""
+
+    @pytest.mark.parametrize(
+        ("build", "message"),
+        [
+            pytest.param(lambda: _OldEmptyRows(_Long), r"sets \['_empty_rows'\], renamed in 7.0", id="empty-rows"),
+            pytest.param(lambda: _OldSpacers(_Long), r"sets \['_spacers'\], renamed in 7.0", id="spacers"),
+            pytest.param(lambda: _NoEmptyCells(_Long), "_empty_cells is 'none', not one of", id="empty-cells"),
+            pytest.param(lambda: _OldSkipBlank(_Sale), r"sets \['_skip_blank'\], renamed in 7.0", id="skip-blank"),
+            pytest.param(lambda: _NoBlankLines(_Sale), "_blank_lines is 'skip', not one of", id="blank-lines"),
+            pytest.param(lambda: _OldGaps(_Sheet, sheet="S"), r"sets \['_gaps'\], renamed in 7.0", id="gaps"),
+            pytest.param(lambda: _BoolBlankRows(_Sheet, sheet="S"), "_blank_rows is True, not one of", id="bool"),
+        ],
+    )
+    def test_it_is_refused_when_built(self, build: typing.Callable[[], object], message: str) -> None:
+        with pytest.raises(LayoutError, match=message):
+            build()
+
+
+class _OldStated(_Titled):
+    _stated = frozenset({"as_of"})
+
+
+class _OldRowCount(_FoundCsv):
+    _row_count = True
+
+
+class _OldBareHeader(_LongCsv):
+    _bare_header_refused = True
+
+
+@pytest.mark.parametrize(
+    ("build", "old"),
+    [
+        pytest.param(lambda: _OldStated(_Dates), "_stated", id="stated"),
+        pytest.param(lambda: _OldRowCount(_Found, key="year"), "_row_count", id="row-count"),
+        pytest.param(lambda: _OldBareHeader(_Long), "_bare_header_refused", id="bare-header"),
+    ],
+)
+def test_a_switch_set_under_its_6_0_name_is_refused_when_built(build: typing.Callable[[], object], old: str) -> None:
+    with pytest.raises(LayoutError, match=rf"sets \['{old}'\], renamed in 7.0"):
+        build()
