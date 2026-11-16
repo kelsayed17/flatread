@@ -50,7 +50,14 @@ from typing import Final, Literal
 import msgspec
 import polars as pl
 
-from flatread.errors import EmptyBodyError, LayoutError, ReadError
+from flatread.errors import (
+    EmptyBodyError,
+    EncodingError,
+    LayoutError,
+    ReadError,
+    TruncatedFileError,
+    UnknownLayoutError,
+)
 from flatread.fields import Cell, Flag, Format, Joined, Label, Shape, Span
 
 __all__ = ["Carried", "Column", "File", "Reshaped", "TextFile", "Thousands"]
@@ -774,7 +781,7 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
         columns = self._columns if (layout := self._layout(text.columns)) is None else layout
         if text.columns != (labels := [column.label for column in columns]):
             msg = f"the header {text.columns} is not {labels}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         # A cell holding nothing, or only whitespace, holds no value, but for a field the format keeps as written.
         written = [column.label for column in columns if column.field in self._as_written]
         blank = pl.col(pl.String).exclude(*written) if written else pl.col(pl.String)
@@ -899,7 +906,7 @@ def _decoded(body: bytes, encodings: Sequence[str], *, lossy: bool = False) -> s
     if lossy and tried:
         return body.decode(tried[-1], errors="replace")
     msg = f"the body is not {' or '.join(encodings)}: {error}"
-    raise ReadError(msg)
+    raise EncodingError(msg)
 
 
 def _lines(body: bytes) -> pl.Series:
@@ -911,7 +918,7 @@ def _lines(body: bytes) -> pl.Series:
         lines = pl.read_csv(body, has_header=False, separator=_NUL, quote_char=None, schema={"line": pl.String})
     except pl.exceptions.PolarsError as e:
         msg = f"the body is not UTF-8: {e}"
-        raise ReadError(msg) from e
+        raise EncodingError(msg) from e
     return lines["line"].fill_null("")
 
 
@@ -1081,4 +1088,4 @@ def _check_ending(body: bytes, *, final_line_ending: bool) -> None:
     if body.endswith((b"\n", b"\r")) != final_line_ending:
         written = "always ends its last line" if final_line_ending else "never ends its last line"
         msg = f"the body's end is not the file's, which {written} with a line ending: it was cut"
-        raise ReadError(msg)
+        raise TruncatedFileError(msg)

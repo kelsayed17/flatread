@@ -25,7 +25,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import _DTYPES, _NUL, _UNIT, Column, File, _check_switch, _first, _none_dtype, _typed
-from flatread.errors import EmptyBodyError, LayoutError, ReadError
+from flatread.errors import EmptyBodyError, LayoutError, ReadError, UnknownLayoutError
 
 __all__ = ["LongFile"]
 
@@ -161,13 +161,13 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         """Refuse a *header* holding a NUL, or a U+001F where no header over several rows joins its cells by one."""
         if any(_NUL in cell for cell in header):
             msg = f"the header {list(header)!r} holds a NUL, which no heading does"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         # A header over several rows (``above``) joins its cells by U+001F, as a reader that joins a cell's parts
         # itself does (``_split_keys``: a GroupedSheet's group and label); any other header holding one is no table's.
         joined = self._joined_header() or self._split_keys
         if not joined and any(_UNIT in cell for cell in header):
             msg = f"the header {list(header)!r} holds a U+001F, which only a header over several rows holds"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
 
     def _record_places(self, header: Sequence[str], index: Sequence[Column]) -> dict[int, Column]:
         """Return the record's *index* columns by their place in *header*: leading it, or found by label anywhere.
@@ -181,7 +181,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
                 msg = (
                     f"the header opens {tails[: len(index)]!r}, not the record's {[column.label for column in index]!r}"
                 )
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             return dict(enumerate(index))
         places = {}
         for column in index:
@@ -189,7 +189,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
             found = [at for at, tail in enumerate(tails) if tail == column.label and (column.label or at == 0)]
             if len(found) != 1:
                 msg = f"the header {list(header)!r} has no one {column.label!r} column"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             places[found[0]] = column
         return places
 
@@ -206,12 +206,12 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         spacers = [cell for cell in keyed if self._spacer_columns and not cell.rpartition(_UNIT)[2]]
         if stray := [label for label in keyed if label not in spacers and not keys.fullmatch(label)]:
             msg = f"the header's columns {stray!r} are not keys, which match {keys.pattern!r}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         named = [label for label in keyed if label not in spacers]
         clash = {column.field for column in self._columns} & set(named)
         if (not named and self._rows_required) or clash or (not self._repeats and len(set(named)) != len(named)):
             msg = f"the header {list(header)!r} names no key, or a column twice"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return beside, spacers
 
     @typing.override

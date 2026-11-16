@@ -97,7 +97,7 @@ install loads no HTML, PDF, XML or workbook library (the import-linter contracts
 | Module | Reads | Extra |
 |---|---|---|
 | `flatread.fields` | a row field's markers: `Label`, `Format`, `Flag`, `Joined`, `Shape`, `Span`, `Cell`, `Link` | |
-| `flatread.errors` | `ReadError` (`EmptyBodyError`, `RaggedRowError`) and `LayoutError` | |
+| `flatread.errors` | `ReadError` (`EmptyBodyError`, `RaggedRowError`, `TruncatedFileError`, `ControlTotalError`, `UnknownLayoutError`, `CorruptArchiveError`, `EncodingError`) and `LayoutError` | |
 | `flatread.core` | `File`, the base every reader composes on; `TextFile`; `Thousands`, `Carried`, `Reshaped` | |
 | `flatread.grids` | a table cut from a grid of text cells: `GridFile`, `TitledGrid`, `FilledHeader`, `BlankEnded`, `BesideGrid` | |
 | `flatread.delimited` | CSV and delimited text: `CsvFile`, `HeadersCsv`, `NamedCsv`, `TrailerCsv`, `TitledCsv`, `PreambleCsv`, `SectionedCsv`, `SpilledCsv`, `PaddedCsv`, `ThousandsCsv`, `CsvText` | |
@@ -121,8 +121,19 @@ before its 256-level limit. Elsewhere lxml bundles 2.14.
 Every error a read raises is one of two kinds, both `ValueError`s:
 
 - `flatread.errors.ReadError`: the body is not the file its reader describes. Its message names where: the row, the
-  cell, the line or the member. `EmptyBodyError` (nothing to read) and `RaggedRowError` (a row wider or narrower than
-  its header) are the two kinds worth telling apart.
+  cell, the line or the member. Its subclasses are the kinds worth telling apart:
+
+  | class | the body |
+  |---|---|
+  | `EmptyBodyError` | holds nothing to read |
+  | `RaggedRowError` | has a row wider or narrower than its header |
+  | `TruncatedFileError` | was cut: it ends inside a zip member, before a title or trailer, or not as the file ends |
+  | `ControlTotalError` | states a count, in a trailer or a title, that is not the rows it holds |
+  | `UnknownLayoutError` | is laid out as another file: a header, root, sheet, title or zip member not the reader's |
+  | `CorruptArchiveError` | is a zip that will not open, or holds a member that will not inflate or fails its CRC-32 |
+  | `EncodingError` | is not the text encoding it is written in, or declares a charset no codec reads |
+
+  A cell that is not its type, or a body past a bound (below), is a plain `ReadError`.
 - `flatread.errors.LayoutError`: the reader is declared wrong (a date field with no `Format`, spans that overlap, a
   switch left unset or naming a field the struct lacks, pieces composed in an order that cannot read). It is raised
   when the reader is built; only a few show at the first read (an inner reader whose columns are not the fields).
@@ -143,6 +154,12 @@ part writes and a third load reads elsewhere; and an `.xlsx` sheet's span is rea
 calamine builds it, a pass over the sheet's XML. In CodSpeed's simulation (`benchmarks/test_speed.py`) a CSV read
 costs about 1.1 times what it did in 5.0 and a sheet read about 1.25 times; a wide or row-by-row CSV read costs
 less. An `.xlsb` or `.ods` is not read.
+
+## From 7.0
+
+7.1 adds five kinds of `ReadError`: `TruncatedFileError`, `ControlTotalError`, `UnknownLayoutError`,
+`CorruptArchiveError` and `EncodingError`. Each is a `ReadError`, so code that catches one catches them, and the
+messages are 7.0's. A `FoundCsv` cell past `csv`'s field size limit is a `ReadError`, where 7.0 let `csv.Error` out.
 
 ## From 6.0
 
@@ -208,7 +225,7 @@ A reader declared for 6.0 reads the same files the same way, but for these:
 ## Install
 
 ```
-uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v7.0.0"
+uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v7.1.0"
 ```
 
 Python 3.14; polars and msgspec, plus each extra's parsers: `excel` fastexcel and xlrd, `xml` lxml, `html` lxml and

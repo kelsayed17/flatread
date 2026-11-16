@@ -21,7 +21,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import _MOMENTS, File, _check_ending, _check_renamed, _first, _lines, _typed
-from flatread.errors import EmptyBodyError, LayoutError, ReadError
+from flatread.errors import EmptyBodyError, LayoutError, ReadError, UnknownLayoutError
 
 __all__ = ["FixedWidthFile"]
 
@@ -130,7 +130,7 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         if header:
             if cells.is_empty() or list(cells.row(0)) != labels:
                 msg = f"the header {lines[0] if len(lines) else None!r} is not the labels {labels} in their places"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             cells = cells.slice(1)
         named = {column.field: column.label for column in self._columns}
         cells = cells.with_columns(pl.lit(text, pl.String).alias(named[field]) for field, text in stated.items())
