@@ -99,7 +99,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             if self._last_line.fullmatch(last) is None:
                 msg = f"the report ends with {last[:200]!r}, not {self._last_line.pattern!r}: it was cut"
                 raise ReadError(msg)
-        records, read = self._records(lines, first)
+        records, read = self._report_rows(lines, first)
         if not records and self._rows_required:
             msg = "the report holds no rows"
             raise EmptyBodyError(msg)
@@ -111,7 +111,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             orient="row",
         )
 
-    def _records(
+    def _report_rows(
         self, lines: Sequence[str], first: int
     ) -> tuple[list[dict[str, str | None]], list[tuple[int, re.Match[str]]]]:
         """Return the rows of *lines* from their *first* on, each its cells and the fields stated above it.
