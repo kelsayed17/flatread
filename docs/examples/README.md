@@ -424,11 +424,11 @@ Column A holds the sheet's own row numbers under an empty header cell, and BS ho
 166: '165' | 2026-09-01 00:00:00 | '' | ' 0.000164' | ''
 ```
 
-### `SheetFile._gaps`
+### `SheetFile._blank_rows` (`"drop"`)
 
-[`sheet_file-gaps.txt`](sheet_file-gaps.txt), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[vxoarchive].yaml`, interaction 0. Read by [`SheetFile._gaps`](../../src/flatread/sheets.py), in cboe `_VxoArchiveSheet`.
+[`sheet_file-blankrows-drop.txt`](sheet_file-blankrows-drop.txt), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[vxoarchive].yaml`, interaction 0. Read by [`SheetFile._blank_rows`](../../src/flatread/sheets.py), in cboe `_VxoArchiveSheet`.
 
-Row 3536, between 1999-12-31 and 2000-01-03, is empty and gets dropped.
+Row 3536, between 1999-12-31 and 2000-01-03, is empty and gets dropped. Unlike [`"keep"`](#sheetfile_blank_rows-keep), no row stands for it: the dates around it are all the table holds.
 
 ```
 # sheet: Sheet1
@@ -444,11 +444,11 @@ Row 3536, between 1999-12-31 and 2000-01-03, is empty and gets dropped.
 3538: 2000-01-04 00:00:00 | 26.6 | 30.05 | 26.03 | 29.64
 ```
 
-### `SheetFile._blank_rows`
+### `SheetFile._blank_rows` (`"keep"`)
 
-[`sheet_file-blankrows.txt`](sheet_file-blankrows.txt), recorded in prism-clients' `tests/cftc/cassettes/test_recorded/test_swaps_report[2013-08-07].yaml`, interaction 0, sheet `9a`. Read by [`SheetFile._blank_rows`](../../src/flatread/sheets.py), in cftc `_SwapsSheet`.
+[`sheet_file-blankrows-keep.txt`](sheet_file-blankrows-keep.txt), recorded in prism-clients' `tests/cftc/cassettes/test_recorded/test_swaps_report[2013-08-07].yaml`, interaction 0, sheet `9a`. Read by [`SheetFile._blank_rows`](../../src/flatread/sheets.py), in cftc `_SwapsSheet`.
 
-Rows 10, 16 and 19 between the product groups are empty and stay rows with no values.
+Rows 10, 16 and 19 between the product groups are empty and stay rows with no values. Unlike [`"drop"`](#sheetfile_blank_rows-drop), each is a row, since the table numbers its rows by place.
 
 ```
 # sheet: 9a
@@ -1675,9 +1675,9 @@ date,VX1,VX2
 2024-10-18,4164,1323
 ```
 
-### `LongFile._empty_rows`
+### `LongFile._empty_cells` (`"drop"`)
 
-[`long_file-emptyrows.csv`](long_file-emptyrows.csv), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[settlement_window].yaml` interaction 0. Read by [`LongFile._empty_rows`](../../src/flatread/layout.py), in cboe `_SettlementWindowCsv`.
+[`long_file-emptycells.csv`](long_file-emptycells.csv), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[settlement_window].yaml` interaction 0. Read by [`LongFile._empty_cells`](../../src/flatread/layout.py), in cboe `_SettlementWindowCsv`.
 
 `2025-01-09,,` (the national day of mourning): empty cells that are no rows, not rows with no volume
 
@@ -1690,9 +1690,9 @@ date,VX1,VX2
 2025-01-13,1374,2002
 ```
 
-### `LongFile._spacers`
+### `LongFile._spacer_columns`
 
-[`long_file-spacers.txt`](long_file-spacers.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[ngs-ngshistory.xls].yaml` interaction 1. Read by [`LongFile._spacers`](../../src/flatread/layout.py), in eia `_Dated` (`_NetChanges`, sheet `weekly_net_changes`).
+[`long_file-spacercolumns.txt`](long_file-spacercolumns.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[ngs-ngshistory.xls].yaml` interaction 1. Read by [`LongFile._spacer_columns`](../../src/flatread/layout.py), in eia `_Dated` (`_NetChanges`, sheet `weekly_net_changes`).
 
 header row 7 leaves column B unlabelled and B holds nothing: a spacer, not a key
 

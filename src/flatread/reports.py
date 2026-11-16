@@ -14,7 +14,7 @@ section's name carried down over its rows), and any line of no kind raises, nami
 import re
 import typing
 from collections.abc import Collection, Sequence
-from typing import Final
+from typing import Final, Literal
 
 import msgspec
 import polars as pl
@@ -49,9 +49,9 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
     _framing: Sequence[re.Pattern[str]] = ()
     #: The report's last line that is not blank, when it writes one (``END OF REPORT``); it frames too.
     _last_line: typing.ClassVar[re.Pattern[str] | None] = None
-    #: Whether a blank line is skipped: a format whose blank line is no line of its table's sets it false, and it is
-    #: then a line like any other (a row, framing, or refused).
-    _skip_blank: typing.ClassVar[bool] = True
+    #: What a blank line is: ``"drop"``, skipped; ``"read"``, a line like any other (a row, framing, or refused), for a
+    #: format whose blank line is a line of its table's.
+    _blank_lines: typing.ClassVar[Literal["drop", "read"]] = "drop"
     #: Whether the lines are ``str.splitlines``' of the text (a form feed, ``\x0b`` and ``\r\r\n`` end a line), UTF-8 or
     #: else latin-1, rather than polars' lines (``\n`` and ``\r\n``, UTF-8 only).
     _text_lines: typing.ClassVar[bool] = False
@@ -126,7 +126,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             if (row := self._line.fullmatch(line)) is not None:
                 records.append(row.groupdict() | stated)
                 read.append((number, row))
-            elif line.strip() or not self._skip_blank:
+            elif line.strip() or self._blank_lines == "read":
                 framed = next((match for kind in self._kinds if (match := kind.fullmatch(line))), None)
                 if framed is None:
                     msg = f"line {number} {line[:200]!r} is neither a row nor a line framing the table"
