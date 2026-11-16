@@ -349,6 +349,12 @@ class TestANamedCsvsUnreadColumns:
             _Notes(_One).rows(b"a,Filler,Filler\nx,,\n")
 
 
+class TestANamedCsvsEmptyCell:
+    def test_its_error_names_the_headers_label_not_the_field(self) -> None:
+        with pytest.raises(ReadError, match=r"the \['Volume'\] columns have an empty cell"):
+            NamedCsv(_Volume).rows(b"Symbol,Volume\nA,\n")
+
+
 class TestARepeatedLabelsCell:
     def test_a_mistyped_cell_is_named_by_its_label_and_which_of_its_repeats(self) -> None:
         class _Fillers(msgspec.Struct, frozen=True, gc=False):
