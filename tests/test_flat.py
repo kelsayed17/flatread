@@ -1,6 +1,7 @@
 """``flatread``: a flat file read natively, as a frame of its row struct's fields or typed rows."""
 
 import codecs
+import csv
 import datetime as dt
 import io
 import re
@@ -3966,6 +3967,10 @@ class TestAFoundCsv:
     def test_the_header_is_found_below_any_title_lines_and_blank_and_rule_lines_are_skipped(self) -> None:
         body = b"Title,,\nAs of,2026,\n\nYEAR,Kind,Note\n-----,---,\n,,\n2026,a,x\n   \n2025,NULL,\n"
         assert self._rows(body) == [_Found(None, 2026, "a", "x"), _Found(None, 2025, None, None)]
+
+    def test_a_cell_past_csvs_field_size_limit_is_a_read_error(self) -> None:
+        with pytest.raises(ReadError, match="the body is no delimited file: field larger than field limit"):
+            self._rows(b"Year,Note\n2026," + b"x" * (csv.field_size_limit() + 1) + b"\n")
 
     def test_a_short_row_raises_a_field_the_header_lacks_is_null_and_no_rows_is_empty(self) -> None:
         with pytest.raises(ReadError, match=r"line 2 has 1 cells, not the header's 2"):

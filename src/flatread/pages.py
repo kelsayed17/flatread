@@ -88,7 +88,14 @@ from lxml.html import HtmlElement, HTMLParser
 from scrapling.parser import Selector
 
 from flatread.core import Column, TextFile
-from flatread.errors import EmptyBodyError, RaggedRowError, ReadError
+from flatread.errors import (
+    EmptyBodyError,
+    EncodingError,
+    RaggedRowError,
+    ReadError,
+    TruncatedFileError,
+    UnknownLayoutError,
+)
 from flatread.fields import Link
 
 __all__ = [
@@ -188,14 +195,14 @@ def _declared_or_utf8(body: bytes) -> str | None:
         body.decode("utf-8" if declared is None else declared)
     except LookupError:  # no codec, or one that is no text encoding (``base64``)
         msg = f"the page declares the charset {declared!r}, which is no charset Python reads"
-        raise ReadError(msg) from None
+        raise EncodingError(msg) from None
     except UnicodeDecodeError as exc:
         msg = (
             f"the page declares the charset {declared!r} and byte {exc.start} is not {declared}"
             if declared is not None
             else f"the page declares no charset and byte {exc.start} is not UTF-8"
         )
-        raise ReadError(msg) from None
+        raise EncodingError(msg) from None
     return None if declared is not None else "utf-8"
 
 
@@ -245,7 +252,7 @@ def rows(table: Element) -> list[Element]:
     if table.xpath(".//table"):
         header = [cell_text(c) for c in cells(found[0])] if found else []
         msg = f"the table under header {header!r} holds another table"
-        raise ReadError(msg)
+        raise UnknownLayoutError(msg)
     return found
 
 
@@ -308,7 +315,7 @@ def _check_unrepeated(header: list[str], repeated: Collection[str]) -> None:
     repeated = set(repeated)
     if twice := sorted(name for name, count in Counter(header).items() if count > 1 and name in repeated):
         msg = f"the table's header {header!r} names {twice!r} more than once"
-        raise ReadError(msg)
+        raise UnknownLayoutError(msg)
 
 
 def anchor(cell: Element) -> Element:
@@ -454,13 +461,13 @@ class HtmlFile[RowT: msgspec.Struct](_HtmlText[RowT]):
             raise EmptyBodyError(msg)
         if _unclosed(body):
             msg = "the page was cut: a <table> has no </table>"
-            raise ReadError(msg)
+            raise TruncatedFileError(msg)
         tables = self._tables(doc)
         if not tables and not self._rows_required:
             return pl.DataFrame(schema=dict.fromkeys(self._labels, pl.String))
         if len(tables) != 1:
             msg = f"the page holds {len(tables)} of the file's tables, not one"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         header, read, numbers, stated = self._grid(tables[0])
         reading: dict[str, list[Column]] = {label: [] for label in header}
         for column in self._columns:

@@ -80,7 +80,7 @@ from flatread.core import (
     _stated,
     _temporal,
 )
-from flatread.errors import LayoutError, ReadError
+from flatread.errors import CorruptArchiveError, LayoutError, ReadError, UnknownLayoutError
 from flatread.found import FoundTable
 from flatread.grids import GridFile
 from flatread.layout import LongFile
@@ -352,7 +352,7 @@ def _unzipped(body: bytes) -> Generator[zipfile.ZipFile]:
         raise
     except _UNZIP_ERRORS as e:
         msg = f"the body is a workbook's zip that will not open: {e}"
-        raise ReadError(msg) from e
+        raise CorruptArchiveError(msg) from e
 
 
 def _xlsx_sheets(body: bytes) -> dict[str, list[str]]:
@@ -369,7 +369,7 @@ def _xlsx_sheets(body: bytes) -> dict[str, list[str]]:
         if book is None or links is None:
             # calamine also reads an .xlsb and an .ods from a zip, whose sheets this bounds not: neither is read
             msg = "the body is a zip but no .xlsx workbook (an .xlsb or .ods is not read): it has no xl/workbook.xml"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         ids: dict[bytes, str] = {}
         for tag in _SHEET_TAG.finditer(_inflated(archive, book)):
             attributes = _attributes(tag[1])
@@ -728,20 +728,20 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         """
         if self._header and grid.height < self._header_row:
             msg = f"the {self._sheet!r} sheet ends at row {grid.height}, before its header row {self._header_row}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         span = self._span(grid)
         used = self._used_columns()
         table = span if used is None else [str(at) for at in used]
         if not set(table) <= set(span):  # sets: a sheet may be 16,384 columns wide
             msg = f"the {self._sheet!r} sheet has no column {used!r} of its table"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         if self._written_header() and used is None and span and span[0] != grid.columns[0]:
             # Headings read from the sheet's first column: a table that starts after cells of its top rows is refused.
             msg = (
                 f"the {self._sheet!r} sheet's header row holds {grid.columns.index(span[-1]) + 1} columns,"
                 f" not the {len(span)} loaded"
             )
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return table, used
 
     def _header_columns(self, cells: pl.DataFrame) -> tuple[list[Column], list[int], list[Column]]:
@@ -768,12 +768,12 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         )
         if not self._header and len(header) > len(columns):
             msg = f"the {self._sheet!r} sheet's table is {len(header)} columns wide, not {len(columns)}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         # A header-less sheet's last columns, empty all down, are no columns of its (calamine trims them): no values.
         columns, absent = columns[: len(header)], columns[len(header) :]
         if self._header and header != labels:
             msg = f"the {self._sheet!r} sheet's header (row {self._header_row}) {header} is not {labels}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return columns, kept, absent
 
     def _table_rows(
@@ -1003,7 +1003,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         """Return *sheet*'s every cell as text, a row per sheet row from row 1, a column per sheet column by place."""
         if sheet not in reader.sheet_names:
             msg = f"the workbook has no sheet {sheet!r}; its sheets are {reader.sheet_names!r}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return self._load(reader, sheet, skip_rows=0, dtypes="string", use_columns=None)
 
     def _completed(self, frame: pl.DataFrame, absent: list[Column], stated: list[pl.Expr]) -> pl.DataFrame:
@@ -1425,7 +1425,7 @@ class EverySheet[RowT: msgspec.Struct](File[RowT]):
         for name in names:
             if (match := self._sheets.fullmatch(name)) is None:
                 msg = f"the workbook's sheet {name!r} is not one of {self._sheets.pattern!r}"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             groups.append(match.groupdict())
         frames = []
         for name, group in zip(names, groups, strict=True):
@@ -1479,11 +1479,11 @@ class TitledSheet[RowT: msgspec.Struct](SheetFile[RowT]):
         ]
         if len(rows) != len(self._titles):
             msg = f"the {self._sheet!r} sheet has {len(rows)} rows above its header, not its {len(self._titles)} titles"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         for number, (row, title) in enumerate(zip(rows, self._titles, strict=True), 1):
             if not title.fullmatch(row):
                 msg = f"the {self._sheet!r} sheet's row {number} {row[:200]!r} is not its title {title.pattern!r}"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
 
 
 class PreambleSheet[RowT: msgspec.Struct](SheetFile[RowT]):
@@ -1503,7 +1503,7 @@ class PreambleSheet[RowT: msgspec.Struct](SheetFile[RowT]):
         # The sheet's rows from its first, and its first filled column: a table may open past column A.
         if not grid.width or (at := _first(grid.to_series(0) == label)) is None:
             msg = f"the {self._sheet!r} sheet has no row whose first cell is {label!r}, its header's"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return at
 
 
@@ -1518,7 +1518,7 @@ class OneSheet[RowT: msgspec.Struct](SheetFile[RowT]):
     def _sheet_in(self, reader: fastexcel.ExcelReader) -> str:
         if len(names := reader.sheet_names) != 1:
             msg = f"the workbook holds the sheets {names!r}, not one"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return names[0]
 
 
@@ -1541,7 +1541,7 @@ def _sheet_named(reader: fastexcel.ExcelReader, sheet: str | None) -> str:
     if sheet is None:
         if len(reader.sheet_names) != 1:
             msg = f"the workbook holds the sheets {reader.sheet_names!r}, not one"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return reader.sheet_names[0]
     return sheet
 
@@ -1550,7 +1550,7 @@ def _text_grid(reader: fastexcel.ExcelReader, sheet: str, null_values: Sequence[
     """Return *sheet* of *reader* as :func:`sheet_grid` lays it out, and the sheet column (``A`` is 0) of its first."""
     if sheet not in reader.sheet_names:
         msg = f"the workbook has no sheet {sheet!r}; its sheets are {reader.sheet_names!r}"
-        raise ReadError(msg)
+        raise UnknownLayoutError(msg)
     with _loading(f"the workbook's {sheet!r} sheet will not load"):
         text = _text_sheet(reader, sheet)
     first = int(text.columns[0].removeprefix("__UNNAMED__")) if text.width else 0
@@ -1622,7 +1622,7 @@ class BiffSheet[RowT: msgspec.Struct](SheetText[RowT]):
         """
         if int.from_bytes(body[:2], "little") not in _BIFF_BOFS:
             msg = f"the body is not a BIFF3 or BIFF4 workbook: it opens {body[:4]!r}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         try:
             # A workbook with no CODEPAGE record reads its text as latin-1, as Excel did; xlrd's note of it is dropped.
             book = xlrd.open_workbook(file_contents=body, logfile=io.StringIO())
@@ -1634,7 +1634,7 @@ class BiffSheet[RowT: msgspec.Struct](SheetText[RowT]):
         name = self._sheet if self._sheet is not None else names[0] if len(names) == 1 else None
         if name not in names:
             msg = f"the workbook holds the sheets {names!r}, not {'one' if self._sheet is None else repr(self._sheet)}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         sheet = book.sheet_by_name(name)
         empty = {xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK}
         first = next((at for at in range(sheet.ncols) if set(sheet.col_types(at)) - empty), sheet.ncols)

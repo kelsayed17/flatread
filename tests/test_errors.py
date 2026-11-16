@@ -5,16 +5,32 @@ fail loudly. The suite's ``pytest.raises`` name the kind each error is; these pi
 """
 
 import datetime as dt
+import io
+import re
+import zipfile
 from typing import Annotated
 
 import msgspec
 import pytest
 
-from flatread.delimited import CsvFile
-from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
+from flatread.archives import ZippedFile
+from flatread.delimited import CsvFile, TrailerCsv
+from flatread.errors import (
+    ControlTotalError,
+    CorruptArchiveError,
+    EmptyBodyError,
+    EncodingError,
+    LayoutError,
+    RaggedRowError,
+    ReadError,
+    TruncatedFileError,
+    UnknownLayoutError,
+)
 from flatread.fields import Format, Label
 from flatread.fixed import FixedWidthFile
 from flatread.markup import XmlFile
+from flatread.sheets import EverySheet, SheetFile
+from tests.support.xlsx import workbook
 
 
 class _Row(msgspec.Struct, frozen=True):
@@ -38,6 +54,70 @@ def test_a_body_with_nothing_to_read_is_empty(body: bytes) -> None:
 def test_a_short_row_is_ragged() -> None:
     with pytest.raises(RaggedRowError, match="row 2 has 1 fields, not the header's 2"):
         CsvFile(_Row).rows(b"Name,Value\na,1\nb\n")
+
+
+_KINDS = (TruncatedFileError, ControlTotalError, UnknownLayoutError, CorruptArchiveError, EncodingError)
+
+
+@pytest.mark.parametrize("kind", _KINDS, ids=lambda kind: kind.__name__)
+def test_each_kind_is_a_read_error_built_from_its_message_alone(kind: type[ReadError]) -> None:
+    assert issubclass(kind, ReadError)
+    assert not issubclass(kind, LayoutError)
+    error = kind("the body is not its file")
+    assert type(error)(str(error)).args == ("the body is not its file",)
+
+
+def test_a_body_cut_short_is_truncated() -> None:
+    with pytest.raises(TruncatedFileError, match="it was cut"):
+        CsvFile(_Row, final_line_ending=True).rows(b"Name,Value\na,1")
+
+
+class _Totaled(TrailerCsv[_Row]):
+    _trailer = re.compile(r"(?P<count>\d+)")
+
+
+def test_a_trailer_counting_other_rows_than_the_body_holds_is_a_control_total() -> None:
+    assert _Totaled(_Row).rows(b"Name,Value\na,1\n1\n") == [_Row("a", 1.0)]
+    with pytest.raises(ControlTotalError, match="the trailer counts 2 rows, and the body holds 1"):
+        _Totaled(_Row).rows(b"Name,Value\na,1\n2\n")
+
+
+def test_a_header_that_is_not_the_readers_is_an_unknown_layout() -> None:
+    with pytest.raises(UnknownLayoutError, match="is not the labels"):
+        CsvFile(_Row).rows(b"Other,Value\na,1\n")
+
+
+class _Zipped(ZippedFile[_Row], CsvFile[_Row]):
+    _member = re.compile(r"x\.csv")
+
+
+def test_a_zip_member_whose_crc_fails_is_a_corrupt_archive() -> None:
+    held = io.BytesIO()
+    with zipfile.ZipFile(held, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("x.csv", "Name,Value\na,1\n")
+    with pytest.raises(CorruptArchiveError, match="Bad CRC-32"):
+        _Zipped(_Row).rows(held.getvalue().replace(b"a,1", b"b,1"))
+
+
+@pytest.mark.parametrize("body", [b"Name,Value\n\xff,1\n", b"Na\xffme,Value\na,1\n"], ids=["a cell", "the header"])
+def test_bytes_that_are_not_utf8_are_an_encoding_error(body: bytes) -> None:
+    with pytest.raises(EncodingError, match="is not UTF-8"):
+        CsvFile(_Row).rows(body)
+
+
+def test_a_sheet_read_by_every_sheet_keeps_its_kind() -> None:
+    class _Year(msgspec.Struct, frozen=True):
+        year: int
+        name: Annotated[str, Label("Name")]
+
+    class _Inner(msgspec.Struct, frozen=True):
+        name: Annotated[str, Label("Name")]
+
+    reader = EverySheet(
+        _Year, sheets=re.compile(r"Report (?P<year>\d{4})"), each=lambda sheet: SheetFile(_Inner, sheet=sheet)
+    )
+    with pytest.raises(UnknownLayoutError, match="the 'Report 2026' sheet: "):
+        reader.rows(workbook({"Report 2025": [["Name"], ["a"]], "Report 2026": [["Other"], ["b"]]}))
 
 
 def test_a_cell_that_is_not_its_type_is_a_read_error() -> None:

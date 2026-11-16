@@ -42,7 +42,7 @@ from lxml import etree
 from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzipped
 from flatread.core import File, _check_renamed
 from flatread.delimited import HeadersCsv
-from flatread.errors import LayoutError, ReadError
+from flatread.errors import CorruptArchiveError, LayoutError, ReadError, UnknownLayoutError
 from flatread.markup import NestedXml
 
 __all__ = ["SdmxCsv", "SdmxData", "SdmxObservations", "SdmxSeries", "SdmxStructure"]
@@ -263,7 +263,7 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
             if len(found) != 1:
                 pattern = self._zipped_member.pattern
                 msg = f"the zip holds {len(found)} members matching {pattern}, not one: {names[:5]!r}"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             if (size := archive.getinfo(found[0]).file_size) > _INFLATED_MAX:
                 msg = f"the zip's {found[0]!r} inflates to {size} bytes, over {_INFLATED_MAX}"
                 raise ReadError(msg)
@@ -271,7 +271,7 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
                 member = archive.open(found[0])
             except _UNZIP_ERRORS as e:  # a damaged header, an encrypted member, a method zipfile lacks
                 msg = f"the zip's {found[0]!r} will not inflate: {e}"
-                raise ReadError(msg) from e
+                raise CorruptArchiveError(msg) from e
             with member:  # its reads raise ReadError as it inflates, a cut stream or a CRC that fails
                 yield found[0], _Inflating(found[0], member)
 
@@ -303,7 +303,7 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
                 for event, element in ((event, element) for event, element in parsed if etree.iselement(element)):
                     if not sets and (root := element.getroottree().getroot().tag) != root_tag:
                         msg = f"the root of {name} is <{root}>, not <{root_tag}>"
-                        raise ReadError(msg)
+                        raise UnknownLayoutError(msg)
                     if element.tag == data_set:
                         if event == "start":
                             _between_sets(element, data_set, name, first=not sets)
@@ -320,14 +320,14 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
                     parent = element.getparent()
                     if parent is None or parent.tag != data_set:
                         msg = f"a <{element.tag}> of {name} sits outside any <{data_set}>"
-                        raise ReadError(msg)
+                        raise UnknownLayoutError(msg)
                     if sets[-1] == self._wanted:
                         if self._stray(element):
                             msg = (
                                 f"the series {element.get(self._key_label)!r} of the {self._wanted} data set of {name}"
                                 " holds other than its annotations and observations"
                             )
-                            raise ReadError(msg)
+                            raise UnknownLayoutError(msg)
                         found += 1
                         yield name, element
                     # clear(keep_tail=True), which lxml's stubs lack: the text after a series may be parsed already,
@@ -345,10 +345,10 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
         """Refuse a whole message holding more after its last data set (*last*), or no series of the data set read."""
         if last is not None and (last.getnext() is not None or not _blank(last.tail)):
             msg = f"{name} holds other than data sets after its last"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         if self._wanted not in sets:
             msg = f"{name} holds no {self._wanted} data set; it holds {sets!r}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         if not found:
             msg = f"the {self._wanted} data set of {name} holds no series"
             raise ReadError(msg)
@@ -386,22 +386,22 @@ def _between_sets(data_set: etree._Element, tag: str, name: str, *, first: bool)
         or not (first or (before is not None and before.tag == tag and _blank(before.tail)))
     ):
         msg = f"{name} holds a data set somewhere other than after the last, in its root"
-        raise ReadError(msg)
+        raise UnknownLayoutError(msg)
 
 
 def _drop_read(series: etree._Element, parent: etree._Element, local: str, data_set: str, name: str) -> None:
     """Delete the series before *series* in its data set *parent*, each read and cleared: anything else raises."""
     if series.getprevious() is None and not _blank(parent.text):
         msg = f"in the {data_set} data set, {name} holds {parent.text[:200]!r} where a series should be"
-        raise ReadError(msg)
+        raise UnknownLayoutError(msg)
     while (before := series.getprevious()) is not None:
         if not _named(before, local):
             stray = f"<{before.tag}>" if isinstance(before.tag, str) else repr((before.text or "")[:200])
             msg = f"in the {data_set} data set, {name} holds {stray} where a series should be"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         if not _blank(before.tail):
             msg = f"in the {data_set} data set, {name} holds {before.tail.strip()[:200]!r} where a series should be"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         del parent[0]
 
 
@@ -409,7 +409,7 @@ def _only_series(data_set: etree._Element, local: str, set_id: str, name: str) -
     """Refuse a closed data set holding anything after its series, the last of which is still in it, cleared."""
     if not _blank(data_set.text) or any(not _named(child, local) or not _blank(child.tail) for child in data_set):
         msg = f"in the {set_id} data set, {name} holds other than series"
-        raise ReadError(msg)
+        raise UnknownLayoutError(msg)
 
 
 class SdmxSeries[RowT: msgspec.Struct](SdmxData[RowT]):
@@ -462,7 +462,7 @@ class SdmxSeries[RowT: msgspec.Struct](SdmxData[RowT]):
                     f"the series {series.get(self._key_label)!r} of the {self._wanted} data set of {name} carries "
                     f"{sorted(series.attrib)!r}, not {concepts!r}"
                 )
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             for column in self._columns:
                 if column.field not in self._described:
                     columns[column.field].append(series.attrib[column.label])
@@ -471,7 +471,7 @@ class SdmxSeries[RowT: msgspec.Struct](SdmxData[RowT]):
                     f"the series {series.get(self._key_label)!r} of the {self._wanted} data set of {name} lacks its "
                     f"annotations {list(self._described.values())!r}"
                 )
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             for column, text in zip(described, texts, strict=True):
                 columns[column.field].append(text)
         frame = pl.DataFrame(columns, schema=dict.fromkeys(self._fields, pl.String))
@@ -539,7 +539,7 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
             key = series.get(self._key_label)
             if key is None:
                 msg = f"a series of the {self._wanted} data set of {name} carries no {self._key_label}"
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             found = [cells for path in self._attributes if isinstance(cells := path(series), list)]
             # Three lists as long as the observations, and three attributes an observation in all: each holds its
             # three alone.
@@ -549,7 +549,7 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
                     f"an observation of the series {key!r} of the {self._wanted} data set of {name} carries other than"
                     f" {labels[1:]}"
                 )
-                raise ReadError(msg)
+                raise UnknownLayoutError(msg)
             held[0].extend([key] * count)
             for column, cells in zip(held[1:], found, strict=True):
                 column.extend(cells)

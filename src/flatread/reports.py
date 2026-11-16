@@ -20,7 +20,14 @@ import msgspec
 import polars as pl
 
 from flatread.core import TextFile, _check_ending, _check_switch, _decoded, _first, _lines
-from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
+from flatread.errors import (
+    EmptyBodyError,
+    LayoutError,
+    RaggedRowError,
+    ReadError,
+    TruncatedFileError,
+    UnknownLayoutError,
+)
 
 __all__ = ["KeyedReport", "ReportFile"]
 
@@ -103,7 +110,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             last = next((line for line in reversed(lines) if line.strip()), "")
             if self._last_line.fullmatch(last) is None:
                 msg = f"the report ends with {last[:200]!r}, not {self._last_line.pattern!r}: it was cut"
-                raise ReadError(msg)
+                raise TruncatedFileError(msg)
         records, read = self._report_rows(lines, first)
         if not records and self._rows_required:
             msg = "the report holds no rows"
@@ -157,7 +164,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
         )
         if (first := next(found, None)) is None:
             msg = f"the body holds no run of the header's lines {[kind.pattern for kind in self._header_lines]}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return lines, first
 
     def _check_lines(self, read: Sequence[tuple[int, re.Match[str]]]) -> None:
@@ -174,7 +181,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             for at in range(len(above) - size + 1)
         ):
             msg = f"the lines above the first row hold no column header {[kind.pattern for kind in self._header_lines]}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
 
 
 class KeyedReport[RowT: msgspec.Struct](ReportFile[RowT]):

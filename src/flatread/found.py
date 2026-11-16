@@ -15,7 +15,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import Column, TextFile, _check_switch, _decoded
-from flatread.errors import LayoutError, RaggedRowError, ReadError
+from flatread.errors import LayoutError, RaggedRowError, ReadError, UnknownLayoutError
 
 __all__ = ["FoundCsv", "FoundTable"]
 
@@ -135,7 +135,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         at = next((n for n, line in enumerate(lines) if self._key_words & {self._heading(c) for c in line}), None)
         if at is None:
             msg = f"the file has no header naming {self._key_field}: it is not a {self._row.__name__} file"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         header = lines[at]
         names = [
             (cell.strip() if self._open else self._words.get(self._heading(cell))) if cell.strip() else None
@@ -143,10 +143,10 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         ]
         if unknown := [cell for cell, name in zip(header, names, strict=True) if cell.strip() and name is None]:
             msg = f"the header names columns {self._row.__name__} does not declare: {unknown}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         if len(named := [name for name in names if name is not None]) != len(set(named)):
             msg = f"the header names one field twice: {header}"
-            raise ReadError(msg)
+            raise UnknownLayoutError(msg)
         return at, names
 
     def _check_line(self, number: int, line: Sequence[str], header: Sequence[str], names: Sequence[str | None]) -> None:
@@ -168,4 +168,8 @@ class FoundCsv[RowT: msgspec.Struct](FoundTable[RowT]):
 
     @typing.override
     def _lines(self, body: bytes) -> list[list[str]]:
-        return list(csv.reader(io.StringIO(_decoded(body, ("utf-8-sig", "latin-1")), newline="")))
+        try:
+            return list(csv.reader(io.StringIO(_decoded(body, ("utf-8-sig", "latin-1")), newline="")))
+        except csv.Error as e:  # a cell past csv's field size limit
+            msg = f"the body is no delimited file: {e}"
+            raise ReadError(msg) from e
