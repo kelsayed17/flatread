@@ -99,9 +99,29 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             if self._last_line.fullmatch(last) is None:
                 msg = f"the report ends with {last[:200]!r}, not {self._last_line.pattern!r}: it was cut"
                 raise ReadError(msg)
+        records, read = self._report_rows(lines, first)
+        if not records and self._rows_required:
+            msg = "the report holds no rows"
+            raise EmptyBodyError(msg)
+        self._check_lines(read)
+        named = {column.field: column.label for column in self._columns}
+        return pl.DataFrame(
+            [[record.get(name) for name in self._written] for record in records],
+            schema={named[name]: pl.String for name in self._written},
+            orient="row",
+        )
+
+    def _report_rows(
+        self, lines: Sequence[str], first: int
+    ) -> tuple[list[dict[str, str | None]], list[tuple[int, re.Match[str]]]]:
+        """Return the rows of *lines* from their *first* on, each its cells and the fields stated above it.
+
+        And every line read that is not blank, its number and its kind's match. Raises ``ReadError`` for a line of no
+        kind.
+        """
         stated: dict[str, str | None] = {}
         records: list[dict[str, str | None]] = []
-        read: list[tuple[int, re.Match[str]]] = []  # every line that is not blank, its number and its kind's match
+        read: list[tuple[int, re.Match[str]]] = []
         for number, line in enumerate(lines[first:], first + 1):
             if (row := self._line.fullmatch(line)) is not None:
                 records.append(row.groupdict() | stated)
@@ -113,16 +133,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
                     raise ReadError(msg)
                 stated |= {name: text for name, text in framed.groupdict().items() if text is not None}
                 read.append((number, framed))
-        if not records and self._rows_required:
-            msg = "the report holds no rows"
-            raise EmptyBodyError(msg)
-        self._check_lines(read)
-        named = {column.field: column.label for column in self._columns}
-        return pl.DataFrame(
-            [[record.get(name) for name in self._written] for record in records],
-            schema={named[name]: pl.String for name in self._written},
-            orient="row",
-        )
+        return records, read
 
     def _split(self, body: bytes) -> tuple[list[str], int]:
         """Return *body*'s lines, and the first one the table reads: past the preamble, if the format has one."""

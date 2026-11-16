@@ -18,7 +18,7 @@ several rows says so (``File._joined_header``).
 
 import re
 import typing
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 import msgspec
 import polars as pl
@@ -129,34 +129,9 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
 
     @typing.override
     def _layout(self, header: Sequence[str]) -> Sequence[Column]:
-        if any(_NUL in cell for cell in header):
-            msg = f"the header {list(header)!r} holds a NUL, which no heading does"
-            raise ReadError(msg)
-        # A header over several rows (``above``) joins its cells by U+001F, as a reader that joins a cell's parts
-        # itself does (``_split_keys``: a GroupedSheet's group and label); any other header holding one is no table's.
-        joined = self._joined_header() or self._split_keys
-        if not joined and any(_UNIT in cell for cell in header):
-            msg = f"the header {list(header)!r} holds a U+001F, which only a header over several rows holds"
-            raise ReadError(msg)
+        self._check_marks(header)
         keys, index, value = self._keyed(), self._record(), self._columns[-1]
-        # A header written over more than one row ends in its label, which names the column.
-        tails = [cell.rpartition(_UNIT)[2] for cell in header]
-        if not self._scattered:
-            if tails[: len(index)] != [column.label for column in index]:
-                msg = (
-                    f"the header opens {tails[: len(index)]!r}, not the record's {[column.label for column in index]!r}"
-                )
-                raise ReadError(msg)
-            places = dict(enumerate(index))
-        else:
-            places = {}
-            for column in index:
-                # An empty label is the first column's, under an empty cell: a spacer's is empty too.
-                found = [at for at, tail in enumerate(tails) if tail == column.label and (column.label or at == 0)]
-                if len(found) != 1:
-                    msg = f"the header {list(header)!r} has no one {column.label!r} column"
-                    raise ReadError(msg)
-                places[found[0]] = column
+        places = self._record_places(header, index)
         if unnamed := [
             key.field
             for key in self._columns[-self._key_count - 1 : -1]
@@ -164,17 +139,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         ]:
             msg = f"the key fields {unnamed} are named by no group of {keys.pattern!r}, and no heading repeats"
             raise LayoutError(msg)
-        beside = {column.label: column for column in self._columns if column.field in self._beside}
-        keyed = [cell for at, cell in enumerate(header) if at not in places and cell.rpartition(_UNIT)[2] not in beside]
-        spacers = [cell for cell in keyed if self._spacers and not cell.rpartition(_UNIT)[2]]
-        if stray := [label for label in keyed if label not in spacers and not keys.fullmatch(label)]:
-            msg = f"the header's columns {stray!r} are not keys, which match {keys.pattern!r}"
-            raise ReadError(msg)
-        named = [label for label in keyed if label not in spacers]
-        clash = {column.field for column in self._columns} & set(named)
-        if (not named and self._rows_required) or clash or (not self._repeats and len(set(named)) != len(named)):
-            msg = f"the header {list(header)!r} names no key, or a column twice"
-            raise ReadError(msg)
+        beside, spacers = self._key_headings(header, places, keys)
         # A spacer is named by its place, which no key's field is (a NUL); it holds nothing. A beside field stands
         # where its label does.
         return [
@@ -188,6 +153,63 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
             for at, cell in enumerate(header)
         ]
 
+    def _check_marks(self, header: Sequence[str]) -> None:
+        """Refuse a *header* holding a NUL, or a U+001F where no header over several rows joins its cells by one."""
+        if any(_NUL in cell for cell in header):
+            msg = f"the header {list(header)!r} holds a NUL, which no heading does"
+            raise ReadError(msg)
+        # A header over several rows (``above``) joins its cells by U+001F, as a reader that joins a cell's parts
+        # itself does (``_split_keys``: a GroupedSheet's group and label); any other header holding one is no table's.
+        joined = self._joined_header() or self._split_keys
+        if not joined and any(_UNIT in cell for cell in header):
+            msg = f"the header {list(header)!r} holds a U+001F, which only a header over several rows holds"
+            raise ReadError(msg)
+
+    def _record_places(self, header: Sequence[str], index: Sequence[Column]) -> dict[int, Column]:
+        """Return the record's *index* columns by their place in *header*: leading it, or found by label anywhere.
+
+        Raises ``ReadError`` for a header that does not open with them, or (:attr:`_scattered`) holds one not once.
+        """
+        # A header written over more than one row ends in its label, which names the column.
+        tails = [cell.rpartition(_UNIT)[2] for cell in header]
+        if not self._scattered:
+            if tails[: len(index)] != [column.label for column in index]:
+                msg = (
+                    f"the header opens {tails[: len(index)]!r}, not the record's {[column.label for column in index]!r}"
+                )
+                raise ReadError(msg)
+            return dict(enumerate(index))
+        places = {}
+        for column in index:
+            # An empty label is the first column's, under an empty cell: a spacer's is empty too.
+            found = [at for at, tail in enumerate(tails) if tail == column.label and (column.label or at == 0)]
+            if len(found) != 1:
+                msg = f"the header {list(header)!r} has no one {column.label!r} column"
+                raise ReadError(msg)
+            places[found[0]] = column
+        return places
+
+    def _key_headings(
+        self, header: Sequence[str], places: Mapping[int, Column], keys: re.Pattern[str]
+    ) -> tuple[dict[str, Column], list[str]]:
+        """Return the beside fields' columns by label, and the spacers' headings, of *header*'s cells past *places*.
+
+        Raises ``ReadError`` for a heading that is no key, a header that names no key (where rows are required), a
+        key that is a field's name, or one named twice (unless :attr:`~flatread.core.File._repeats`).
+        """
+        beside = {column.label: column for column in self._columns if column.field in self._beside}
+        keyed = [cell for at, cell in enumerate(header) if at not in places and cell.rpartition(_UNIT)[2] not in beside]
+        spacers = [cell for cell in keyed if self._spacers and not cell.rpartition(_UNIT)[2]]
+        if stray := [label for label in keyed if label not in spacers and not keys.fullmatch(label)]:
+            msg = f"the header's columns {stray!r} are not keys, which match {keys.pattern!r}"
+            raise ReadError(msg)
+        named = [label for label in keyed if label not in spacers]
+        clash = {column.field for column in self._columns} & set(named)
+        if (not named and self._rows_required) or clash or (not self._repeats and len(set(named)) != len(named)):
+            msg = f"the header {list(header)!r} names no key, or a column twice"
+            raise ReadError(msg)
+        return beside, spacers
+
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
         pattern = self._keyed()
@@ -195,18 +217,49 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         if wide.is_empty() and self._bare_header_refused:  # rows with no value are an answer, a bare header is not
             msg = "the body is a header and no rows"
             raise EmptyBodyError(msg)
-        count = self._key_count
-        keys, value = self._columns[-count - 1 : -1], self._columns[-1]
-        # The record's fields in the struct's order: its number (the reader's, first), its leading columns and those
-        # beside the keys, which a header may lack. A field a piece states is the reader's (a trailer's), or is added
-        # once the long frame is read (a member's name, by ZippedFiles).
+        keys, value = self._columns[-self._key_count - 1 : -1], self._columns[-1]
+        wide, record, stray = self._record_frame(wide)
+        labels = [name for name in wide.columns if name not in record and name not in stray]
+        # The headings as written: a repeat's name is its heading, then a NUL.
+        written = [name.partition(_NUL)[0] for name in labels]
+        # Checked wide, so an error names the table's row and header, not the long frame's row.
+        required = [name for name in self._required if name in wide.columns]
+        filled = self._empty_rows and value.field in self._required
+        among = None if self._empty_rows else wide.select(pl.any_horizontal(pl.col(labels).is_not_null())).to_series()
+        self._check_cells(wide, [*required, *labels] if filled else required, among)
+        texts, typed = self._key_series(pattern, keys, written)
+        if not labels:  # a table whose columns hold no key: no value either
+            return (
+                wide.select(record)
+                .clear()
+                .with_columns(*(key.clear() for key in typed), pl.Series(value.field, [], _DTYPES[value.scalar]))
+            )
+        names = self._key_frame(pattern, keys, written, texts, typed)
+        # A heading can be any text but one with a NUL: the row's number and the heading's name are two of those.
+        row, heading = _NUL, _NUL * 2
+        unpivoted = wide.with_row_index(row).unpivot(
+            labels, index=[row, *record], variable_name=heading, value_name=value.field
+        )
+        # unpivot lays the cells out key by key
+        long = (
+            (unpivoted if self._by_key else unpivoted.sort(row, maintain_order=True))
+            .join(names.with_columns(pl.Series(heading, labels)), on=heading, how="left", maintain_order="left")
+            .select(*record, *(key.field for key in keys), value.field)
+        )
+        return long if self._empty_rows else long.drop_nulls(value.field)
+
+    def _record_frame(self, wide: pl.DataFrame) -> tuple[pl.DataFrame, list[str], list[str]]:
+        """Return *wide* with every record field, the record's fields in order, and the spacers' columns.
+
+        The record's fields stand in the struct's order: its number (the reader's, first), its leading columns and
+        those beside the keys, which a header may lack (a column of nulls). A field a piece states is the reader's (a
+        trailer's), or is added once the long frame is read (a member's name, by ZippedFiles). Raises ``ReadError`` for
+        a spacer column that holds a cell.
+        """
+        fields = self._columns[: -1 - self._key_count]
         stated = self._stated_fields()
-        record = [
-            column.field
-            for column in self._columns[: -1 - count]
-            if column.field in wide.columns or column.field not in stated
-        ]
-        for column in self._columns[: -1 - count]:
+        record = [column.field for column in fields if column.field in wide.columns or column.field not in stated]
+        for column in fields:
             if column.field not in wide.columns and column.field not in stated:
                 wide = wide.with_columns(pl.lit(None, _none_dtype(column.scalar)).alias(column.field))
         stray = [name for name in wide.columns if name.startswith(_NUL) and not name.startswith(_NUL * 2)]
@@ -221,14 +274,15 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         ):
             msg = f"a column with no heading holds a cell: row {at}"
             raise ReadError(msg)
-        labels = [name for name in wide.columns if name not in record and name not in stray]
-        # The headings as written: a repeat's name is its heading, then a NUL.
-        written = [name.partition(_NUL)[0] for name in labels]
-        # Checked wide, so an error names the table's row and header, not the long frame's row.
-        required = [name for name in self._required if name in wide.columns]
-        filled = self._empty_rows and value.field in self._required
-        among = None if self._empty_rows else wide.select(pl.any_horizontal(pl.col(labels).is_not_null())).to_series()
-        self._check_cells(wide, [*required, *labels] if filled else required, among)
+        return wide, record, stray
+
+    def _key_series(
+        self, pattern: re.Pattern[str], keys: Sequence[Column], written: Sequence[str]
+    ) -> tuple[list[pl.Series], list[pl.Series]]:
+        """Return each key field's text from the *written* headings, and that text typed as the field.
+
+        Raises ``ReadError`` for a key text that is not its field's type.
+        """
         # Every label matches: the layout checked it.
         matches = [match for label in written if (match := pattern.fullmatch(label))]
         if len(keys) == 1:
@@ -247,37 +301,39 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
             try:
                 typed.append(_typed(key, text, "key"))
             except ValueError as e:
-                msg = f"the headers {written!r} name keys {text.to_list()!r}, not each a {key.field}: {e}"
+                msg = f"the headers {list(written)!r} name keys {text.to_list()!r}, not each a {key.field}: {e}"
                 raise ReadError(msg) from e
-        if not labels:  # a table whose columns hold no key: no value either
-            return (
-                wide.select(record)
-                .clear()
-                .with_columns(*(key.clear() for key in typed), pl.Series(value.field, [], _DTYPES[value.scalar]))
-            )
-        for key, text, one in zip(keys, series, typed, strict=True):
+        return series, typed
+
+    def _key_frame(
+        self,
+        pattern: re.Pattern[str],
+        keys: Sequence[Column],
+        written: Sequence[str],
+        texts: Sequence[pl.Series],
+        typed: Sequence[pl.Series],
+    ) -> pl.DataFrame:
+        """Return the *typed* keys, a column per key field, a row per heading.
+
+        Raises ``ReadError`` for a required key that some heading names none of, or two headings naming one key.
+        """
+        for key, text, one in zip(keys, texts, typed, strict=True):
             if one.null_count() and key.field in self._required:
-                msg = f"the headers {written!r} name keys {text.to_list()!r}, not each one {key.field} once"
+                msg = f"the headers {list(written)!r} name keys {text.to_list()!r}, not each one {key.field} once"
                 raise ReadError(msg)
         names = pl.DataFrame(typed)
         if names.n_unique() != len(names):
-            shown = texts[0] if count == 1 else [match.groupdict() for match in matches]
+            shown = (
+                texts[0].to_list()
+                if len(keys) == 1
+                else [match.groupdict() for label in written if (match := pattern.fullmatch(label))]
+            )
             msg = (
-                f"the headers {written!r} name keys {shown!r}, not each one {', '.join(key.field for key in keys)} once"
+                f"the headers {list(written)!r} name keys {shown!r},"
+                f" not each one {', '.join(key.field for key in keys)} once"
             )
             raise ReadError(msg)
-        # A heading can be any text but one with a NUL: the row's number and the heading's name are two of those.
-        row, heading = _NUL, _NUL * 2
-        unpivoted = wide.with_row_index(row).unpivot(
-            labels, index=[row, *record], variable_name=heading, value_name=value.field
-        )
-        # unpivot lays the cells out key by key
-        long = (
-            (unpivoted if self._by_key else unpivoted.sort(row, maintain_order=True))
-            .join(names.with_columns(pl.Series(heading, labels)), on=heading, how="left", maintain_order="left")
-            .select(*record, *(key.field for key in keys), value.field)
-        )
-        return long if self._empty_rows else long.drop_nulls(value.field)
+        return names
 
     def _key_text(self, text: str | None, key: Column) -> str | None:
         """Return the text a key's group of :attr:`_keys` matched: empty is no text where the key field admits none."""

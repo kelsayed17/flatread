@@ -183,6 +183,11 @@ _SCALARS: Final = frozenset({str, int, float, bool, dt.date, dt.datetime, dt.tim
 _MOMENTS: Final = frozenset({dt.date, dt.datetime, dt.time})
 
 
+def _marker[T](metadata: Sequence[object], kind: type[T]) -> T | None:
+    """Return a field's first *kind* marker among its ``Annotated`` *metadata*, or ``None``."""
+    return next((meta for meta in metadata if isinstance(meta, kind)), None)
+
+
 class Column(typing.NamedTuple):
     """A field's column as a reader lays it out, what a format's hooks are handed (``_clean``, ``_value``, ``_layout``).
 
@@ -262,6 +267,42 @@ def _check_formats(name: str, scalar: object, written: Format) -> None:
             raise LayoutError(msg)
         else:
             _check_written(name, _temporal(scalar, written), written_as)
+
+
+def _check_markers(column: Column) -> None:
+    """Refuse a *column* whose type no column reads, or whose markers do not fit its type (a ``Flag`` on text)."""
+    name, scalar, written = column.field, column.scalar, column.written
+    if scalar not in _SCALARS:
+        msg = f"the field {name!r} is a {getattr(scalar, '__name__', scalar)}, which no column reads"
+        raise LayoutError(msg)
+    if written is not None and scalar not in _MOMENTS:
+        msg = f"the field {name!r} is no date or time, so it takes no Format"
+        raise LayoutError(msg)
+    if written is not None and written.time_zone is not None and scalar is not dt.datetime:
+        msg = (
+            f"the date field {name!r} has no time, so its Format takes no zone"
+            if scalar is dt.date
+            else f"the time-of-day field {name!r} has no date, so its Format takes no zone"
+        )
+        raise LayoutError(msg)
+    if written is not None:
+        _check_formats(name, scalar, written)
+    if column.flag is not None and scalar is not bool:
+        msg = f"the field {name!r} is no boolean, so it takes no Flag"
+        raise LayoutError(msg)
+    if column.joined is not None and (written is None or column.span is not None):
+        msg = f"the field {name!r} is Joined, so it is a date or time read by its Format, and has no Span"
+        raise LayoutError(msg)
+    if column.shape is not None and scalar is not str:
+        msg = f"the field {name!r} is no text, so it takes no Shape"
+        raise LayoutError(msg)
+    if column.shape is not None:
+        try:  # polars' regex engine, which checks it, has no look-around and no \Z
+            pl.Series([""]).str.contains(_fullmatching(column.shape))
+        except pl.exceptions.PolarsError as e:
+            reason = str(e).partition("\nThis error occurred")[0]
+            msg = f"the field {name!r}'s Shape {column.shape.pattern!r} is no regex polars compiles: {reason}"
+            raise LayoutError(msg) from e
 
 
 class File[RowT: msgspec.Struct](abc.ABC):
@@ -373,13 +414,8 @@ class File[RowT: msgspec.Struct](abc.ABC):
 
     def _column(self, field: msgspec.structs.FieldInfo) -> Column:
         metadata = typing.get_args(field.type)[1:] if typing.get_origin(field.type) is typing.Annotated else ()
-        named = next((meta for meta in metadata if isinstance(meta, Label)), None)
-        written = next((meta for meta in metadata if isinstance(meta, Format)), None)
-        flag = next((meta for meta in metadata if isinstance(meta, Flag)), None)
-        span = next((meta for meta in metadata if isinstance(meta, Span)), None)
-        joined = next((meta for meta in metadata if isinstance(meta, Joined)), None)
-        shape = next((meta for meta in metadata if isinstance(meta, Shape)), None)
-        cell = self._cell_of(field.name, next((meta for meta in metadata if isinstance(meta, Cell)), None))
+        named = _marker(metadata, Label)
+        cell = self._cell_of(field.name, _marker(metadata, Cell))
         # A Cell field takes no column, so its name stands for its label.
         label = named.text if named is not None else field.name if cell is not None else self._label(field.name)
         aliases = named.alternatives if named is not None else ()
@@ -394,41 +430,22 @@ class File[RowT: msgspec.Struct](abc.ABC):
         except LayoutError as e:
             msg = f"the field {field.name!r}: {e}"
             raise LayoutError(msg) from e
-        written = self._format(scalar) if written is None else written
-        if scalar not in _SCALARS:
-            msg = f"the field {field.name!r} is a {getattr(scalar, '__name__', scalar)}, which no column reads"
-            raise LayoutError(msg)
-        if written is not None and scalar not in _MOMENTS:
-            msg = f"the field {field.name!r} is no date or time, so it takes no Format"
-            raise LayoutError(msg)
-        if written is not None and written.time_zone is not None and scalar is not dt.datetime:
-            msg = (
-                f"the date field {field.name!r} has no time, so its Format takes no zone"
-                if scalar is dt.date
-                else f"the time-of-day field {field.name!r} has no date, so its Format takes no zone"
-            )
-            raise LayoutError(msg)
-        if written is not None:
-            _check_formats(field.name, scalar, written)
-        if flag is not None and scalar is not bool:
-            msg = f"the field {field.name!r} is no boolean, so it takes no Flag"
-            raise LayoutError(msg)
-        if joined is not None and (written is None or span is not None):
-            msg = f"the field {field.name!r} is Joined, so it is a date or time read by its Format, and has no Span"
-            raise LayoutError(msg)
-        if shape is not None and scalar is not str:
-            msg = f"the field {field.name!r} is no text, so it takes no Shape"
-            raise LayoutError(msg)
-        if shape is not None:
-            try:  # polars' regex engine, which checks it, has no look-around and no \Z
-                pl.Series([""]).str.contains(_fullmatching(shape))
-            except pl.exceptions.PolarsError as e:
-                reason = str(e).partition("\nThis error occurred")[0]
-                msg = f"the field {field.name!r}'s Shape {shape.pattern!r} is no regex polars compiles: {reason}"
-                raise LayoutError(msg) from e
-        return Column(
-            field.name, label, scalar, written, flag, span, aliases, joined, cell, shape, _literal(field.type)
+        written = _marker(metadata, Format)
+        column = Column(
+            field.name,
+            label,
+            scalar,
+            self._format(scalar) if written is None else written,
+            _marker(metadata, Flag),
+            _marker(metadata, Span),
+            aliases,
+            _marker(metadata, Joined),
+            cell,
+            _marker(metadata, Shape),
+            _literal(field.type),
         )
+        _check_markers(column)
+        return column
 
     def _cell_of(self, name: str, stated: Cell | None) -> tuple[int, int] | None:
         """Return the row and column of the cell that states field *name*, where it is a ``Cell``'s, or raise."""
