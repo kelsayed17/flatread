@@ -4480,31 +4480,49 @@ class TestABesideSheetOfLists:
         assert Plain(_Listing, sheet="S").rows(shifted) == [_Listing("AA", 1)]
 
 
+class _OldEmptyRows(_LongCsv):
+    _empty_rows = False
+
+
+class _OldSpacers(_LongCsv):
+    _spacers = True
+
+
+class _NoEmptyCells(_LongCsv):
+    _empty_cells = "none"  # ty: ignore[invalid-assignment]
+
+
+class _OldSkipBlank(_Sales):
+    _skip_blank = False
+
+
+class _NoBlankLines(_Sales):
+    _blank_lines = "skip"  # ty: ignore[invalid-assignment]
+
+
+class _OldGaps(SheetFile[_Sheet]):
+    _gaps = True
+
+
+class _BoolBlankRows(SheetFile[_Sheet]):
+    _blank_rows = True  # ty: ignore[invalid-assignment]
+
+
 class TestABlankSwitchSetWrong:
     """A blank-handling switch set under its 6.0 name, or to no value it takes, is refused, not read otherwise."""
 
     @pytest.mark.parametrize(
-        ("base", "switches", "message"),
+        ("build", "message"),
         [
-            pytest.param(_LongCsv, {"_empty_rows": False}, r"sets \['_empty_rows'\], renamed in 7.0", id="empty-rows"),
-            pytest.param(_LongCsv, {"_spacers": True}, r"sets \['_spacers'\], renamed in 7.0", id="spacers"),
-            pytest.param(_LongCsv, {"_empty_cells": "none"}, "_empty_cells is 'none', not one of", id="empty-cells"),
-            pytest.param(_Sales, {"_skip_blank": False}, r"sets \['_skip_blank'\], renamed in 7.0", id="skip-blank"),
-            pytest.param(_Sales, {"_blank_lines": "skip"}, "_blank_lines is 'skip', not one of", id="blank-lines"),
+            pytest.param(lambda: _OldEmptyRows(_Long), r"sets \['_empty_rows'\], renamed in 7.0", id="empty-rows"),
+            pytest.param(lambda: _OldSpacers(_Long), r"sets \['_spacers'\], renamed in 7.0", id="spacers"),
+            pytest.param(lambda: _NoEmptyCells(_Long), "_empty_cells is 'none', not one of", id="empty-cells"),
+            pytest.param(lambda: _OldSkipBlank(_Sale), r"sets \['_skip_blank'\], renamed in 7.0", id="skip-blank"),
+            pytest.param(lambda: _NoBlankLines(_Sale), "_blank_lines is 'skip', not one of", id="blank-lines"),
+            pytest.param(lambda: _OldGaps(_Sheet, sheet="S"), r"sets \['_gaps'\], renamed in 7.0", id="gaps"),
+            pytest.param(lambda: _BoolBlankRows(_Sheet, sheet="S"), "_blank_rows is True, not one of", id="bool"),
         ],
     )
-    def test_a_text_reader(self, base: type[File[typing.Any]], switches: dict[str, object], message: str) -> None:
-        row = _Long if base is _LongCsv else _Sale
+    def test_it_is_refused_when_built(self, build: typing.Callable[[], object], message: str) -> None:
         with pytest.raises(LayoutError, match=message):
-            type("Wrong", (base,), switches)(row)
-
-    @pytest.mark.parametrize(
-        ("switches", "message"),
-        [
-            pytest.param({"_gaps": True}, r"sets \['_gaps'\], renamed in 7.0", id="gaps"),
-            pytest.param({"_blank_rows": True}, "_blank_rows is True, not one of", id="blank-rows-bool"),
-        ],
-    )
-    def test_a_sheet(self, switches: dict[str, object], message: str) -> None:
-        with pytest.raises(LayoutError, match=message):
-            type("Wrong", (SheetFile,), switches)(_Sheet, sheet="S")
+            build()
