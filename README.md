@@ -144,6 +144,16 @@ calamine builds it, a pass over the sheet's XML. In CodSpeed's simulation (`benc
 costs about 1.1 times what it did in 5.0 and a sheet read about 1.25 times; a wide or row-by-row CSV read costs
 less. An `.xlsb` or `.ods` is not read.
 
+## From 6.0
+
+A reader declared for 6.0 reads the same files the same way, but for these:
+
+- `HeadersCsv`, `NamedCsv`, `TrailerCsv`, `SpilledCsv` and `TitledCsv` have no constructor of their own: each takes
+  `CsvFile`'s keywords, and checks its switches in `File._check_switches()`. A subclass that called one of their
+  constructors calls the same keywords on `CsvFile`'s.
+- A `NamedCsv`'s empty or mistyped cell is named by the header's label, as every other reader names it, not by its
+  field.
+
 ## From 5.0
 
 6.0 makes 5.0's readers one public API. A reader declared for 5.0 reads the same files the same way, but for these:
