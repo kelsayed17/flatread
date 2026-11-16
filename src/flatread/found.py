@@ -30,7 +30,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
     naming the line, as does a line narrower than the header (``RaggedRowError``: a body cut inside its last row). A
     line of nothing but spaces and ``-`` rules, whether a blank one or a rule, is skipped; a cell
     the format lists in *null_values* is no value, an empty one too; and a file with no rows is empty. A first column
-    with no header cell whose cells are whole numbers numbers the export's rows when the format says so
+    with no header cell whose cells are whole numbers holds the export's row numbers when the format says so
     (:attr:`_numbered_rows`).
     A line that opens a section (:attr:`_section_prefix`, then its text) states the :attr:`_section_field` field for the
     rows below. A format subclasses it with :meth:`_lines`, the file's lines of cells (:class:`FoundCsv`,
@@ -154,7 +154,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         if len(line) < len(header):
             msg = f"line {number} has {len(line)} cells, not the header's {len(header)}: {line}"
             raise RaggedRowError(msg)
-        # An unnamed first column of whole numbers numbers the export's rows (2013's BDC file), and is no data.
+        # An unnamed first column of whole numbers holds the export's row numbers (2013's BDC file), and is no data.
         under = [cell for cell, name in zip(line, names, strict=False) if name is None]
         if self._numbered_rows and names[0] is None and line[0].strip().isdecimal():
             under = under[1:]
