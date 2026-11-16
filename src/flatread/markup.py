@@ -63,6 +63,9 @@ def parse_xml(body: bytes) -> etree._Element:
 #: its encoding reads or an encoding no codec reads (``XML_ERR_INVALID_ENCODING``, ``XML_ERR_UNSUPPORTED_ENCODING``).
 _CUT: Final = frozenset({77})
 _UNDECODED: Final = frozenset({32, 81})
+#: libxml2 before 2.14 (lxml's Windows wheels bundle 2.11) gives bytes that are not UTF-8 the code of any character it
+#: refuses (``XML_ERR_INVALID_CHAR``, 9), which a NUL takes too; its message alone tells them apart.
+_NOT_UTF8: Final = (9, "Input is not proper UTF-8")
 
 
 def _malformed(what: str, exc: etree.XMLSyntaxError, end: tuple[int, int] | None) -> ReadError:
@@ -75,7 +78,7 @@ def _malformed(what: str, exc: etree.XMLSyntaxError, end: tuple[int, int] | None
     """
     msg = f"{what} is not well-formed XML: {exc}"
     code = getattr(exc, "code", None)  # libxml2's error code, which lxml-stubs leaves off XMLSyntaxError
-    if code in _UNDECODED:
+    if code in _UNDECODED or (code == _NOT_UTF8[0] and str(exc).startswith(_NOT_UTF8[1])):
         return EncodingError(msg)
     if code in _CUT or (end is not None and exc.position >= end):
         return TruncatedFileError(msg)

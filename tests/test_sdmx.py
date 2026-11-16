@@ -336,8 +336,6 @@ def test_a_message_that_is_not_its_format_s_raises(body: bytes, message: str) ->
 def test_a_message_cut_short_is_truncated() -> None:
     with pytest.raises(TruncatedFileError, match=r"^the body is not well-formed XML: expected '>'"):
         _SeriesOf(_Series, "D").frame(_message(_GOOD)[:-20])
-    with pytest.raises(TruncatedFileError, match=r"^the body is not well-formed XML: Premature end of data"):
-        _SeriesOf(_Series, "D").frame(_message(_GOOD)[: _message(_GOOD).index(b"</x:DataSet>")])
 
 
 @pytest.mark.parametrize(

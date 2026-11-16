@@ -170,9 +170,14 @@ def test_an_xml_body_cut_or_not_its_encoding_keeps_its_kind(body: bytes, kind: t
         XmlFile(_Row, root="rows", record="row").rows(body)
 
 
-def test_any_other_malformed_xml_is_a_plain_read_error() -> None:
-    with pytest.raises(ReadError, match=r"^the body is not well-formed XML: Opening and ending tag mismatch") as raised:
-        XmlFile(_Row, root="rows", record="row").rows(b"<rows><row><Name>a</Other></row></rows>")
+@pytest.mark.parametrize(
+    "body",
+    [b"<rows><row><Name>a</Other></row></rows>", b"<rows><row><Name>\x00</Name></row></rows>"],
+    ids=["a tag mismatch", "a character XML refuses"],
+)
+def test_any_other_malformed_xml_is_a_plain_read_error(body: bytes) -> None:
+    with pytest.raises(ReadError, match=r"^the body is not well-formed XML: ") as raised:
+        XmlFile(_Row, root="rows", record="row").rows(body)
     assert type(raised.value) is ReadError
 
 
