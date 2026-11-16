@@ -4478,3 +4478,33 @@ class TestABesideSheetOfLists:
             _columns_at = (1, 2)
 
         assert Plain(_Listing, sheet="S").rows(shifted) == [_Listing("AA", 1)]
+
+
+class TestABlankSwitchSetWrong:
+    """A blank-handling switch set under its 6.0 name, or to no value it takes, is refused, not read otherwise."""
+
+    @pytest.mark.parametrize(
+        ("base", "switches", "message"),
+        [
+            pytest.param(_LongCsv, {"_empty_rows": False}, r"sets \['_empty_rows'\], renamed in 7.0", id="empty-rows"),
+            pytest.param(_LongCsv, {"_spacers": True}, r"sets \['_spacers'\], renamed in 7.0", id="spacers"),
+            pytest.param(_LongCsv, {"_empty_cells": "none"}, "_empty_cells is 'none', not one of", id="empty-cells"),
+            pytest.param(_Sales, {"_skip_blank": False}, r"sets \['_skip_blank'\], renamed in 7.0", id="skip-blank"),
+            pytest.param(_Sales, {"_blank_lines": "skip"}, "_blank_lines is 'skip', not one of", id="blank-lines"),
+        ],
+    )
+    def test_a_text_reader(self, base: type[File[typing.Any]], switches: dict[str, object], message: str) -> None:
+        row = _Long if base is _LongCsv else _Sale
+        with pytest.raises(LayoutError, match=message):
+            type("Wrong", (base,), switches)(row)
+
+    @pytest.mark.parametrize(
+        ("switches", "message"),
+        [
+            pytest.param({"_gaps": True}, r"sets \['_gaps'\], renamed in 7.0", id="gaps"),
+            pytest.param({"_blank_rows": True}, "_blank_rows is True, not one of", id="blank-rows-bool"),
+        ],
+    )
+    def test_a_sheet(self, switches: dict[str, object], message: str) -> None:
+        with pytest.raises(LayoutError, match=message):
+            type("Wrong", (SheetFile,), switches)(_Sheet, sheet="S")

@@ -70,6 +70,7 @@ from flatread.core import (
     Column,
     File,
     _check_above,
+    _check_switch,
     _first,
     _flagged,
     _moment,
@@ -653,6 +654,12 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         self._sheet = sheet
         self._header_row = header_row
         self._null_values = list(null_values)
+
+    @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
+        renamed = {"_gaps": '_blank_rows = "drop"'}
+        _check_switch(self, "_blank_rows", ("refuse", "drop", "keep"), renamed)
 
     @typing.override
     def _joined_header(self) -> bool:

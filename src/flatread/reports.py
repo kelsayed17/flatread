@@ -19,7 +19,7 @@ from typing import Final, Literal
 import msgspec
 import polars as pl
 
-from flatread.core import TextFile, _check_ending, _decoded, _first, _lines
+from flatread.core import TextFile, _check_ending, _check_switch, _decoded, _first, _lines
 from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
 
 __all__ = ["LongReport", "ReportFile"]
@@ -81,6 +81,11 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
         # The fields the report writes, in order: a format adds any other in its _cells.
         self._written = [name for name in self._fields if name in cells | stated]
         self._final_line_ending = final_line_ending
+
+    @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
+        _check_switch(self, "_blank_lines", ("drop", "read"), {"_skip_blank": '_blank_lines = "read" (or "drop")'})
 
     @typing.override
     def _label(self, name: str) -> str | None:

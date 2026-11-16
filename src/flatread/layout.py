@@ -24,7 +24,7 @@ from typing import Literal
 import msgspec
 import polars as pl
 
-from flatread.core import _DTYPES, _NUL, _UNIT, Column, File, _first, _none_dtype, _typed
+from flatread.core import _DTYPES, _NUL, _UNIT, Column, File, _check_switch, _first, _none_dtype, _typed
 from flatread.errors import EmptyBodyError, LayoutError, ReadError
 
 __all__ = ["LongFile"]
@@ -100,6 +100,8 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
     def _check_switches(self) -> None:
         super()._check_switches()
         self._keyed()  # a constructor that derives _keys sets it before File's (GroupedSheet's)
+        _check_switch(self, "_empty_cells", ("keep", "drop"), {"_empty_rows": '_empty_cells = "drop" (or "keep")'})
+        _check_switch(self, "_spacer_columns", (False, True), {"_spacers": "_spacer_columns"})
 
     def _record(self) -> list[Column]:
         """Return the record's leading columns: the fields before the keys, but the numbered, beside, Cell and stated.
