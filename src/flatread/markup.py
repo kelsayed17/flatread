@@ -14,13 +14,21 @@ Both are text tables (:class:`~flatread.core.TextFile`):
 import types
 import typing
 from collections.abc import Collection, Mapping
+from typing import Final
 
 import msgspec
 import polars as pl
 from lxml import etree
 
 from flatread.core import TextFile
-from flatread.errors import EmptyBodyError, LayoutError, ReadError, UnknownLayoutError
+from flatread.errors import (
+    EmptyBodyError,
+    EncodingError,
+    LayoutError,
+    ReadError,
+    TruncatedFileError,
+    UnknownLayoutError,
+)
 
 __all__ = ["NestedXml", "XmlFile", "parse_xml"]
 
@@ -47,8 +55,37 @@ def parse_xml(body: bytes) -> etree._Element:
     try:
         return etree.XML(body, parser)
     except etree.XMLSyntaxError as exc:
-        msg = f"the body is not well-formed XML: {exc}"
-        raise ReadError(msg) from exc
+        error = _malformed("the body", exc, _end(body))
+        raise error from exc
+
+
+#: libxml2's codes for a document that ends inside an element (``XML_ERR_TAG_NOT_FINISHED``), and for bytes no codec of
+#: its encoding reads or an encoding no codec reads (``XML_ERR_INVALID_ENCODING``, ``XML_ERR_UNSUPPORTED_ENCODING``).
+_CUT: Final = frozenset({77})
+_UNDECODED: Final = frozenset({32, 81})
+
+
+def _malformed(what: str, exc: etree.XMLSyntaxError, end: tuple[int, int] | None) -> ReadError:
+    """Return the error for *what* (``the body``, a member) lxml refused as *exc*, of the kind its fault is.
+
+    A body cut inside an element is :class:`~flatread.errors.TruncatedFileError`, as is one whose fault stands at its
+    text's *end*, the line and column of its last byte that is no whitespace (``<a><b>1</``: :func:`_end`); bytes its
+    encoding does not read are :class:`~flatread.errors.EncodingError`; any other fault a plain
+    :class:`~flatread.errors.ReadError`.
+    """
+    msg = f"{what} is not well-formed XML: {exc}"
+    code = getattr(exc, "code", None)  # libxml2's error code, which lxml-stubs leaves off XMLSyntaxError
+    if code in _UNDECODED:
+        return EncodingError(msg)
+    if code in _CUT or (end is not None and exc.position >= end):
+        return TruncatedFileError(msg)
+    return ReadError(msg)
+
+
+def _end(body: bytes) -> tuple[int, int]:
+    """Return the line (from 1) and column (from 1, in bytes) of *body*'s last byte that is no whitespace."""
+    text = body.rstrip()
+    return text.count(b"\n") + 1, len(text.rpartition(b"\n")[2])
 
 
 class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):

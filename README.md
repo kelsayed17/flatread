@@ -126,16 +126,18 @@ Every error a read raises is one of two kinds, both `ValueError`s:
   | class | the body |
   |---|---|
   | `EmptyBodyError` | holds nothing to read |
-  | `RaggedRowError` | has a row wider or narrower than its header |
-  | `TruncatedFileError` | was cut: it ends inside a zip member, before a title or trailer, or not as the file ends |
+  | `RaggedRowError` | has a row wider or narrower than its header, or a fixed-width line of another width |
+  | `TruncatedFileError` | was cut: it ends inside a zip member or an XML element, before a title or trailer, or not as the file ends |
   | `ControlTotalError` | states a count, in a trailer or a title, that is not the rows it holds |
   | `UnknownLayoutError` | is laid out as another file: a header, root, sheet, title or zip member not the reader's |
   | `CorruptArchiveError` | is a zip that will not open, or holds a member that will not inflate or fails its CRC-32 |
-  | `EncodingError` | is not the text encoding it is written in, or declares a charset no codec reads |
+  | `EncodingError` | is not the text encoding it is written in (an XML body's too), or declares a charset no codec reads |
 
   A cell that is not its type, or a body past a bound (below), is a plain `ReadError`.
 - `flatread.errors.LayoutError`: the reader is declared wrong (a date field with no `Format`, spans that overlap, a
-  switch left unset or naming a field the struct lacks, pieces composed in an order that cannot read). It is raised
+  switch left unset, misspelled, set to a value its piece does not take or naming a field the struct lacks, a
+  separator of more than one character, a msgspec `Meta` constraint, which no reader checks, pieces composed in an
+  order that cannot read). It is raised
   when the reader is built; only a few show at the first read (an inner reader whose columns are not the fields).
 
 Catch `ReadError` to handle bad data, and let a `LayoutError` fail loudly. No other exception escapes a read: a
@@ -154,6 +156,26 @@ part writes and a third load reads elsewhere; and an `.xlsx` sheet's span is rea
 calamine builds it, a pass over the sheet's XML. In CodSpeed's simulation (`benchmarks/test_speed.py`) a CSV read
 costs about 1.1 times what it did in 5.0 and a sheet read about 1.25 times; a wide or row-by-row CSV read costs
 less. An `.xlsb` or `.ods` is not read.
+
+## From 7.1
+
+7.2 refuses, when a reader is built, declarations 7.1 read without a word, each reading a file otherwise than it
+says. A reader 7.1 built may raise `LayoutError` now; none of these read its file as declared:
+
+- A switch within two edits of one its pieces read (`_quotechar` for `_quote_char`), which 7.1 ignored. A format that
+  keeps a value of its own under such a name annotates it in its class (`_header_alone: ClassVar[bool] = True`).
+- A switch annotated as a boolean, a number, text or `Literal` values, set to none of them (`_closing_separator =
+  "never"`, read as `None`; `_header = "no"`, a `TypeError` once read).
+- A `CsvFile` separator or `_quote_char` that is not one character of one byte, ends a line, or is the other; a
+  `CsvText` separator of more than one character.
+- A field whose type names a msgspec `Meta` constraint (`ge`, `max_length`, `pattern`, `tz` and the rest), which
+  `rows()` never checked: state a pattern as a `Shape`, values as a `Literal`. A `Meta` of descriptions alone is kept.
+- A keyword-only struct (`kw_only=True`), whose `rows()` raised `TypeError`; a `Flag` whose two words are one, every
+  cell read as false; a `_given` value not of its field's type (`3.7` for an `int`, read as `3`).
+
+Three faults now raise the kind they are, each still a `ReadError`: an XML or SDMX body cut short is a
+`TruncatedFileError`, XML bytes its encoding does not read an `EncodingError`, and a fixed-width line of another width
+a `RaggedRowError`. Their messages are 7.1's.
 
 ## From 7.0
 

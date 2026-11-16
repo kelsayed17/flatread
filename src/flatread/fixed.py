@@ -21,7 +21,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import _MOMENTS, File, _check_ending, _check_renamed, _first, _lines, _typed
-from flatread.errors import EmptyBodyError, LayoutError, ReadError, UnknownLayoutError
+from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, UnknownLayoutError
 
 __all__ = ["FixedWidthFile"]
 
@@ -121,7 +121,7 @@ class FixedWidthFile[RowT: msgspec.Struct](File[RowT]):
         if (at := _first(lines.to_frame("line").select(bad).to_series(), 1 - header)) is not None:
             where = "the header" if at < 1 else f"row {at}"
             msg = f"{where} {lines[at - 1 + header]!r} is not {self._width} characters, spaces between its columns"
-            raise ReadError(msg)
+            raise RaggedRowError(msg)
         labels = [column.label for column in self._spanned]
         cells = lines.to_frame("line").select(
             line.str.slice(span.start, span.end - span.start).str.strip_chars(" ").alias(label)
