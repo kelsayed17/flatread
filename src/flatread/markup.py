@@ -55,7 +55,8 @@ def parse_xml(body: bytes) -> etree._Element:
     try:
         return etree.XML(body, parser)
     except etree.XMLSyntaxError as exc:
-        error = _malformed("the body", exc, _end(body))
+        # libxml2 before 2.14 reads a NUL as the input's end, and so a body holding one as cut short: it is not.
+        error = _malformed("the body", exc, None if b"\0" in body else _end(body), cut=b"\0" not in body)
         raise error from exc
 
 
@@ -68,19 +69,19 @@ _UNDECODED: Final = frozenset({32, 81})
 _NOT_UTF8: Final = (9, "Input is not proper UTF-8")
 
 
-def _malformed(what: str, exc: etree.XMLSyntaxError, end: tuple[int, int] | None) -> ReadError:
+def _malformed(what: str, exc: etree.XMLSyntaxError, end: tuple[int, int] | None, *, cut: bool = True) -> ReadError:
     """Return the error for *what* (``the body``, a member) lxml refused as *exc*, of the kind its fault is.
 
     A body cut inside an element is :class:`~flatread.errors.TruncatedFileError`, as is one whose fault stands at its
     text's *end*, the line and column of its last byte that is no whitespace (``<a><b>1</``: :func:`_end`); bytes its
     encoding does not read are :class:`~flatread.errors.EncodingError`; any other fault a plain
-    :class:`~flatread.errors.ReadError`.
+    :class:`~flatread.errors.ReadError`. Where *cut* is false, no fault is taken for a cut.
     """
     msg = f"{what} is not well-formed XML: {exc}"
     code = getattr(exc, "code", None)  # libxml2's error code, which lxml-stubs leaves off XMLSyntaxError
     if code in _UNDECODED or (code == _NOT_UTF8[0] and str(exc).startswith(_NOT_UTF8[1])):
         return EncodingError(msg)
-    if code in _CUT or (end is not None and exc.position >= end):
+    if cut and (code in _CUT or (end is not None and exc.position >= end)):
         return TruncatedFileError(msg)
     return ReadError(msg)
 
