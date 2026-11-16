@@ -114,7 +114,7 @@ class _Stripped(SheetFile[_Item]):
 
 class _Answers(GroupedSheet[_Answer]):
     _groups_row = 1
-    _empty_rows = False
+    _empty_cells = "drop"
 
 
 def _unreferenced(body: bytes) -> bytes:

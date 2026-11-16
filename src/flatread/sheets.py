@@ -21,10 +21,10 @@ the load counts). fastexcel's failure on a body, and a panic of calamine's (pyo3
 (:data:`_SPAN_MAX`), refused before it loads: an ``.xlsx`` sheet's span is read from its cell references as it is
 first loaded (about 1 ms a MB), an ``.xls`` sheet's from its records as the workbook opens.
 
-**The switches** of :class:`SheetFile`: ``_header`` (false: no header row, fields by position), ``_gaps`` (an empty
-row inside the table is dropped) or ``_blank_rows`` (kept, a row of no values), ``_trim`` (a cell of only whitespace
-is empty), ``_strip`` (header cells stripped), ``_above`` (rows over the header that head its columns too). A header
-cell may be empty over a real column: its field's ``Label`` is ``""``.
+**The switches** of :class:`SheetFile`: ``_header`` (false: no header row, fields by position), ``_blank_rows`` (an
+empty row inside the table ``"refuse"``-d, ``"drop"``-ped or ``"keep"``-t as a row of no values), ``_trim`` (a cell of
+only whitespace is empty), ``_strip`` (header cells stripped), ``_above`` (rows over the header that head its columns
+too). A header cell may be empty over a real column: its field's ``Label`` is ``""``.
 
 **The sheet shapes**, each composed before the reader it changes:
 
@@ -70,6 +70,7 @@ from flatread.core import (
     Column,
     File,
     _check_above,
+    _check_switch,
     _first,
     _flagged,
     _moment,
@@ -615,12 +616,11 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     #: and its fields are read by position, their names their labels, from the row under ``header_row`` to the sheet's
     #: end: the rows down to ``header_row`` are skipped, unread, and ``header_row=0`` reads from row 1.
     _header: typing.ClassVar[bool] = True
-    #: Whether an empty row inside the table is a gap, dropped: a format whose sheet leaves one (Cboe's VXO archive,
-    #: between two days) sets it; otherwise an empty row raises.
-    _gaps: typing.ClassVar[bool] = False
-    #: Whether an empty row inside the table is a row of no values, kept: a format numbering its rows by place, blank
-    #: ones too (CFTC's Swaps Report tables of 2012 to 2014), sets it.
-    _blank_rows: typing.ClassVar[bool] = False
+    #: What an empty row inside the table is: ``"refuse"``, raised; ``"drop"``, a gap no row stands for (Cboe's VXO
+    #: archive, between two days: ``docs/examples/sheet_file-blankrows-drop.txt``); ``"keep"``, a row of no values (a
+    #: format numbering its rows by place, blank ones too, as CFTC's Swaps Report tables of 2012 to 2014:
+    #: ``docs/examples/sheet_file-blankrows-keep.txt``).
+    _blank_rows: typing.ClassVar[Literal["refuse", "drop", "keep"]] = "refuse"
     #: Whether a cell of only whitespace is empty (EIA leaves blank-looking cells), as fastexcel's
     #: ``whitespace_as_null`` reads it. The header is then read as the sheet writes it, so a heading written twice is
     #: twice (fastexcel would name the second ``East_1``).
@@ -654,6 +654,12 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         self._sheet = sheet
         self._header_row = header_row
         self._null_values = list(null_values)
+
+    @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
+        renamed = {"_gaps": '_blank_rows = "drop"'}
+        _check_switch(self, "_blank_rows", ("refuse", "drop", "keep"), renamed)
 
     @typing.override
     def _joined_header(self) -> bool:
@@ -708,7 +714,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         self._refuse_misread(reader, grid, frame, text, [(column, int(table[at])) for at, column in placed.items()])
         frame = self._completed(frame, absent, stated)
         # Dropped once typed and numbered, so an error and a numbered row still name the sheet's own row.
-        return self._gapless(frame, empty) if self._gaps else frame
+        return self._gapless(frame, empty) if self._blank_rows == "drop" else frame
 
     def _written_header(self) -> bool:
         """Return whether the header is read as the sheet's own row writes it: stacked, trimmed or stripped."""
@@ -776,15 +782,15 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         """Return the table's *text* and *typed* cells down to its end, and which of those rows are empty.
 
         A cell holds no value when it is empty, an empty string or one of the sheet's words for none. Raises
-        ``ReadError`` for an empty row inside the table, unless the format drops or keeps them (:attr:`_gaps`,
-        :attr:`_blank_rows`), and for what :meth:`_outside` refuses.
+        ``ReadError`` for an empty row inside the table, unless the format drops or keeps them
+        (:attr:`_blank_rows`), and for what :meth:`_outside` refuses.
         """
         text = text.with_columns(pl.when(~pl.col(pl.String).is_in(["", *self._null_values])).then(pl.col(pl.String)))
         end = self._end(text)
         self._outside(grid, end)
         text, typed = text.head(end), typed.head(end)
         empty = text.select(pl.all_horizontal(pl.all().is_null())).to_series()
-        if not (self._gaps or self._blank_rows) and (at := _first(empty, self._row_one)) is not None:
+        if self._blank_rows == "refuse" and (at := _first(empty, self._row_one)) is not None:
             msg = f"the {self._sheet!r} sheet's row {at} is empty, and a table's rows run to the sheet's end"
             raise ReadError(msg)
         return text, typed, empty
@@ -809,7 +815,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         labels = [column.label for column in self._columns if column.field != self._numbered]
         return (
             self._header
-            and not (self._above or self._trim or self._strip or self._gaps or self._blank_rows)
+            and not (self._above or self._trim or self._strip or self._blank_rows != "refuse")
             and not (self._null_values or self._unread or self._blank_columns)
             and all(column.cell is None for column in self._columns)
             and "" not in labels
@@ -1440,11 +1446,29 @@ class TitledSheet[RowT: msgspec.Struct](SheetFile[RowT]):
     """A sheet table below title rows (a title, a note, a blank row): each row above its header is one of its titles.
 
     A format subclasses it and names them: :attr:`_titles`, a regex per row above the header, in order, each matching
-    the row's text, its cells joined by tabs up to its last filled one (an empty row is ``re.compile("")``).
+    the row's text, its cells joined by tabs up to its last filled one (an empty row is ``re.compile("")``). A sheet's
+    title states no field and counts no rows, as a :class:`~flatread.delimited.TitledCsv`'s may: a title with a group
+    raises ``LayoutError`` when built, as does a format that names no :attr:`_titles` (``str`` regexes).
+
+    Example: ``docs/examples/titled_sheet.txt``. Its twin :class:`PreambleSheet` finds a header below rows it does not
+    read (``docs/examples/preamble_sheet.txt``), where this knows each row above it.
     """
 
     #: The regexes the rows above the header match, one a row; each format's subclass (or its constructor) sets them.
     _titles: Sequence[re.Pattern[str]]
+
+    @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
+        titles = getattr(self, "_titles", None)
+        if not isinstance(titles, Sequence) or not all(
+            isinstance(title, re.Pattern) and isinstance(title.pattern, str) for title in titles
+        ):
+            msg = f"the {type(self).__name__} format names no _titles, the regexes its rows above the header match"
+            raise LayoutError(msg)
+        if groups := sorted({group for title in titles for group in title.groupindex}):
+            msg = f"the _titles groups {groups} state nothing: a sheet's title states no field and counts no rows"
+            raise LayoutError(msg)
 
     @typing.override
     def _outside(self, grid: pl.DataFrame, end: int) -> None:
@@ -1466,6 +1490,9 @@ class PreambleSheet[RowT: msgspec.Struct](SheetFile[RowT]):
 
     The rows above it (a banner, a link, prose) are not read. The header row is found in each body (two workbooks of
     one layout open it on different rows), and errors name the sheet's own rows.
+
+    Example: ``docs/examples/preamble_sheet.txt``. Its twin :class:`TitledSheet` checks each row above a header in a
+    known row (``docs/examples/titled_sheet.txt``), where this skips any rows unread.
     """
 
     @typing.override

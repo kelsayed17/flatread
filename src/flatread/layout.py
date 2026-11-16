@@ -6,9 +6,9 @@ cell. It is composed with its reader the same way (``class _ZlbSheet(LongFile[Zl
 reader asks :meth:`~flatread.core.File._layout` for the columns a body's header lays out, the struct's own unless a long
 table's, and :class:`LongFile` lays out the record's columns and one per key header, each read as the value field, then
 unpivots. A key may be written over several header rows (``_key_count``, a key field per row, each a group of
-``_keys``), a header cell with no text may head a spacer column that holds nothing (``_spacers``), the record's columns
-may be found by label among the keys (``_scattered``), a heading may repeat, its column's place a key too (``_repeats``:
-a CSV's ``Difference`` under each week), and a format whose table of rows with no value is an answer sets
+``_keys``), a header cell with no text may head a spacer column that holds nothing (``_spacer_columns``), the record's
+columns may be found by label among the keys (``_scattered``), a heading may repeat, its column's place a key too
+(``_repeats``: a CSV's ``Difference`` under each week), and a format whose table of rows with no value is an answer sets
 ``_rows_required`` false. A heading may be any text but a field's name: the long frame's own columns are named by
 characters no heading holds. Its rows come record by record, or key by key (``_by_key``: each series' run whole). A
 record field may stand among the keys (``_beside``, found by its label), or hold the record's own row where no label
@@ -19,11 +19,12 @@ several rows says so (``File._joined_header``).
 import re
 import typing
 from collections.abc import Collection, Mapping, Sequence
+from typing import Literal
 
 import msgspec
 import polars as pl
 
-from flatread.core import _DTYPES, _NUL, _UNIT, Column, File, _first, _none_dtype, _typed
+from flatread.core import _DTYPES, _NUL, _UNIT, Column, File, _check_switch, _first, _none_dtype, _typed
 from flatread.errors import EmptyBodyError, LayoutError, ReadError
 
 __all__ = ["LongFile"]
@@ -39,9 +40,9 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
     several keys (``market_value_residence_2003``) fills the :attr:`_key_count` fields before the value, each from the
     :attr:`_keys` group of its name (``(?P<measure>[a-z_]+)_(?P<year>[0-9]{4})``). Each cell under a
     key's header is a row's value, read as the reader reads the value field's cells; an empty one is a row whose value
-    is ``None``, where the field admits it, or no row when :attr:`_empty_rows` is false. Rows come record by record, a
-    record's keys in header order. An error names the table's own row and header. A format subclasses it with its
-    reader (``class _ZlbSheet(LongFile[ZlbRow], SheetFile[ZlbRow])``) and names :attr:`_keys`.
+    is ``None``, where the field admits it, or no row when :attr:`_empty_cells` is ``"drop"``. Rows come record by
+    record, a record's keys in header order. An error names the table's own row and header. A format subclasses it with
+    its reader (``class _ZlbSheet(LongFile[ZlbRow], SheetFile[ZlbRow])``) and names :attr:`_keys`.
 
     A table whose records no label tells apart (GDPNow's rows without a ticker) names :attr:`_numbered`, a leading
     field without a column that holds each record's own row, which its reader fills (a sheet's row). A record field
@@ -54,15 +55,15 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
 
     #: The regex every header after the record's labels fullmatches; a format's subclass (or its constructor) sets it.
     _keys: re.Pattern[str]
-    #: Whether an empty cell is a row whose value is ``None``: a table whose blanks are cells it did not fill (a
-    #: vintage that did not yet reach a day) sets it false, and an empty cell is no row.
-    _empty_rows: typing.ClassVar[bool] = True
+    #: What an empty value cell is: ``"keep"``, a row whose value is ``None``; ``"drop"``, no row, for a table whose
+    #: blanks are cells it did not fill (a day with no trading: ``docs/examples/long_file-emptycells.csv``).
+    _empty_cells: typing.ClassVar[Literal["keep", "drop"]] = "keep"
     #: How many fields before the value a header's key fills: one, from :meth:`_key`, or several, each the text of the
     #: group of :attr:`_keys` named for it (empty is ``None``, where the field admits it).
     _key_count: typing.ClassVar[int] = 1
     #: Whether a header cell with no text past the record's columns heads a spacer, a column holding nothing: not a
-    #: key, and refused only if it holds a cell.
-    _spacers: typing.ClassVar[bool] = False
+    #: key, and refused only if it holds a cell (``docs/examples/long_file-spacercolumns.txt``).
+    _spacer_columns: typing.ClassVar[bool] = False
     #: Whether the record's columns are found by their label anywhere in the header, not leading it: a sheet whose
     #: ``Date Last Year`` sits among its regions. An empty label is the first column's.
     _scattered: typing.ClassVar[bool] = False
@@ -99,6 +100,8 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
     def _check_switches(self) -> None:
         super()._check_switches()
         self._keyed()  # a constructor that derives _keys sets it before File's (GroupedSheet's)
+        _check_switch(self, "_empty_cells", ("keep", "drop"), {"_empty_rows": '_empty_cells = "drop" (or "keep")'})
+        _check_switch(self, "_spacer_columns", (False, True), {"_spacers": "_spacer_columns"})
 
     def _record(self) -> list[Column]:
         """Return the record's leading columns: the fields before the keys, but the numbered, beside, Cell and stated.
@@ -199,7 +202,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         """
         beside = {column.label: column for column in self._columns if column.field in self._beside}
         keyed = [cell for at, cell in enumerate(header) if at not in places and cell.rpartition(_UNIT)[2] not in beside]
-        spacers = [cell for cell in keyed if self._spacers and not cell.rpartition(_UNIT)[2]]
+        spacers = [cell for cell in keyed if self._spacer_columns and not cell.rpartition(_UNIT)[2]]
         if stray := [label for label in keyed if label not in spacers and not keys.fullmatch(label)]:
             msg = f"the header's columns {stray!r} are not keys, which match {keys.pattern!r}"
             raise ReadError(msg)
@@ -224,8 +227,9 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         written = [name.partition(_NUL)[0] for name in labels]
         # Checked wide, so an error names the table's row and header, not the long frame's row.
         required = [name for name in self._required if name in wide.columns]
-        filled = self._empty_rows and value.field in self._required
-        among = None if self._empty_rows else wide.select(pl.any_horizontal(pl.col(labels).is_not_null())).to_series()
+        kept = self._empty_cells == "keep"
+        filled = kept and value.field in self._required
+        among = None if kept else wide.select(pl.any_horizontal(pl.col(labels).is_not_null())).to_series()
         self._check_cells(wide, [*required, *labels] if filled else required, among)
         texts, typed = self._key_series(pattern, keys, written)
         if not labels:  # a table whose columns hold no key: no value either
@@ -246,7 +250,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
             .join(names.with_columns(pl.Series(heading, labels)), on=heading, how="left", maintain_order="left")
             .select(*record, *(key.field for key in keys), value.field)
         )
-        return long if self._empty_rows else long.drop_nulls(value.field)
+        return long if kept else long.drop_nulls(value.field)
 
     def _record_frame(self, wide: pl.DataFrame) -> tuple[pl.DataFrame, list[str], list[str]]:
         """Return *wide* with every record field, the record's fields in order, and the spacers' columns.

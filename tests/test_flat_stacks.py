@@ -52,10 +52,10 @@ class _Regional(msgspec.Struct, frozen=True, gc=False):
 class _RegionalSheet(LongFile[_Regional], DatedSheet[_Regional]):
     """eia's ``_Regional``: dates down, a column a region, notes under the dates, blank-looking cells empty."""
 
-    _empty_rows = False
+    _empty_cells = "drop"
     _rows_required = False
     _bare_header_refused = True
-    _spacers = True
+    _spacer_columns = True
     _trim = True
     _strip = True
     _keys = re.compile(r".+", re.DOTALL)
@@ -166,7 +166,7 @@ class TestByKey:
         class Sparse(LongFile[_Series], CsvFile[_Series]):
             _keys = re.compile(r".+")
             _by_key = True
-            _empty_rows = False
+            _empty_cells = "drop"
 
         body = b"Series Description,A,B\n2026-01-02,,1\n2026-01-09,2,\n2026-01-16,3,4\n"
         assert [(row.series, row.day) for row in Sparse(_Series).rows(body)] == [
@@ -227,7 +227,7 @@ class _Factors(Carried[_Factor], BesideSheet[_Factor]):
     """federal_reserve's ``_RiskFactors``: right of a title column, a group written once, gaps between groups."""
 
     _columns_at = (1, 2, 3)
-    _gaps = True
+    _blank_rows = "drop"
     _carried = ("asset_class",)
 
 
@@ -276,7 +276,7 @@ class _Wpsr(LongFile[_Stub], Thousands[_Stub], Transcoded[_Stub], SectionedCsv[_
     _encodings = ("cp1252",)
     _eof = bytes([0x1A])
     _section = re.compile(rb'^"?STUB_1"?,', re.MULTILINE)
-    _empty_rows = False
+    _empty_cells = "drop"
     _rows_required = False
     _bare_header_refused = True
     _repeats = True

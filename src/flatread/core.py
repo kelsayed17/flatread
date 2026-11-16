@@ -139,6 +139,20 @@ def _check_above(above: int, header_row: int) -> None:
         raise LayoutError(msg)
 
 
+def _check_switch(reader: object, switch: str, choices: Collection[object], renamed: Mapping[str, str]) -> None:
+    """Refuse *reader*'s *switch* set to none of *choices*, or a switch of *renamed* set under its old name.
+
+    *renamed* maps each old name to what it is now (``_gaps`` to ``_blank_rows = "drop"``): a format that still sets one
+    would have it ignored, and read otherwise, so it is refused when built.
+    """
+    if (value := getattr(reader, switch)) not in choices:
+        msg = f"the {type(reader).__name__} format's {switch} is {value!r}, not one of {list(choices)!r}"
+        raise LayoutError(msg)
+    if old := [name for name in renamed if hasattr(reader, name)]:
+        msg = f"the {type(reader).__name__} format sets {old}, renamed in 7.0: {[renamed[name] for name in old]}"
+        raise LayoutError(msg)
+
+
 def _stacked(rows: Sequence[Sequence[str | None]]) -> list[str]:
     """Return each column's header from *rows*, those over the header then its own, U+001F between a column's cells.
 

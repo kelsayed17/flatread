@@ -153,6 +153,13 @@ A reader declared for 6.0 reads the same files the same way, but for these:
   same `LayoutError` when built; where it has two faults, which one is named first may differ.
 - A `NamedCsv`'s empty or mistyped cell is named by the header's label, as every other reader names it, not by its
   field.
+- Blank handling is one switch per reader, in one vocabulary: `SheetFile._gaps = True` → `_blank_rows = "drop"`,
+  `SheetFile._blank_rows = True` → `_blank_rows = "keep"` (the default is `"refuse"`); `ReportFile._skip_blank =
+  False` → `_blank_lines = "read"` (the default is `"drop"`); `LongFile._empty_rows = False` → `_empty_cells = "drop"`
+  (the default is `"keep"`); `LongFile._spacers` → `_spacer_columns`. An old name, or a value none of these, is a
+  `LayoutError` when built, so a format not yet moved is not read otherwise.
+- A `TitledSheet` title with a group (`count`, or one named for a field) is a `LayoutError` when built: a sheet's title
+  states no field and counts no rows, which it ignored before. A `TitledSheet` with no `_titles` is one too.
 
 ## From 5.0
 

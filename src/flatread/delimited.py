@@ -732,6 +732,9 @@ class TitledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     file's number of rows, checked; a group named for a field is that field's value on every row (the week a title is
     as of), typed as the field (:func:`_stated`), a field no column holds, which takes no ``Label``; any other group
     raises ``LayoutError``, as does a format that names no :attr:`_titles` (``str`` regexes), when built.
+
+    Example: ``docs/examples/titled_csv.csv``. Its twin :class:`PreambleCsv` drops any number of lines it does not read
+    (``docs/examples/preamble_csv.csv``), where this matches each line above the header and may state a field from it.
     """
 
     #: The regexes the lines above the header match, one a line; each format's subclass (or its constructor) sets them.
@@ -783,6 +786,9 @@ class PreambleCsv[RowT: msgspec.Struct](CsvFile[RowT]):
 
     The header is the first line whose first cell is the struct's first label, quoted or not. The lines above it are
     dropped unread; a body with no such line raises.
+
+    Example: ``docs/examples/preamble_csv.csv``. Its twin :class:`TitledCsv` matches each line above the header to a
+    known regex (``docs/examples/titled_csv.csv``), where this finds the header wherever it stands.
     """
 
     @typing.override
