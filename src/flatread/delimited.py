@@ -536,12 +536,12 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
         if not self._header:
             msg = f"{type(self).__name__} reads its file by its header, and _header is false"
             raise LayoutError(msg)
-        self._words()
+        self._header_words()
         if stray := set(self._required_fields) - {column.field for column in self._columns}:
             msg = f"the required fields {sorted(stray)} are no fields of {self._row.__name__} read from a column"
             raise LayoutError(msg)
 
-    def _words(self) -> dict[str, str]:
+    def _header_words(self) -> dict[str, str]:
         """Return the label each word a header may write names: each field's label and its alternatives.
 
         Raises :class:`~flatread.errors.LayoutError` for a word two fields share.
@@ -559,7 +559,7 @@ class NamedCsv[RowT: msgspec.Struct](CsvFile[RowT]):
     @typing.override
     def _header_names(self, header: list[str]) -> list[str]:
         # A cell no field's word names may head a column read and dropped, as written.
-        words, dropped = self._words(), {*self._unread, *self._blank_columns}
+        words, dropped = self._header_words(), {*self._unread, *self._blank_columns}
         labels = [words.get(self._heading(cell), cell if cell in dropped else None) for cell in header]
         # Read under the header's own cells, in its order, so polars refuses a long row (an inserted column would
         # take its cell) and the count finds a short one: as fast as a fixed header.
