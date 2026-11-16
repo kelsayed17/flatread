@@ -72,7 +72,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
         super().__init__(row, null_values=null_values)
         self._root = self._qualified(root)
         self._record_path = record
-        self._record = self._record_tag(record)
+        self._record_element = self._record_tag(record)
 
     def _record_tag(self, record: str) -> str:
         """Return the tag every record is, *record* qualified."""
@@ -100,7 +100,7 @@ class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):
 
     def _rows(self, root: etree._Element) -> list[list[str | None]]:
         """Return each record's cells under *root*, in order, one per label: the root's children, each its leaves."""
-        tag = self._record
+        tag = self._record_element
         if not _blank(root.text):
             msg = f"the <{root.tag}> root holds the text {root.text.strip()[:200]!r} before its first record"
             raise ReadError(msg)

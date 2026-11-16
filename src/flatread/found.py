@@ -14,7 +14,7 @@ from collections.abc import Collection, Sequence
 import msgspec
 import polars as pl
 
-from flatread.core import Column, TextFile, _decoded
+from flatread.core import Column, TextFile, _check_switch, _decoded
 from flatread.errors import LayoutError, RaggedRowError, ReadError
 
 __all__ = ["FoundCsv", "FoundTable"]
@@ -31,7 +31,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
     line of nothing but spaces and ``-`` rules, whether a blank one or a rule, is skipped; a cell
     the format lists in *null_values* is no value, an empty one too; and a file with no rows is empty. A first column
     with no header cell whose cells are whole numbers is the export's row count when the format says so
-    (:attr:`_row_count`).
+    (:attr:`_numbered_rows`).
     A line that opens a section (:attr:`_section_prefix`, then its text) states the :attr:`_section_field` field for the
     rows below. A format subclasses it with :meth:`_lines`, the file's lines of cells (:class:`FoundCsv`,
     :class:`~flatread.sheets.FoundSheet`).
@@ -46,8 +46,8 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
     #: it.
     _section_prefix: typing.ClassVar[str] = ""
     _section_field: typing.ClassVar[str] = ""
-    #: Whether a first column with no header cell, its cells whole numbers, is the export's row count, and no data.
-    _row_count: typing.ClassVar[bool] = False
+    #: Whether a first column with no header cell, its cells whole numbers, numbers the export's rows, and is no data.
+    _numbered_rows: typing.ClassVar[bool] = False
 
     def __init__(self, row: type[RowT], *, key: str, null_values: Collection[str] = ()) -> None:
         """Lay out an export of *row*, whose header is the line naming its field *key* (refused if no field is).
@@ -72,6 +72,11 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         if len(self._words) != len(words):
             msg = f"two fields of {row.__name__} share a label: {sorted(word for word, _ in words)}"
             raise LayoutError(msg)
+
+    @typing.override
+    def _check_switches(self) -> None:
+        super()._check_switches()
+        _check_switch(self, "_numbered_rows", (False, True), {"_row_count": "_numbered_rows"})
 
     @typing.override
     def _label(self, name: str) -> str | None:
@@ -151,7 +156,7 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
             raise RaggedRowError(msg)
         # An unnamed first column of whole numbers is the export's row count (2013's BDC file), and not data.
         under = [cell for cell, name in zip(line, names, strict=False) if name is None]
-        if self._row_count and names[0] is None and line[0].strip().isdecimal():
+        if self._numbered_rows and names[0] is None and line[0].strip().isdecimal():
             under = under[1:]
         if any(cell.strip() for cell in [*line[len(header) :], *([] if self._open else under)]):
             msg = f"line {number} holds a value under no label: {line}"

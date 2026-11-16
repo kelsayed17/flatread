@@ -38,23 +38,23 @@ from flatread.found import FoundCsv
 from flatread.grids import BesideGrid, BlankEnded, FilledHeader, GridFile, TitledGrid
 from flatread.layout import LongFile
 from flatread.markup import NestedXml, XmlFile
-from flatread.reports import LongReport, ReportFile
+from flatread.reports import KeyedReport, ReportFile
 from flatread.sheets import (
     BesideSheet,
     BiffSheet,
-    CellHeaderSheet,
     DatedSheet,
+    EverySheet,
     FoundSheet,
     GroupedSheet,
     NotedSheet,
-    NumberTextSheet,
-    OnlySheet,
+    OneSheet,
     PaddedSheet,
     PreambleSheet,
     SheetFile,
-    SheetsFile,
     SheetText,
+    TextNumbersSheet,
     TitledSheet,
+    TypedHeaderSheet,
     sheet_grid,
 )
 from tests.support.workbooks import swapped
@@ -1273,13 +1273,13 @@ class _Year(msgspec.Struct, frozen=True, gc=False):
     name: Annotated[str, Label("Name")]
 
 
-class TestASheetsFile:
+class TestAnEverySheet:
     @staticmethod
-    def _reader() -> SheetsFile[_Year]:
+    def _reader() -> EverySheet[_Year]:
         class _Inner(msgspec.Struct, frozen=True, gc=False):
             name: Annotated[str, Label("Name")]
 
-        return SheetsFile(
+        return EverySheet(
             _Year, sheets=re.compile(r"Report (?P<year>\d{4})"), each=lambda sheet: SheetFile(_Inner, sheet=sheet)
         )
 
@@ -1301,7 +1301,7 @@ class TestASheetsFile:
         class _Inner(msgspec.Struct, frozen=True, gc=False):
             name: Annotated[str, Label("Name")]
 
-        reader = SheetsFile(
+        reader = EverySheet(
             _Year, sheets=re.compile(r"Report (?P<year>\d{4})"), each=lambda sheet: SheetText(_Inner, sheet=sheet)
         )
         body = workbook({"Report 2025": [["Name"], ["a"]], "Report 2026": [["Name"], ["b"]]})
@@ -1318,7 +1318,7 @@ class TestASheetsFile:
         assert len(opens) == 1
 
 
-class TestASheetsFileOfNoRows:
+class TestAnEverySheetOfNoRows:
     def test_a_year_of_no_rows_is_an_empty_frame_typed_as_the_rest(self) -> None:
         class Inner(msgspec.Struct, frozen=True, gc=False):
             name: Annotated[str, Label("Name")]
@@ -1326,7 +1326,7 @@ class TestASheetsFileOfNoRows:
         class Open(SheetFile[Inner]):
             _rows_required = False
 
-        class Years(SheetsFile[_Year]):
+        class Years(EverySheet[_Year]):
             _rows_required = False
 
         reader = Years(_Year, sheets=re.compile(r"Report (?P<year>\d{4})"), each=lambda sheet: Open(Inner, sheet=sheet))
@@ -1733,7 +1733,7 @@ class TestALongSheetsHeadings:
 class TestATableOfNoValues:
     class Quiet(_StackedSheet):
         _rows_required = False
-        _bare_header_refused = True
+        _header_needs_rows = True
 
     def test_dated_rows_with_no_value_are_an_empty_answer_and_no_rows_are_none(self) -> None:
         head: list[list[Cell]] = [[None, "Stocks"], ["Day", "East"]]
@@ -1945,9 +1945,9 @@ class TestATableOpeningPastColumnA:
         )
 
 
-class TestAnOnlySheet:
+class TestAOneSheet:
     def test_it_reads_the_one_sheet_whatever_its_name(self) -> None:
-        sheet = OnlySheet(_Sheet)
+        sheet = OneSheet(_Sheet)
         assert [row.name for row in sheet.rows(_book(_HEADER, _LINE, sheet="RGDP"))] == ["a"]
         assert [row.name for row in sheet.rows(_book(_HEADER, _LINE, sheet="Median_Level"))] == ["a"]
 
@@ -1962,7 +1962,7 @@ class TestAnOnlySheet:
     )
     def test_a_workbook_of_another_count_raises(self, body: bytes, message: str) -> None:
         with pytest.raises(ReadError, match=message):
-            OnlySheet(_Sheet).rows(body)
+            OneSheet(_Sheet).rows(body)
 
 
 class _Spaced(msgspec.Struct, frozen=True, gc=False):
@@ -2753,7 +2753,7 @@ class _Titled(FixedWidthFile[_Dates]):
     """A title line, a date, written once above a table of no header (OCC's volume files)."""
 
     _header = False
-    _stated = frozenset({"as_of"})
+    _outside_fields = frozenset({"as_of"})
 
     @typing.override
     def _table(self, lines: pl.Series) -> tuple[pl.Series, dict[str, str]]:
@@ -3002,7 +3002,7 @@ class _Shares(msgspec.Struct, frozen=True, gc=False):
     share: float | None
 
 
-class _Held(LongReport[_Shares]):
+class _Held(KeyedReport[_Shares]):
     """A block a year: its months over a holder's value and share for each."""
 
     _key_field = "month"
@@ -3019,7 +3019,7 @@ Japan   5.5 50
 """
 
 
-class TestALongReport:
+class TestAKeyedReport:
     def test_each_key_is_a_row_its_block_header_naming_the_keys(self) -> None:
         rows = _Held(_Shares, null_values=("-",)).rows(_HELD)
         assert rows == [
@@ -3507,11 +3507,11 @@ class _Rates(msgspec.Struct, frozen=True, gc=False):
     share: Annotated[float | None, Label("Share")]
 
 
-class _PaddedNumbers(PaddedSheet[_Rates], NumberTextSheet[_Rates]):
+class _PaddedNumbers(PaddedSheet[_Rates], TextNumbersSheet[_Rates]):
     pass
 
 
-class TestANumberTextSheet:
+class TestATextNumbersSheet:
     def test_a_number_written_as_text_reads_as_its_number_beside_number_cells(self) -> None:
         body = workbook(
             {"S": [["Day", "Count", "Share"], [dt.date(2026, 1, 1), " 2", " 1.03"], [dt.date(2026, 1, 2), 3, 0.6]]}
@@ -3564,7 +3564,7 @@ class _NotesBeside(SheetFile[_Rates]):
     _unread = ("", "notes")
 
 
-class _NotesBetween(PaddedSheet[_Rates], NumberTextSheet[_Rates]):
+class _NotesBetween(PaddedSheet[_Rates], TextNumbersSheet[_Rates]):
     _unread = ("notes",)
 
 
@@ -3836,7 +3836,7 @@ class _TickerDay(msgspec.Struct, frozen=True, gc=False):
     value: float
 
 
-class _TickerSheet(LongFile[_TickerDay], CellHeaderSheet[_TickerDay]):
+class _TickerSheet(LongFile[_TickerDay], TypedHeaderSheet[_TickerDay]):
     _keys = re.compile(r"(?P<key>\d{4}-\d{2}-\d{2}) 00:00:00")
     _empty_cells = "drop"
     _blank_rows = "drop"
@@ -3849,7 +3849,7 @@ class _Rowed(msgspec.Struct, frozen=True, gc=False):
     value: float
 
 
-class _RowedSheet(LongFile[_Rowed], CellHeaderSheet[_Rowed]):
+class _RowedSheet(LongFile[_Rowed], TypedHeaderSheet[_Rowed]):
     _keys = _TickerSheet._keys
     _empty_cells = "drop"
     _numbered = "row"
@@ -3858,7 +3858,7 @@ class _RowedSheet(LongFile[_Rowed], CellHeaderSheet[_Rowed]):
 _JAN, _FEB = dt.date(2026, 1, 31), dt.date(2026, 2, 28)
 
 
-class TestACellHeaderSheetReadLong:
+class TestATypedHeaderSheetReadLong:
     def test_its_date_cells_are_the_keys_and_blank_rows_and_headings_are_no_rows(self) -> None:
         body = workbook({"S": [["Ticker", _JAN, _FEB], ["A", 1, None], [None], ["Heading"], ["B", 2, 3]]})
         assert _TickerSheet(_TickerDay, sheet="S").rows(body) == [
@@ -3956,7 +3956,7 @@ class _FoundCsv(FoundCsv[_Found]):
 
 
 class _CountedCsv(_FoundCsv):
-    _row_count = True
+    _numbered_rows = True
 
 
 class TestAFoundCsv:
@@ -4526,3 +4526,28 @@ class TestABlankSwitchSetWrong:
     def test_it_is_refused_when_built(self, build: typing.Callable[[], object], message: str) -> None:
         with pytest.raises(LayoutError, match=message):
             build()
+
+
+class _OldStated(_Titled):
+    _stated = frozenset({"as_of"})
+
+
+class _OldRowCount(_FoundCsv):
+    _row_count = True
+
+
+class _OldBareHeader(_LongCsv):
+    _bare_header_refused = True
+
+
+@pytest.mark.parametrize(
+    ("build", "old"),
+    [
+        pytest.param(lambda: _OldStated(_Dates), "_stated", id="stated"),
+        pytest.param(lambda: _OldRowCount(_Found, key="year"), "_row_count", id="row-count"),
+        pytest.param(lambda: _OldBareHeader(_Long), "_bare_header_refused", id="bare-header"),
+    ],
+)
+def test_a_switch_set_under_its_6_0_name_is_refused_when_built(build: typing.Callable[[], object], old: str) -> None:
+    with pytest.raises(LayoutError, match=rf"sets \['{old}'\], renamed in 7.0"):
+        build()

@@ -148,6 +148,11 @@ def _check_switch(reader: object, switch: str, choices: Collection[object], rena
     if (value := getattr(reader, switch)) not in choices:
         msg = f"the {type(reader).__name__} format's {switch} is {value!r}, not one of {list(choices)!r}"
         raise LayoutError(msg)
+    _check_renamed(reader, renamed)
+
+
+def _check_renamed(reader: object, renamed: Mapping[str, str]) -> None:
+    """Refuse a switch of *renamed* that *reader* sets under its old name, which it would ignore, reading otherwise."""
     if old := [name for name in renamed if hasattr(reader, name)]:
         msg = f"the {type(reader).__name__} format sets {old}, renamed in 7.0: {[renamed[name] for name in old]}"
         raise LayoutError(msg)
@@ -859,7 +864,7 @@ class Reshaped[RowT: msgspec.Struct](File[RowT]):
     def __init__(self, row: type[RowT], inner: File[typing.Any]) -> None:
         """Read a file of *row* as *inner* reads it, then shaped; *row*'s fields name no columns of their own."""
         super().__init__(row)
-        self._inner = inner
+        self._inner_reader = inner
 
     @typing.override
     def _label(self, name: str) -> str | None:
@@ -871,7 +876,7 @@ class Reshaped[RowT: msgspec.Struct](File[RowT]):
 
     @typing.override
     def _read(self, body: bytes) -> pl.DataFrame:
-        return self._shape(self._inner.frame(body))
+        return self._shape(self._inner_reader.frame(body))
 
 
 def _decoded(body: bytes, encodings: Sequence[str], *, lossy: bool = False) -> str:

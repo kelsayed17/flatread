@@ -8,7 +8,7 @@ the first row) and the framing's (:attr:`~ReportFile._framing`), and optionally 
 (:attr:`~ReportFile._last_line`, so a cut report is refused). Header and framing lines are dropped wherever they stand,
 a framing group named for a field states it for every row below until a line states it again (a title's date, a
 section's name carried down over its rows), and any line of no kind raises, naming it. Its cells are typed as a
-:class:`~flatread.core.TextFile`'s. :class:`LongReport` reads a report long, a row per key its header line names.
+:class:`~flatread.core.TextFile`'s. :class:`KeyedReport` reads a report long, a row per key its header line names.
 """
 
 import re
@@ -22,7 +22,7 @@ import polars as pl
 from flatread.core import TextFile, _check_ending, _check_switch, _decoded, _first, _lines
 from flatread.errors import EmptyBodyError, LayoutError, RaggedRowError, ReadError
 
-__all__ = ["LongReport", "ReportFile"]
+__all__ = ["KeyedReport", "ReportFile"]
 
 
 class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
@@ -177,7 +177,7 @@ class ReportFile[RowT: msgspec.Struct](TextFile[RowT]):
             raise ReadError(msg)
 
 
-class LongReport[RowT: msgspec.Struct](ReportFile[RowT]):
+class KeyedReport[RowT: msgspec.Struct](ReportFile[RowT]):
     """A report read long, a row per key: a line's last cells, a run per key, the keys its header line names.
 
     The row struct is the long row: its leading fields are the record's (a row's groups, or stated), then the key, then
