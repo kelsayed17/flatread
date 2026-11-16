@@ -149,8 +149,8 @@ less. An `.xlsb` or `.ods` is not read.
 A reader declared for 6.0 reads the same files the same way, but for these:
 
 - `HeadersCsv`, `NamedCsv`, `TrailerCsv`, `SpilledCsv` and `TitledCsv` have no constructor of their own: each takes
-  `CsvFile`'s keywords, and checks its switches in `File._check_switches()`. A subclass that called one of their
-  constructors calls the same keywords on `CsvFile`'s.
+  `CsvFile`'s keywords, as before, and checks its switches in `File._check_switches()`. A misdeclared one raises the
+  same `LayoutError` when built; where it has two faults, which one is named first may differ.
 - A `NamedCsv`'s empty or mistyped cell is named by the header's label, as every other reader names it, not by its
   field.
 
