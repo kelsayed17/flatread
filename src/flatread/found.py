@@ -99,6 +99,34 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
     @typing.override
     def _cells(self, body: bytes) -> pl.DataFrame:
         lines = self._lines(body)
+        at, names = self._found_header(lines)
+        header = lines[at]
+        records: list[dict[str, str | None]] = []
+        section: str | None = None
+        for number, line in enumerate(lines[at + 1 :], start=at + 2):
+            if self._blank(line):
+                continue
+            if self._section_prefix and line[0].startswith(self._section_prefix) and not "".join(line[1:]).strip():
+                section = line[0].removeprefix(self._section_prefix).strip()
+                continue
+            self._check_line(number, line, header, names)
+            record: dict[str, str | None] = {
+                name: cell for name, cell in zip(names, line, strict=False) if name is not None
+            }
+            records.append(record | {self._section_field: section} if self._section_prefix else record)
+        columns = [name for name in names if name is not None] if self._open else self._labels
+        return pl.DataFrame(
+            [[record.get(label) for label in columns] for record in records],
+            schema=dict.fromkeys(columns, pl.String),
+            orient="row",
+        )
+
+    def _found_header(self, lines: Sequence[Sequence[str]]) -> tuple[int, list[str | None]]:
+        """Return the place among *lines* of the header, the first naming the key field, and the column each cell names.
+
+        A blank header cell names none (``None``). Raises ``ReadError`` for no such line, a cell no field's words name,
+        or two cells naming one field.
+        """
         at = next((n for n, line in enumerate(lines) if self._key_words & {self._heading(c) for c in line}), None)
         if at is None:
             msg = f"the file has no header naming {self._key_field}: it is not a {self._row.__name__} file"
@@ -114,34 +142,20 @@ class FoundTable[RowT: msgspec.Struct](TextFile[RowT]):
         if len(named := [name for name in names if name is not None]) != len(set(named)):
             msg = f"the header names one field twice: {header}"
             raise ReadError(msg)
-        records: list[dict[str, str | None]] = []
-        section: str | None = None
-        for number, line in enumerate(lines[at + 1 :], start=at + 2):
-            if self._blank(line):
-                continue
-            if self._section_prefix and line[0].startswith(self._section_prefix) and not "".join(line[1:]).strip():
-                section = line[0].removeprefix(self._section_prefix).strip()
-                continue
-            if len(line) < len(header):
-                msg = f"line {number} has {len(line)} cells, not the header's {len(header)}: {line}"
-                raise RaggedRowError(msg)
-            # An unnamed first column of whole numbers is the export's row count (2013's BDC file), and not data.
-            under = [cell for cell, name in zip(line, names, strict=False) if name is None]
-            if self._row_count and names[0] is None and line[0].strip().isdecimal():
-                under = under[1:]
-            if any(cell.strip() for cell in [*line[len(header) :], *([] if self._open else under)]):
-                msg = f"line {number} holds a value under no label: {line}"
-                raise ReadError(msg)
-            record: dict[str, str | None] = {
-                name: cell for name, cell in zip(names, line, strict=False) if name is not None
-            }
-            records.append(record | {self._section_field: section} if self._section_prefix else record)
-        columns = named if self._open else self._labels
-        return pl.DataFrame(
-            [[record.get(label) for label in columns] for record in records],
-            schema=dict.fromkeys(columns, pl.String),
-            orient="row",
-        )
+        return at, names
+
+    def _check_line(self, number: int, line: Sequence[str], header: Sequence[str], names: Sequence[str | None]) -> None:
+        """Refuse line *number*, a row's, narrower than the *header*, or holding a value under no label of *names*."""
+        if len(line) < len(header):
+            msg = f"line {number} has {len(line)} cells, not the header's {len(header)}: {line}"
+            raise RaggedRowError(msg)
+        # An unnamed first column of whole numbers is the export's row count (2013's BDC file), and not data.
+        under = [cell for cell, name in zip(line, names, strict=False) if name is None]
+        if self._row_count and names[0] is None and line[0].strip().isdecimal():
+            under = under[1:]
+        if any(cell.strip() for cell in [*line[len(header) :], *([] if self._open else under)]):
+            msg = f"line {number} holds a value under no label: {line}"
+            raise ReadError(msg)
 
 
 class FoundCsv[RowT: msgspec.Struct](FoundTable[RowT]):

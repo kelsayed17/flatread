@@ -316,27 +316,13 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         try:
             parsed = read(schema=dict(schema))
             tally = _tally(body, parsed, self._separator, header)
-            floats = [name for name, dtype in numbers.items() if dtype is pl.Float64]
-            if not numbers or (
-                _unpadded(tally, self._separator)
-                and not (
-                    floats
-                    and parsed.select(pl.any_horizontal((pl.col(floats) == 0).any())).item()
-                    and b"-" in body
-                    and pl.select(pl.lit(body).bin.contains(b"e-") | pl.lit(body).bin.contains(b"E-")).item()
-                )
-            ):
+            if not numbers or (_unpadded(tally, self._separator) and not _underflows(body, parsed, numbers)):
                 return parsed, tally
             text = read(schema={name: pl.String if name in numbers else dtype for name, dtype in schema.items()})
         except (pl.exceptions.PolarsError, pl.exceptions.PanicException) as e:
             self._refuse(body, schema=schema, labels=labels, quote_char=quote_char, new_columns=new_columns, e=e)
         frame = text.with_columns(pl.col(name).cast(dtype, strict=False) for name, dtype in numbers.items())
-        # A null the cast made (a null count is kept, not counted), or a float 0.0 that may have underflowed: only
-        # then are the cells looked at. polars reads a quoted empty cell as text, and a cell of spaces as no number.
-        suspect = any(frame[name].null_count() != text[name].null_count() for name in numbers) or any(
-            dtype is pl.Float64 and (frame[name] == 0).any() for name, dtype in numbers.items()
-        )
-        if suspect and _mistyped(text, schema, labels, frame) is not None:
+        if _suspect(text, frame, numbers) and _mistyped(text, schema, labels, frame) is not None:
             self._refuse(body, schema=schema, labels=labels, quote_char=quote_char, new_columns=new_columns, e=None)
         return frame, tally  # its text cells the parsed read's
 
@@ -990,6 +976,28 @@ def _counted(text: str | None, what: str) -> int:
         msg = f"the {what}'s count {text!r} is not a number of rows"
         raise ReadError(msg)
     return int(text)
+
+
+def _underflows(body: bytes, parsed: pl.DataFrame, numbers: Mapping[str, type[pl.DataType]]) -> bool:
+    """Return whether a float of *parsed*, read from *body*, may have underflowed: a 0.0, and ``e-`` in the body."""
+    floats = [name for name, dtype in numbers.items() if dtype is pl.Float64]
+    return bool(
+        floats
+        and parsed.select(pl.any_horizontal((pl.col(floats) == 0).any())).item()
+        and b"-" in body
+        and pl.select(pl.lit(body).bin.contains(b"e-") | pl.lit(body).bin.contains(b"E-")).item()
+    )
+
+
+def _suspect(text: pl.DataFrame, frame: pl.DataFrame, numbers: Mapping[str, type[pl.DataType]]) -> bool:
+    """Return whether *frame*, *text*'s *numbers* columns cast, may hold a cell that is not its number.
+
+    A null the cast made (a null count is kept, not counted), or a float 0.0 that may have underflowed: only then are
+    the cells looked at. polars reads a quoted empty cell as text, and a cell of spaces as no number.
+    """
+    return any(frame[name].null_count() != text[name].null_count() for name in numbers) or any(
+        dtype is pl.Float64 and (frame[name] == 0).any() for name, dtype in numbers.items()
+    )
 
 
 def _mistyped(

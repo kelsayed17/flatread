@@ -196,7 +196,7 @@ def _with_digits(text: pl.Series, numbers: pl.Series) -> pl.Series:
 _ONE_LOAD_HOOKS: Final = (
     "_read", "_column", "_layout", "_label", "_value", "_end", "_outside", "_span", "_header_cells", "_headings",
     "_used_columns", "_typed", "_load", "_text_grid", "_completed", "_gapless", "_joined_header", "_stated",
-    "_sheet_in", "_header_in", "_one_cell",
+    "_sheet_in", "_header_in", "_one_cell", "_table_span", "_header_columns", "_table_rows",
 )  # fmt: skip
 
 
@@ -684,6 +684,42 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         # a number, or the number its text parses as). A text field's column is loaded as floats: its number cells'
         # every digit.
         grid = self._opened_grid if self._opened_grid is not None else self._text_grid(reader, self._sheet)
+        table, used = self._table_span(grid)
+        cells = grid.select(table)
+        if self._trim:  # as fastexcel's whitespace_as_null: a cell of only whitespace is empty
+            cells = cells.with_columns(pl.when(pl.col(pl.String).str.strip_chars() != "").then(pl.col(pl.String)))
+        columns, kept, absent = self._header_columns(cells)
+        text = cells.slice(self._header_row).select(pl.nth(kept))
+        text.columns = [column.field for column in columns]
+        # By position, not label: an empty header cell is no name. A position is the sheet's column, which fastexcel
+        # keys a dtype by: a table may open past column A.
+        placed = dict(zip(kept, columns, strict=True))
+        typed, stated = self._typed(reader, grid, {int(name): placed.get(at) for at, name in enumerate(table)}, used)
+        typed = typed.select(table).select(pl.nth(kept))
+        typed.columns = text.columns
+        text, typed, empty = self._table_rows(grid, text, typed)
+        # Each column's cells under its label, which errors name, or its field's name where its header cell is empty.
+        frame = pl.DataFrame(
+            [
+                self._value(column, text[column.field].alias(column.label or column.field), typed[column.field])
+                for column in columns
+            ]
+        )
+        self._refuse_misread(reader, grid, frame, text, [(column, int(table[at])) for at, column in placed.items()])
+        frame = self._completed(frame, absent, stated)
+        # Dropped once typed and numbered, so an error and a numbered row still name the sheet's own row.
+        return self._gapless(frame, empty) if self._gaps else frame
+
+    def _written_header(self) -> bool:
+        """Return whether the header is read as the sheet's own row writes it: stacked, trimmed or stripped."""
+        return bool(self._above) or self._trim or self._strip
+
+    def _table_span(self, grid: pl.DataFrame) -> tuple[list[str], list[int] | None]:
+        """Return the *grid* columns the table spans, and the sheet columns a format reads (``None``: every one).
+
+        Raises ``ReadError`` for a sheet that ends above its header row, lacks a column the format reads, or (its
+        header read as written) holds cells left of the table's first column.
+        """
         if self._header and grid.height < self._header_row:
             msg = f"the {self._sheet!r} sheet ends at row {grid.height}, before its header row {self._header_row}"
             raise ReadError(msg)
@@ -693,17 +729,22 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         if not set(table) <= set(span):  # sets: a sheet may be 16,384 columns wide
             msg = f"the {self._sheet!r} sheet has no column {used!r} of its table"
             raise ReadError(msg)
-        written = bool(self._above) or self._trim or self._strip  # the header as the sheet's own row writes it
-        if written and used is None and span and span[0] != grid.columns[0]:
+        if self._written_header() and used is None and span and span[0] != grid.columns[0]:
             # Headings read from the sheet's first column: a table that starts after cells of its top rows is refused.
             msg = (
                 f"the {self._sheet!r} sheet's header row holds {grid.columns.index(span[-1]) + 1} columns,"
                 f" not the {len(span)} loaded"
             )
             raise ReadError(msg)
-        cells = grid.select(table)
-        if self._trim:  # as fastexcel's whitespace_as_null: a cell of only whitespace is empty
-            cells = cells.with_columns(pl.when(pl.col(pl.String).str.strip_chars() != "").then(pl.col(pl.String)))
+        return table, used
+
+    def _header_columns(self, cells: pl.DataFrame) -> tuple[list[Column], list[int], list[Column]]:
+        """Return the columns the header of the table's *cells* lays out, the places of those read, and those absent.
+
+        The absent columns are a header-less sheet's last, empty all down, which calamine trims. Raises ``ReadError``
+        for a header that is not the labels, or a header-less table wider than its columns.
+        """
+        written = self._written_header()
         # A sheet without a header: no row is one, and its rows begin under header_row.
         named = (
             (self._headings(cells) if written else self._header_cells(cells)) if self._header else [""] * cells.width
@@ -727,15 +768,17 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         if self._header and header != labels:
             msg = f"the {self._sheet!r} sheet's header (row {self._header_row}) {header} is not {labels}"
             raise ReadError(msg)
-        text = cells.slice(self._header_row).select(pl.nth(kept))
-        text.columns = [column.field for column in columns]
-        # By position, not label: an empty header cell is no name. A position is the sheet's column, which fastexcel
-        # keys a dtype by: a table may open past column A.
-        placed = dict(zip(kept, columns, strict=True))
-        typed, stated = self._typed(reader, grid, {int(name): placed.get(at) for at, name in enumerate(table)}, used)
-        typed = typed.select(table).select(pl.nth(kept))
-        typed.columns = text.columns
-        # A cell holds no value when it is empty, an empty string or one of the sheet's words for none.
+        return columns, kept, absent
+
+    def _table_rows(
+        self, grid: pl.DataFrame, text: pl.DataFrame, typed: pl.DataFrame
+    ) -> tuple[pl.DataFrame, pl.DataFrame, pl.Series]:
+        """Return the table's *text* and *typed* cells down to its end, and which of those rows are empty.
+
+        A cell holds no value when it is empty, an empty string or one of the sheet's words for none. Raises
+        ``ReadError`` for an empty row inside the table, unless the format drops or keeps them (:attr:`_gaps`,
+        :attr:`_blank_rows`), and for what :meth:`_outside` refuses.
+        """
         text = text.with_columns(pl.when(~pl.col(pl.String).is_in(["", *self._null_values])).then(pl.col(pl.String)))
         end = self._end(text)
         self._outside(grid, end)
@@ -744,17 +787,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         if not (self._gaps or self._blank_rows) and (at := _first(empty, self._row_one)) is not None:
             msg = f"the {self._sheet!r} sheet's row {at} is empty, and a table's rows run to the sheet's end"
             raise ReadError(msg)
-        # Each column's cells under its label, which errors name, or its field's name where its header cell is empty.
-        frame = pl.DataFrame(
-            [
-                self._value(column, text[column.field].alias(column.label or column.field), typed[column.field])
-                for column in columns
-            ]
-        )
-        self._refuse_misread(reader, grid, frame, text, [(column, int(table[at])) for at, column in placed.items()])
-        frame = self._completed(frame, absent, stated)
-        # Dropped once typed and numbered, so an error and a numbered row still name the sheet's own row.
-        return self._gapless(frame, empty) if self._gaps else frame
+        return text, typed, empty
 
     def _read_first(self, reader: fastexcel.ExcelReader, body: bytes) -> pl.DataFrame | None:
         """Return the table of the workbook open in *reader* read but by this reader's two loads, or ``None``.
