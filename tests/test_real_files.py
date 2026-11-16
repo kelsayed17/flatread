@@ -21,7 +21,7 @@ from flatread.fields import Format, Label
 from flatread.layout import LongFile
 from flatread.markup import XmlFile
 from flatread.pdf import text_layer
-from flatread.sheets import BiffSheet, GroupedSheet, NotedSheet, SheetsFile
+from flatread.sheets import BiffSheet, EverySheet, GroupedSheet, NotedSheet
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -69,7 +69,7 @@ class _StatsSheet(GroupedSheet[_Week], NotedSheet[_Week]):
     _beside = ("date_last_year",)
 
 
-_STATS = SheetsFile(
+_STATS = EverySheet(
     _Statistic,
     sheets=re.compile(r"ngsstats (?P<year>\d{4}) \(\d{4}-\d{4}\) ?"),  # the 2015 sheet's name ends with a space
     each=lambda sheet: _StatsSheet(_Week, sheet=sheet, header_row=3),

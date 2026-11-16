@@ -5,7 +5,7 @@ loads its sheet's text once, which serves everything around the table, and its t
 text cell written as a number (``2``) from a number cell, so a table with a number field reads its number cells'
 kinds from the ``.xlsx`` sheet's part, where each cell opens on its own reference (its ``t`` attribute), and
 otherwise loads its number columns a third time, as booleans: fastexcel's boolean load reads only a number (or
-boolean) cell as a value (NumberTextSheet, which reads such text, does neither). A plain table whose every column
+boolean) cell as a value (TextNumbersSheet, which reads such text, does neither). A plain table whose every column
 holds one kind of cell, its field's, is read from one strict load, which refuses a column mixing number cells and
 number text; one with an empty cell pays a second, as text, since the strict load reads a word for none (``NA``) as
 none too; one that mixes kinds pays the failed strict load and the two or three.
@@ -26,18 +26,18 @@ import pytest
 from flatread.fields import Cell, Flag, Format, Label
 from flatread.sheets import (
     BesideSheet,
-    CellHeaderSheet,
     DatedSheet,
+    EverySheet,
     GroupedSheet,
     NotedSheet,
-    NumberTextSheet,
-    OnlySheet,
+    OneSheet,
     PaddedSheet,
     PreambleSheet,
     SheetFile,
-    SheetsFile,
     SheetText,
+    TextNumbersSheet,
     TitledSheet,
+    TypedHeaderSheet,
 )
 from tests.support.xlsx import Grid, workbook
 
@@ -137,12 +137,12 @@ _READS: list[tuple[str, File[typing.Any], bytes, int, int]] = [
     ("NotedSheet", NotedSheet(_Item, sheet="S"), workbook({"S": [*_TABLE, ["Source: x"]]}), 1, 2),
     ("DatedSheet", DatedSheet(_Day, sheet="S"), workbook({"S": [["Day", "Value"], [_DAY, 1.5], ["note"]]}), 1, 2),
     ("PaddedSheet", PaddedSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count"], [" a", 1]]}), 1, 2),
-    ("NumberTextSheet", NumberTextSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count"], ["a", "1"]]}), 1, 2),
-    ("CellHeaderSheet", CellHeaderSheet(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
+    ("TextNumbersSheet", TextNumbersSheet(_Item, sheet="S"), workbook({"S": [["Name", "Count"], ["a", "1"]]}), 1, 2),
+    ("TypedHeaderSheet", TypedHeaderSheet(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
     ("a stripped header", _Stripped(_Item, sheet="S"), workbook({"S": _TABLE}), 1, 2),
     ("TitledSheet", _Titled(_Item, sheet="S", header_row=2), workbook({"S": _UNDER_TITLE}), 1, 2),
     ("PreambleSheet", PreambleSheet(_Item, sheet="S"), workbook({"S": [["banner"], ["link"], *_TABLE]}), 1, 2),
-    ("OnlySheet", OnlySheet(_Item), workbook({"Any name": _TABLE}), 1, 2),
+    ("OneSheet", OneSheet(_Item), workbook({"Any name": _TABLE}), 1, 2),
     (
         "GroupedSheet",
         _Answers(_Answer, sheet="S", header_row=2),
@@ -151,8 +151,8 @@ _READS: list[tuple[str, File[typing.Any], bytes, int, int]] = [
         2,
     ),
     (
-        "SheetsFile, three sheets",
-        SheetsFile(_Year, sheets=re.compile(r"(?P<year>\d{4})"), each=lambda sheet: SheetFile(_Name, sheet=sheet)),
+        "EverySheet, three sheets",
+        EverySheet(_Year, sheets=re.compile(r"(?P<year>\d{4})"), each=lambda sheet: SheetFile(_Name, sheet=sheet)),
         workbook({"2024": [["Name"], ["a"]], "2025": [["Name"], ["b"]], "2026": [["Name"], ["c"]]}),
         1,
         6,

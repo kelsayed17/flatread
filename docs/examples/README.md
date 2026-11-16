@@ -568,9 +568,9 @@ Its twin: [`BesideGrid`](#besidegrid) cuts a band of a grid's columns, its end `
 650: '2009' | 2020-09-30 00:00:00 | 0.37 | 0.794019406 | 2020-09-01 00:00:00 | 0.37 | 0.794019406 | 0 |  |  |  |  |
 ```
 
-### `CellHeaderSheet`
+### `TypedHeaderSheet`
 
-[`cell_header_sheet.txt`](cell_header_sheet.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_gdpnow_gdp_tracking_model_data_and_forecasts].yaml`, interaction 0, sheet `Factor`. Read by [`CellHeaderSheet`](../../src/flatread/sheets.py), in atlanta_fed `_DatedSheet`.
+[`typed_header_sheet.txt`](typed_header_sheet.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_gdpnow_gdp_tracking_model_data_and_forecasts].yaml`, interaction 0, sheet `Factor`. Read by [`TypedHeaderSheet`](../../src/flatread/sheets.py), in atlanta_fed `_DatedSheet`.
 
 Header row 1 is date cells, one month per column, read as their text.
 
@@ -583,9 +583,9 @@ Header row 1 is date cells, one month per column, read as their text.
 4: 'Actual+Forecast' |  |  | -0.604902976 | -0.121321598 | 0.036399496 | -0.223547181 | -0.067247451 | 0.043425436 | 0.067224704 | 0.086850985 | 0.015181867
 ```
 
-### `NumberTextSheet`
+### `TextNumbersSheet`
 
-[`number_text_sheet.txt`](number_text_sheet.txt), recorded in prism-clients' `tests/frbsf/cassettes/test_recorded/test_file[get_cpi_contributors_data].yaml`, interaction 0, sheet `chart2_headlineCPI_contr_YoY`. Read by [`NumberTextSheet`](../../src/flatread/sheets.py), in frbsf `_ChartSheet`.
+[`text_numbers_sheet.txt`](text_numbers_sheet.txt), recorded in prism-clients' `tests/frbsf/cassettes/test_recorded/test_file[get_cpi_contributors_data].yaml`, interaction 0, sheet `chart2_headlineCPI_contr_YoY`. Read by [`TextNumbersSheet`](../../src/flatread/sheets.py), in frbsf `_ChartSheet`.
 
 Every figure is a text cell, either padded (`' 1.67'`, `'   NA'`) or not (`'0.60'`); the notes column I is not read.
 
@@ -640,9 +640,9 @@ Its twin: [`NotedSheet`](#notedsheet) ends at the first row with nothing past th
 886: 2026-10-30 00:00:00 |  | 13 | 23 | 2 | -1 | 40 | 22 | 18 | 77
 ```
 
-### `SheetsFile`
+### `EverySheet`
 
-[`sheets_file.txt`](sheets_file.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[ngs-ngsstats.xls].yaml`, interaction 0. Read by [`SheetsFile`](../../src/flatread/sheets.py), in eia `_Years`.
+[`every_sheet.txt`](every_sheet.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[ngs-ngsstats.xls].yaml`, interaction 0. Read by [`EverySheet`](../../src/flatread/sheets.py), in eia `_Years`.
 
 One sheet per year, each named `ngsstats YYYY (YYYY-YYYY)` (the last with a trailing space). Each is read as one table, and its year comes from the sheet name.
 
@@ -711,9 +711,9 @@ Its twins: [`TitledSheet`](#titledsheet) holds the header at a fixed row and che
 1046: 2021-08-27 00:00:00 |  |  |  |
 ```
 
-### `OnlySheet`
+### `OneSheet`
 
-[`only_sheet.txt`](only_sheet.txt), recorded in prism-clients' `tests/philadelphia_fed/cassettes/test_recorded/test_file[rtdsm_yngsub_qvqd].yaml`, interaction 0, sheet `YNGSUB`. Read by [`OnlySheet`](../../src/flatread/sheets.py), in philadelphia_fed `_RtdsmVintages`.
+[`one_sheet.txt`](one_sheet.txt), recorded in prism-clients' `tests/philadelphia_fed/cassettes/test_recorded/test_file[rtdsm_yngsub_qvqd].yaml`, interaction 0, sheet `YNGSUB`. Read by [`OneSheet`](../../src/flatread/sheets.py), in philadelphia_fed `_RtdsmVintages`.
 
 The workbook's one sheet is named after its variable: `DATE`, then one column per vintage.
 
@@ -750,7 +750,7 @@ Its twin: [`SheetFile`](#sheetfile) has fastexcel load one typed table under the
 
 ### `FilledHeader`
 
-[`filled_header.txt`](filled_header.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[disclosures_talf-transaction-specific-disclosures-01-11-24].yaml`, interaction 0, sheet `TALF Material Investors`. Read by [`FilledHeader`](../../src/flatread/grids.py), in federal_reserve `_DisclosureSheet` (each sheet of `_Disclosures`, a `SheetsFile`).
+[`filled_header.txt`](filled_header.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[disclosures_talf-transaction-specific-disclosures-01-11-24].yaml`, interaction 0, sheet `TALF Material Investors`. Read by [`FilledHeader`](../../src/flatread/grids.py), in federal_reserve `_DisclosureSheet` (each sheet of `_Disclosures`, a `EverySheet`).
 
 The header is row 2, under a one-cell title: the first row filling at least two cells and at most three fewer than the fullest. Each release words its titles and labels its own way, so no label finds it. The one-cell note at the end is no record.
 
@@ -941,9 +941,9 @@ Total number of banks: 3765
 Total assets (millions): Consolidated: $25,182,894 | Domestic: $22,528,407
 ```
 
-### `FixedWidthFile._stated`
+### `FixedWidthFile._outside_fields`
 
-[`fixed_width_file-stated.txt`](fixed_width_file-stated.txt), recorded in prism-clients' `tests/occ/cassettes/test_recorded/test_endpoint[cont_volume_download].yaml` interaction 0. Read by [`FixedWidthFile._stated`](../../src/flatread/fixed.py), in occ `_VolumeFile`.
+[`fixed_width_file-outside_fields.txt`](fixed_width_file-outside_fields.txt), recorded in prism-clients' `tests/occ/cassettes/test_recorded/test_endpoint[cont_volume_download].yaml` interaction 0. Read by [`FixedWidthFile._outside_fields`](../../src/flatread/fixed.py), in occ `_VolumeFile`.
 
 the title line writing the report date twice (`H11062026      11062026`), stated on every row, over packed fixed-width rows
 
@@ -976,7 +976,7 @@ ZYME  ZYME  L000000029000000000000000029OSTK
 
 a page-laid report: titles stating the period and season start, a legend, a five-line column header, then row lines (first four and the last)
 
-Its twin: [`LongReport`](#longreport) reads a row's last cells as a run of values, one per key a header line names, and gives a row per key, where this gives a record per row line.
+Its twin: [`KeyedReport`](#keyedreport) reads a row's last cells as a run of values, one per key a header line names, and gives a row per key, where this gives a record per row line.
 
 ```
   
@@ -1058,9 +1058,9 @@ the report's last non-blank line `***** END OF REPORT *****` after class and gra
                                                                                                                                                 
 ```
 
-### `LongReport`
+### `KeyedReport`
 
-[`long_report.txt`](long_report.txt), recorded in prism-clients' `tests/treasury/cassettes/test_tic_securities/test_recorded[major_foreign_holders].yaml` interaction 0. Read by [`LongReport`](../../src/flatread/reports.py), in treasury `_MajorForeignHolders`.
+[`keyed_report.txt`](keyed_report.txt), recorded in prism-clients' `tests/treasury/cassettes/test_tic_securities/test_recorded[major_foreign_holders].yaml` interaction 0. Read by [`KeyedReport`](../../src/flatread/reports.py), in treasury `_MajorForeignHolders`.
 
 TIC table 5: titles, a `Country` header naming 13 months (the keys), each row a country then a run of 13 TAB-separated values read one row per month; notes below
 
@@ -1170,9 +1170,9 @@ File_No,CIK,Registrant_Name,Address_1,Address_2,City,State,Zip_Code,Filing Date,
 814-00061,0000017313,CAPITAL SOUTHWEST CORP,5400 LYNDON B. JOHNSON FREEWAY,SUITE 1300,DALLAS,TX,75240,06/22/20,DEFA14A
 ```
 
-### `FoundTable._row_count`
+### `FoundTable._numbered_rows`
 
-[`found_table-rowcount.csv`](found_table-rowcount.csv), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_bdc_report_2013].yaml` interaction 0. Read by [`FoundTable._row_count`](../../src/flatread/found.py), in sec `_Export` (`_CsvExport`).
+[`found_table-numbered_rows.csv`](found_table-numbered_rows.csv), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_bdc_report_2013].yaml` interaction 0. Read by [`FoundTable._row_count`](../../src/flatread/found.py), in sec `_Export` (`_CsvExport`).
 
 2013's BDC export: an unlabelled first column of row numbers (`, File_No,...` then `1, 814-00637 ...`), padded cells and ` NULL ` too
 
@@ -1804,6 +1804,6 @@ Only the synthetic bodies in the tests reach these, so they have no excerpt:
   same with it off.
 - `ReportFile._skip_blank = False` (sec `_EdgarIndex`): no recorded index has a blank line below its rule.
 - `ReportFile._text_lines` (sec `_EdgarIndex`): no recorded index is latin-1 or holds a form feed or vertical tab.
-- `LongFile._bare_header_refused` (eia `_Dated`, `_Table`): it refuses a cut file, which no recording is.
+- `LongFile._header_needs_rows` (eia `_Dated`, `_Table`): it refuses a cut file, which no recording is.
 
 `GridFile` has no reader of its own; `sheet_text.txt` and `csv_text.csv` show the grids its two sources cut.

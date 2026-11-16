@@ -8,7 +8,7 @@ or null, ``1.5`` truncates to ``1`` as a whole number, a plain number reads as a
 text, which says what each cell holds, and typed by the struct's fields. A number field holds number cells: a text
 cell raises, ``1e3`` or ``nan`` by its text and one written as a number (``2``) by its kind, which an ``.xlsx``
 sheet's part writes (its ``t``) and a third load, of the number columns as booleans, reads elsewhere
-(:class:`NumberTextSheet` reads a sheet that writes its numbers as text); a whole number is loaded as a float and
+(:class:`TextNumbersSheet` reads a sheet that writes its numbers as text); a whole number is loaded as a float and
 checked whole and of 64 bits. A boolean field holds boolean
 cells; a date field without a ``Format`` date cells (Excel's day 60, the 1900-02-29 of its 1900 date system, raises),
 and with one, text in that format; a text field's number cell is its every digit (the text load rounds it to nine
@@ -29,17 +29,17 @@ too). A header cell may be empty over a real column: its field's ``Label`` is ``
 **The sheet shapes**, each composed before the reader it changes:
 
 * :class:`PaddedSheet`: text cells padded with spaces, stripped before they are typed;
-* :class:`NumberTextSheet`: numbers written as text cells as well as number cells;
+* :class:`TextNumbersSheet`: numbers written as text cells as well as number cells;
 * :class:`NotedSheet`: notes under the table, which ends at its first row with nothing past column A;
 * :class:`DatedSheet`: a table that runs while its first column holds date cells, notes under it;
 * :class:`TitledSheet`: title rows over the header, each matching its regex;
 * :class:`PreambleSheet`: a preamble of any length, the header the first row opening with its first label;
 * :class:`BesideSheet`: more beside the table, only its own columns loaded;
-* :class:`OnlySheet`: a workbook of one sheet whose name varies;
-* :class:`CellHeaderSheet` and :class:`GroupedSheet`: headers read long (date cells as keys; keys under group
+* :class:`OneSheet`: a workbook of one sheet whose name varies;
+* :class:`TypedHeaderSheet` and :class:`GroupedSheet`: headers read long (date cells as keys; keys under group
   headings).
 
-:class:`SheetsFile` reads every sheet of a workbook, each by a reader of its own (a sheet a year). :class:`SheetText`
+:class:`EverySheet` reads every sheet of a workbook, each by a reader of its own (a sheet a year). :class:`SheetText`
 cuts a table from a sheet's grid of text cells (:func:`sheet_grid`, each number with every digit) for a sheet too
 irregular for :class:`SheetFile`, and :class:`BiffSheet` from an Excel 3 or 4 workbook's. :class:`FoundSheet` is a
 :class:`~flatread.found.FoundTable` on a workbook's first sheet.
@@ -88,19 +88,19 @@ from flatread.layout import LongFile
 __all__ = [
     "BesideSheet",
     "BiffSheet",
-    "CellHeaderSheet",
     "DatedSheet",
+    "EverySheet",
     "FoundSheet",
     "GroupedSheet",
     "NotedSheet",
-    "NumberTextSheet",
-    "OnlySheet",
+    "OneSheet",
     "PaddedSheet",
     "PreambleSheet",
     "SheetFile",
     "SheetText",
-    "SheetsFile",
+    "TextNumbersSheet",
     "TitledSheet",
+    "TypedHeaderSheet",
     "sheet_grid",
 ]
 
@@ -155,7 +155,7 @@ _BOOLEAN_CELLS: Final = ("true", "false")
 _NUMBER_CELL: Final = r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]{0,8}[1-9])?$"
 
 
-#: A whole number's text and a decimal's, as :class:`NumberTextSheet` reads a text cell (``-12``; ``-1.03``, ``.5``).
+#: A whole number's text and a decimal's, as :class:`TextNumbersSheet` reads a text cell (``-12``; ``-1.03``, ``.5``).
 _WHOLE_TEXT: Final = r"^-?[0-9]+$"
 
 
@@ -635,7 +635,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
     #: and a reader that lays out the key columns (:class:`LongFile`) takes them from it.
     _above: typing.ClassVar[int] = 0
     #: The number fields whose cells are read from their text, not checked as number cells: ``True``, every one
-    #: (:class:`NumberTextSheet`), or the fields a format's own :meth:`_value` reads from text on purpose (a figure
+    #: (:class:`TextNumbersSheet`), or the fields a format's own :meth:`_value` reads from text on purpose (a figure
     #: written ``-1,249,056*``, a number cell under a date style). Any other number field's cell that is no number cell
     #: (text written as one, ``2``) raises, a load more telling it from a number cell.
     _number_text: typing.ClassVar[bool | Collection[str]] = False
@@ -1305,12 +1305,12 @@ class BesideSheet[RowT: msgspec.Struct](SheetFile[RowT]):
         return list(range(len(read)) if self._columns_at is None else self._columns_at)
 
 
-class CellHeaderSheet[RowT: msgspec.Struct](SheetFile[RowT]):
+class TypedHeaderSheet[RowT: msgspec.Struct](SheetFile[RowT]):
     """A sheet whose header writes date cells (a column a day), each read as its text (``2026-10-29 00:00:00``).
 
     :class:`SheetFile` names a header's columns as fastexcel does, a date, time or boolean cell naming none; here
     every header cell is its text, as written. Read long, a date header is its key
-    (``class _Dated(LongFile[R], CellHeaderSheet[R])``, ``_keys`` matching the date cell's text).
+    (``class _Dated(LongFile[R], TypedHeaderSheet[R])``, ``_keys`` matching the date cell's text).
     """
 
     @typing.override
@@ -1318,14 +1318,14 @@ class CellHeaderSheet[RowT: msgspec.Struct](SheetFile[RowT]):
         return ["" if cell is None else cell for cell in cells.row(self._header_row - 1)]
 
 
-class NumberTextSheet[RowT: msgspec.Struct](SheetFile[RowT]):
+class TextNumbersSheet[RowT: msgspec.Struct](SheetFile[RowT]):
     """A sheet whose numbers are written as text as well as in number cells (SF Fed's ``' 1.03'`` beside ``0.60``).
 
     A number field's text cell is read as its text's number of the field's own type, strictly: an int field's is
     digits after an optional ``-`` (no ``+5``, ``1e3``, ``1.0`` or ``inf``), a whole number of 64 bits, read digit for
     digit; a float field's a decimal (``-1.03``, ``.5``; no exponent, ``nan`` or ``inf``). A number cell, whose text is
     a decimal too, keeps every digit it holds. A text cell that is no such number, or a boolean, date or time cell,
-    raises. Composed after a piece that cleans the text (``class _Sheet(PaddedSheet[RowT], NumberTextSheet[RowT])``).
+    raises. Composed after a piece that cleans the text (``class _Sheet(PaddedSheet[RowT], TextNumbersSheet[RowT])``).
     Reading text as numbers, it pays no load to tell a text cell from a number cell (:attr:`SheetFile._number_text`).
     """
 
@@ -1391,7 +1391,7 @@ class DatedSheet[RowT: msgspec.Struct](SheetFile[RowT]):
         return end
 
 
-class SheetsFile[RowT: msgspec.Struct](File[RowT]):
+class EverySheet[RowT: msgspec.Struct](File[RowT]):
     r"""Every sheet of a workbook, each read as its table by a reader of its own, one after another: a sheet a year.
 
     A format gives the regex every sheet's name matches (a sheet that does not raises, and a workbook needs one) and
@@ -1409,9 +1409,9 @@ class SheetsFile[RowT: msgspec.Struct](File[RowT]):
     ) -> None:
         """Lay out the tables of *row*, one sheet each (see the class)."""
         self._sheets = sheets
-        self._each = each
+        self._sheet_reader = each
         super().__init__(row)
-        self._stated = [column for column in self._columns if column.field in sheets.groupindex]
+        self._sheet_columns = [column for column in self._columns if column.field in sheets.groupindex]
 
     @typing.override
     def _label(self, name: str) -> str | None:
@@ -1430,13 +1430,14 @@ class SheetsFile[RowT: msgspec.Struct](File[RowT]):
         frames = []
         for name, group in zip(names, groups, strict=True):
             try:
-                frame = self._each(name)._frame_on(reader, body)  # noqa: SLF001 (a sheet reader of its own)
+                frame = self._sheet_reader(name)._frame_on(reader, body)  # noqa: SLF001 (a sheet reader of its own)
             except ValueError as e:
                 msg = f"the {name!r} sheet: {e}"
                 # A sheet's reader is built here too: a misdeclared one stays a LayoutError, an empty sheet empty.
                 raise (type(e) if isinstance(e, ReadError | LayoutError) else ReadError)(msg) from e
             states = [
-                _stated(column, group[column.field], frame.height, f"{name!r} sheet's name") for column in self._stated
+                _stated(column, group[column.field], frame.height, f"{name!r} sheet's name")
+                for column in self._sheet_columns
             ]
             frames.append(frame.with_columns(states).select(self._fields))
         return pl.concat(frames)
@@ -1506,7 +1507,7 @@ class PreambleSheet[RowT: msgspec.Struct](SheetFile[RowT]):
         return at
 
 
-class OnlySheet[RowT: msgspec.Struct](SheetFile[RowT]):
+class OneSheet[RowT: msgspec.Struct](SheetFile[RowT]):
     """A workbook of one sheet whose name varies (a workbook per variable, the sheet named for it): that sheet."""
 
     def __init__(self, row: type[RowT], *, header_row: int = 1, null_values: Sequence[str] = ()) -> None:
@@ -1689,7 +1690,7 @@ def _biff_text(datemode: int, kind: int, value: object, row: int, at: int) -> st
             return None
 
 
-class GroupedSheet[RowT: msgspec.Struct](LongFile[RowT], CellHeaderSheet[RowT]):
+class GroupedSheet[RowT: msgspec.Struct](LongFile[RowT], TypedHeaderSheet[RowT]):
     """A sheet read long whose key columns sit under group headings, in the row :attr:`_groups_row` above its header.
 
     The row struct's last three fields are the group, the label and the value, after the record's (a question, an

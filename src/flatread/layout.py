@@ -69,7 +69,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
     _scattered: typing.ClassVar[bool] = False
     #: Whether a table of a header and no rows is refused though :attr:`_rows_required` is false (a table of rows with
     #: no value is still an answer there): a format sets it for a sheet whose rows run to its end (EIA's).
-    _bare_header_refused: typing.ClassVar[bool] = False
+    _header_needs_rows: typing.ClassVar[bool] = False
     #: Whether rows come key by key, each key's records in the table's order (a series' run whole), not record by
     #: record.
     _by_key: typing.ClassVar[bool] = False
@@ -102,6 +102,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         self._keyed()  # a constructor that derives _keys sets it before File's (GroupedSheet's)
         _check_switch(self, "_empty_cells", ("keep", "drop"), {"_empty_rows": '_empty_cells = "drop" (or "keep")'})
         _check_switch(self, "_spacer_columns", (False, True), {"_spacers": "_spacer_columns"})
+        _check_switch(self, "_header_needs_rows", (False, True), {"_bare_header_refused": "_header_needs_rows"})
 
     def _record(self) -> list[Column]:
         """Return the record's leading columns: the fields before the keys, but the numbered, beside, Cell and stated.
@@ -217,7 +218,7 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
     def _read(self, body: bytes) -> pl.DataFrame:
         pattern = self._keyed()
         wide = super()._read(body)
-        if wide.is_empty() and self._bare_header_refused:  # rows with no value are an answer, a bare header is not
+        if wide.is_empty() and self._header_needs_rows:  # rows with no value are an answer, a bare header is not
             msg = "the body is a header and no rows"
             raise EmptyBodyError(msg)
         keys, value = self._columns[-self._key_count - 1 : -1], self._columns[-1]

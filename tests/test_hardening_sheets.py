@@ -25,11 +25,11 @@ from flatread.sheets import (
     BesideSheet,
     BiffSheet,
     FoundSheet,
-    NumberTextSheet,
-    OnlySheet,
+    OneSheet,
     PreambleSheet,
     SheetFile,
     SheetText,
+    TextNumbersSheet,
     sheet_grid,
 )
 from tests.support.xlsx import Cell, workbook
@@ -177,30 +177,30 @@ def test_number_cells_of_every_shape_fastexcel_writes_still_read() -> None:
 )
 def test_a_number_text_sheet_reads_an_int_fields_text_strictly(text: str, message: str) -> None:
     with pytest.raises(ReadError, match=f"the 'Count' cell '{re.escape(text)}' {message}: row 3"):
-        NumberTextSheet(_Count, sheet="S").rows(_sheet(1, text))
+        TextNumbersSheet(_Count, sheet="S").rows(_sheet(1, text))
 
 
 def test_a_number_text_sheet_reads_whole_numbers_and_decimals_written_as_text() -> None:
-    assert NumberTextSheet(_Count, sheet="S").rows(_sheet(1, "-12", "007", "9007199254740993")) == [
+    assert TextNumbersSheet(_Count, sheet="S").rows(_sheet(1, "-12", "007", "9007199254740993")) == [
         _Count("a", 1),
         _Count("a", -12),
         _Count("a", 7),
         _Count("a", 9007199254740993),
     ]
-    shares = NumberTextSheet(_Share, sheet="S").rows(_sheet(0.6, "1.03", ".5", "-2", label="Share"))
+    shares = TextNumbersSheet(_Share, sheet="S").rows(_sheet(0.6, "1.03", ".5", "-2", label="Share"))
     assert [row.share for row in shares] == [0.6, 1.03, 0.5, -2.0]
 
 
 @pytest.mark.parametrize("text", ["1e3", "nan", "inf", "1,5"])
 def test_a_number_text_sheet_reads_a_float_fields_text_as_a_decimal_only(text: str) -> None:
     with pytest.raises(ReadError, match=f"the 'Share' cell '{re.escape(text)}' is not a number: row 3"):
-        NumberTextSheet(_Share, sheet="S").rows(_sheet(1.5, text, label="Share"))
+        TextNumbersSheet(_Share, sheet="S").rows(_sheet(1.5, text, label="Share"))
 
 
 def test_a_number_text_sheet_refuses_a_number_cell_that_is_no_whole_number() -> None:
     """A number cell of ``3.0000000004``, whose text is ``3``: its own number says it is no whole number."""
     with pytest.raises(ReadError, match="the 'Count' cell '3' is not a whole number: row 2"):
-        NumberTextSheet(_Count, sheet="S").rows(_sheet(3.0000000004))
+        TextNumbersSheet(_Count, sheet="S").rows(_sheet(3.0000000004))
 
 
 # --- 4. A whole number past 64 bits ---
@@ -220,7 +220,7 @@ def test_the_last_whole_number_of_64_bits_reads() -> None:
     ]
 
 
-# --- 5. OnlySheet and PreambleSheet composed with a zip ---
+# --- 5. OneSheet and PreambleSheet composed with a zip ---
 
 
 class _Row(msgspec.Struct, frozen=True, gc=False):
@@ -232,7 +232,7 @@ _BOOK = workbook({"Data": [["Name", "N"], ["a", 1], ["b", 2]]})
 _PREAMBLE = workbook({"Data": [["title"], [], ["Name", "N"], ["a", 1]]})
 
 
-class _ZippedOnly(ZippedFile[_Row], OnlySheet[_Row]):
+class _ZippedOnly(ZippedFile[_Row], OneSheet[_Row]):
     _member = re.compile(r".*\.xlsx")
 
 
@@ -240,7 +240,7 @@ class _ZippedPreamble(ZippedFile[_Row], PreambleSheet[_Row]):
     _member = re.compile(r".*\.xlsx")
 
 
-class _MaybeZippedOnly(ZippedOrBare[_Row], OnlySheet[_Row]):
+class _MaybeZippedOnly(ZippedOrBare[_Row], OneSheet[_Row]):
     _member = re.compile(r".*\.xlsx")
 
 
@@ -434,7 +434,7 @@ def test_a_text_cell_written_as_a_number_is_no_number_cell(
 
 
 def test_a_number_text_sheet_reads_a_text_cell_written_as_a_number() -> None:
-    assert [row.count for row in NumberTextSheet(_Count, sheet="S").rows(_sheet(1, "2", "-3"))] == [1, 2, -3]
+    assert [row.count for row in TextNumbersSheet(_Count, sheet="S").rows(_sheet(1, "2", "-3"))] == [1, 2, -3]
 
 
 def test_number_cells_beside_words_for_none_and_empty_cells_read() -> None:

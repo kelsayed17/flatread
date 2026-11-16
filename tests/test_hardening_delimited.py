@@ -34,7 +34,7 @@ from flatread.fields import Format, Label, Span
 from flatread.fixed import FixedWidthFile
 from flatread.found import FoundCsv
 from flatread.layout import LongFile
-from flatread.reports import LongReport, ReportFile
+from flatread.reports import KeyedReport, ReportFile
 
 
 class _Volume(msgspec.Struct, frozen=True, gc=False):
@@ -249,14 +249,14 @@ class TestASwitchLeftUnset:
             FoundCsv(_Volume, key="zzz")
 
 
-class TestALongReportsPatterns:
+class TestAKeyedReportsPatterns:
     class _Row(msgspec.Struct, frozen=True, gc=False):
         name: str
         year: int
         value: str
 
     def test_a_cells_flags_are_read_with_it(self) -> None:
-        class _Cased(LongReport[TestALongReportsPatterns._Row]):
+        class _Cased(KeyedReport[TestAKeyedReportsPatterns._Row]):
             _line = re.compile(r"(?P<name>[a-z]+)\s+(?P<value>.*)")
             _framing = (re.compile(r"Name\s+(?P<year>.*)"),)
             _cell = re.compile(r"x\d+", re.IGNORECASE)
@@ -267,7 +267,7 @@ class TestALongReportsPatterns:
         assert reader.rows(b"Name 2020 2021\nabc X1 x2\n") == rows
 
     def test_a_pattern_polars_cannot_read_is_a_layout_error_when_built(self) -> None:
-        class _Behind(LongReport[TestALongReportsPatterns._Row]):
+        class _Behind(KeyedReport[TestAKeyedReportsPatterns._Row]):
             _line = re.compile(r"(?P<name>[a-z]+)\s+(?P<value>.*)")
             _framing = (re.compile(r"Name\s+(?P<year>.*)"),)
             _cell = re.compile(r"(?<=\s)\d+")

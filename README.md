@@ -102,11 +102,11 @@ install loads no HTML, PDF, XML or workbook library (the import-linter contracts
 | `flatread.grids` | a table cut from a grid of text cells: `GridFile`, `TitledGrid`, `FilledHeader`, `BlankEnded`, `BesideGrid` | |
 | `flatread.delimited` | CSV and delimited text: `CsvFile`, `HeadersCsv`, `NamedCsv`, `TrailerCsv`, `TitledCsv`, `PreambleCsv`, `SectionedCsv`, `SpilledCsv`, `PaddedCsv`, `ThousandsCsv`, `CsvText` | |
 | `flatread.fixed` | fixed-width text: `FixedWidthFile` | |
-| `flatread.reports` | a table laid out for print: `ReportFile`, `LongReport` | |
+| `flatread.reports` | a table laid out for print: `ReportFile`, `KeyedReport` | |
 | `flatread.layout` | a wide table read long: `LongFile` | |
 | `flatread.found` | a table whose header is found by its labels: `FoundTable`, `FoundCsv` | |
 | `flatread.archives` | a file in a zip or a legacy encoding: `ZippedFile`, `ZippedFiles`, `ZippedOrBare`, `StreamedZip`, `Transcoded`, `zip_names`, `zipped_member` | |
-| `flatread.sheets` | xlsx and xls workbooks: `SheetFile` and a class per sheet shape, `SheetsFile`, `SheetText`, `BiffSheet`, `FoundSheet`, `sheet_grid` | `excel` |
+| `flatread.sheets` | xlsx and xls workbooks: `SheetFile` and a class per sheet shape, `EverySheet`, `SheetText`, `BiffSheet`, `FoundSheet`, `sheet_grid` | `excel` |
 | `flatread.markup` | XML: `XmlFile`, `NestedXml`, `parse_xml` | `xml` |
 | `flatread.sdmx` | SDMX-CSV and SDMX-ML: `SdmxCsv`, `SdmxStructure`, `SdmxSeries`, `SdmxObservations` | `xml` |
 | `flatread.pages` | HTML tables and records: `HtmlFile`, `HtmlRecords`, `parse_html` and its cell helpers | `html` |
@@ -160,6 +160,14 @@ A reader declared for 6.0 reads the same files the same way, but for these:
   `LayoutError` when built, so a format not yet moved is not read otherwise.
 - A `TitledSheet` title with a group (`count`, or one named for a field) is a `LayoutError` when built: a sheet's title
   states no field and counts no rows, which it ignored before. A `TitledSheet` with no `_titles` is one too.
+- Seven readers and switches have plain names: `SheetsFile` → `EverySheet`, `CellHeaderSheet` →
+  `TypedHeaderSheet`, `NumberTextSheet` → `TextNumbersSheet`, `OnlySheet` → `OneSheet`, `LongReport` → `KeyedReport`
+  (it is no `LongFile`), `FoundTable._row_count` → `_numbered_rows`, `LongFile._bare_header_refused` →
+  `_header_needs_rows`. The old names are gone.
+- A name is a method on every piece that has it, or a value on every piece that has it, since pieces that compose
+  share one class (`tests/test_switch_names.py` checks): `FixedWidthFile._stated` → `_outside_fields` (the fields
+  the lines above or below its table state), `SdmxObservations._value` → `_value_label` (the observation's value
+  attribute). The other six such names were internal. A switch set under its 6.0 name is a `LayoutError` when built.
 
 ## From 5.0
 
@@ -200,7 +208,7 @@ A reader declared for 6.0 reads the same files the same way, but for these:
 ## Install
 
 ```
-uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v6.0.0"
+uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v7.0.0"
 ```
 
 Python 3.14; polars and msgspec, plus each extra's parsers: `excel` fastexcel and xlrd, `xml` lxml, `html` lxml and

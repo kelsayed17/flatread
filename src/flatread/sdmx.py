@@ -40,7 +40,7 @@ import polars as pl
 from lxml import etree
 
 from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzipped
-from flatread.core import File
+from flatread.core import File, _check_renamed
 from flatread.delimited import HeadersCsv
 from flatread.errors import LayoutError, ReadError
 from flatread.markup import NestedXml
@@ -228,7 +228,7 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
         super().__init__(row)
         self._namespaces = {**_NAMESPACES["1.0"], **self._prefixes}
         self._wanted = data_set
-        self._key = self._columns[0].label
+        self._key_label = self._columns[0].label
         # Each name's prefix checked bound now: an unbound one would fail every read as lxml's own error.
         self._root_tag, self._set_tag, self._notes, _ = map(
             self._tag, (self._root, self._data_set, self._annotations, self._observation)
@@ -252,7 +252,7 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
         return name.upper()
 
     @contextlib.contextmanager
-    def _opened(self, body: bytes) -> Generator[tuple[str, IO[bytes] | _Inflating]]:
+    def _streams(self, body: bytes) -> Generator[tuple[str, IO[bytes] | _Inflating]]:
         """Open the message in *body*, named for errors: the body itself, or the zip's ``_zipped_member`` inflating."""
         if self._zipped_member is None:
             yield "the body", io.BytesIO(body)
@@ -284,7 +284,7 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
         series of the data set.
         """
         data_set, series_tag, root_tag = self._set_tag, f"{{*}}{self._series}", self._root_tag
-        with self._opened(body) as (name, opened):
+        with self._streams(body) as (name, opened):
             stream = _Metered(name, opened)
             sets: list[str] = []
             found = 0
@@ -324,8 +324,8 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
                     if sets[-1] == self._wanted:
                         if self._stray(element):
                             msg = (
-                                f"the series {element.get(self._key)!r} of the {self._wanted} data set of {name} holds"
-                                " other than its annotations and observations"
+                                f"the series {element.get(self._key_label)!r} of the {self._wanted} data set of {name}"
+                                " holds other than its annotations and observations"
                             )
                             raise ReadError(msg)
                         found += 1
@@ -459,7 +459,7 @@ class SdmxSeries[RowT: msgspec.Struct](SdmxData[RowT]):
         for name, series in self._each(body):
             if sorted(series.attrib) != concepts:
                 msg = (
-                    f"the series {series.get(self._key)!r} of the {self._wanted} data set of {name} carries "
+                    f"the series {series.get(self._key_label)!r} of the {self._wanted} data set of {name} carries "
                     f"{sorted(series.attrib)!r}, not {concepts!r}"
                 )
                 raise ReadError(msg)
@@ -468,7 +468,7 @@ class SdmxSeries[RowT: msgspec.Struct](SdmxData[RowT]):
                     columns[column.field].append(series.attrib[column.label])
             if (texts := self._descriptions(series)) is None:
                 msg = (
-                    f"the series {series.get(self._key)!r} of the {self._wanted} data set of {name} lacks its "
+                    f"the series {series.get(self._key_label)!r} of the {self._wanted} data set of {name} lacks its "
                     f"annotations {list(self._described.values())!r}"
                 )
                 raise ReadError(msg)
@@ -486,13 +486,13 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
     """A data set's observations, long: each series' key, then each observation's period, value and status.
 
     The row struct's fields are the series' key, then the observation's three attributes, upper-cased: ``_period``
-    (a date, written as ``_date_format``), ``_value`` (a float) and ``_status``, each in the order the struct lists
-    them. Under ``_normal`` the value is a number (``_number``); under any other status of ``_statuses`` it is one
+    (a date, written as ``_date_format``), ``_value_label`` (a float) and ``_status``, each in the order the struct
+    lists them. Under ``_normal`` the value is a number (``_number``); under any other status of ``_statuses`` it is one
     of the format's no-value markers (``_absent``), read as ``None``.
     """
 
     _period: typing.ClassVar[str] = "TIME_PERIOD"
-    _value: typing.ClassVar[str] = "OBS_VALUE"
+    _value_label: typing.ClassVar[str] = "OBS_VALUE"
     _status: typing.ClassVar[str] = "OBS_STATUS"
     #: The code list the statuses are of, and its codes; a format's subclass sets its own.
     _status_list: typing.ClassVar[str] = "CL_OBS_STATUS"
@@ -508,8 +508,9 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
     def __init__(self, row: type[RowT], data_set: str) -> None:
         """Read the data set *data_set*'s observations into rows of *row*: its key, then the three attributes."""
         super().__init__(row, data_set)
+        _check_renamed(self, {"_value": "_value_label"})
         attributes = [column.label for column in self._columns[1:]]
-        if sorted(attributes) != sorted((self._period, self._value, self._status)):
+        if sorted(attributes) != sorted((self._period, self._value_label, self._status)):
             msg = f"{row.__name__}'s fields after the key are {attributes}, not an observation's three attributes"
             raise LayoutError(msg)
         obs = self._observation
@@ -523,8 +524,8 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
         if len(bad := cells.filter(condition)):
             row = bad.row(0, named=True)
             msg = (
-                f"the {self._wanted} observation of {row[self._key]!r} on {row[self._period]!r} in {name} "
-                f"(status {row[self._status]!r}, value {row[self._value]!r}) {what}"
+                f"the {self._wanted} observation of {row[self._key_label]!r} on {row[self._period]!r} in {name} "
+                f"(status {row[self._status]!r}, value {row[self._value_label]!r}) {what}"
             )
             raise ReadError(msg)
 
@@ -535,9 +536,9 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
         chunks: list[pl.DataFrame] = []
         name = ""
         for name, series in self._each(body):
-            key = series.get(self._key)
+            key = series.get(self._key_label)
             if key is None:
-                msg = f"a series of the {self._wanted} data set of {name} carries no {self._key}"
+                msg = f"a series of the {self._wanted} data set of {name} carries no {self._key_label}"
                 raise ReadError(msg)
             found = [cells for path in self._attributes if isinstance(cells := path(series), list)]
             # Three lists as long as the observations, and three attributes an observation in all: each holds its
@@ -568,13 +569,15 @@ class SdmxObservations[RowT: msgspec.Struct](SdmxData[RowT]):
             name,
             f"is not a day written {self._date_format}",
         )
-        self._bad(table, normal & ~pl.col(self._value).str.contains(f"^(?:{self._number})$"), name, "is not a number")
         self._bad(
-            table, ~normal & ~pl.col(self._value).is_in(self._absent), name, "is not the format's no-value marker"
+            table, normal & ~pl.col(self._value_label).str.contains(f"^(?:{self._number})$"), name, "is not a number"
+        )
+        self._bad(
+            table, ~normal & ~pl.col(self._value_label).is_in(self._absent), name, "is not the format's no-value marker"
         )
         return table.select(
-            pl.col(self._key),
+            pl.col(self._key_label),
             period.alias(self._period),
-            pl.when(normal).then(pl.col(self._value)).cast(pl.Float64, strict=True).alias(self._value),
+            pl.when(normal).then(pl.col(self._value_label)).cast(pl.Float64, strict=True).alias(self._value_label),
             pl.col(self._status),
         ).select(pl.col(column.label).alias(column.field) for column in self._columns)

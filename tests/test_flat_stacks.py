@@ -30,7 +30,7 @@ from flatread.fields import Format, Label, Span
 from flatread.fixed import FixedWidthFile
 from flatread.found import FoundCsv
 from flatread.layout import LongFile
-from flatread.reports import LongReport
+from flatread.reports import KeyedReport
 from flatread.sheets import BesideSheet, DatedSheet, SheetFile, SheetText
 from tests.support.xlsx import workbook
 
@@ -54,7 +54,7 @@ class _RegionalSheet(LongFile[_Regional], DatedSheet[_Regional]):
 
     _empty_cells = "drop"
     _rows_required = False
-    _bare_header_refused = True
+    _header_needs_rows = True
     _spacer_columns = True
     _trim = True
     _strip = True
@@ -177,7 +177,7 @@ class TestByKey:
         ]
 
 
-# --- Thousands + LongReport: the Fed's currency tables ---
+# --- Thousands + KeyedReport: the Fed's currency tables ---
 
 
 class _Amount(msgspec.Struct, frozen=True, gc=False):
@@ -186,7 +186,7 @@ class _Amount(msgspec.Struct, frozen=True, gc=False):
     value: float
 
 
-class _Amounts(Thousands[_Amount], LongReport[_Amount]):
+class _Amounts(Thousands[_Amount], KeyedReport[_Amount]):
     """A block of years over each holder's amounts, grouped in thousands, read long."""
 
     _key_field = "year"
@@ -200,7 +200,7 @@ Peru    -4,000  999
 """
 
 
-class TestAThousandsLongReport:
+class TestAThousandsKeyedReport:
     def test_each_cell_is_its_number_its_groups_joined(self) -> None:
         assert _Amounts(_Amount).rows(_AMOUNTS) == [
             _Amount("Japan", 2026, 1782319.5),
@@ -278,7 +278,7 @@ class _Wpsr(LongFile[_Stub], Thousands[_Stub], Transcoded[_Stub], SectionedCsv[_
     _section = re.compile(rb'^"?STUB_1"?,', re.MULTILINE)
     _empty_cells = "drop"
     _rows_required = False
-    _bare_header_refused = True
+    _header_needs_rows = True
     _repeats = True
     _key_count = 2
     _keys = re.compile(r"(?!STUB_)\s*(?P<heading>.*?)\s*", re.DOTALL)
