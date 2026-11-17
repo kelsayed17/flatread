@@ -190,6 +190,27 @@ class Engine[RowT: msgspec.Struct]:
             text = cleaner.clean(text, column)
         return text.replace(["", *self._null_values], None)
 
+    def _from_cells(
+        self, column: Column, cells: pl.Series, cleaners: Sequence[Cleaner], numbers: pl.Series
+    ) -> pl.Series:
+        """Return *column*'s values from a text table's *cells*, blanked, cleaned and typed.
+
+        A column of few distinct cells (a long table's record, its date repeated on each key's row) is typed a cell
+        once, unless a cleaner cleans it, which may read the column whole.
+        """
+        uniques = cells.unique(maintain_order=True)
+        if cleaners or uniques.len() * 2 > cells.len():
+            return self._from_text(column, self._blanked(column, cells, cleaners), numbers)
+        try:
+            values = self._from_text(column, self._blanked(column, uniques, cleaners), 1)
+        except ReadError:  # typed whole again, to name the first row holding the cell refused
+            return self._from_text(column, self._blanked(column, cells, cleaners), numbers)
+        typed = pl.DataFrame({"cell": uniques, "value": values})
+        joined = (
+            cells.alias("cell").to_frame().join(typed, on="cell", how="left", nulls_equal=True, maintain_order="left")
+        )
+        return joined["value"].alias(values.name)
+
     def _from_text(self, column: Column, text: pl.Series, numbers: int | pl.Series) -> pl.Series:
         """Return *column*'s values from its text cells: the rules every text format shares."""
         return _typed(column, text, f"{column.label!r} cell", numbers)
@@ -197,9 +218,9 @@ class Engine[RowT: msgspec.Struct]:
     def _typed(  # noqa: PLR0911 (one answer a scalar)
         self, column: Column, table: Table, cleaners: Sequence[Cleaner], numbers: pl.Series
     ) -> pl.Series:
-        text = self._blanked(column, table.cells[column.label], cleaners)
         if table.kinds is None:
-            return self._from_text(column, text, numbers)
+            return self._from_cells(column, table.cells[column.label], cleaners, numbers)
+        text = self._blanked(column, table.cells[column.label], cleaners)
         assert table.floats is not None  # noqa: S101 (a Cells grid has all three)
         assert table.moments is not None  # noqa: S101
         kinds = table.kinds[column.label]

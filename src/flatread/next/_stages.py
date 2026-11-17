@@ -172,12 +172,13 @@ class Csv:
         if text.startswith(("\n", "\r\n")):
             msg = "the body opens with a blank line, not its header"
             raise UnknownLayoutError(msg)
-        for read_as in (lambda: self._parsed(body, text), lambda: self._split(text)):
-            if (grid := read_as()) is not None:
-                return grid
-        return self._whole(text, body)
+        parsed = self._parsed(body, text)
+        if isinstance(parsed, Lines):
+            return parsed
+        split = self._spanning(body, text) if parsed == "spans" else self._split(text)
+        return self._whole(text, body) if split is None else split
 
-    def _parsed(self, body: bytes, text: str) -> Lines | None:
+    def _parsed(self, body: bytes, text: str) -> Lines | typing.Literal["spans"] | None:
         """Return *text*'s rows where each is one line, none wider than the first, read by polars' parser.
 
         ``None`` where a line breaks other than at LF or CRLF, a quote is out of place on its line (a cell running on
@@ -185,6 +186,9 @@ class Csv:
         ``read_csv``: whole (its separator a NUL, which no such body holds), then split into the first row's width, a
         short row padded with nulls and a long one cut. A row's width is its separators outside its quoted cells, plus
         one; where nothing is quoted, its line's bytes less its cells', so a row cut shows as wider than the first.
+        ``"spans"`` where a line holds an odd number of quotes, so a quoted cell seems to run on past it: the
+        readings of the body whole are tried at once, as the line-by-line one would leave it to them (every reading
+        reads as ``csv`` does, so any may).
         """
         if len(self.separator.encode()) != 1 or not _breaks_as_polars(text):
             return None
@@ -194,6 +198,10 @@ class Csv:
         quote = self.quote if self.quote is not None and self.quote in text else None
         bare, widths = lines, None
         if quote is not None:
+            # A line of odd quotes leaves a quoted cell open (or holds a quote out of place, which a reading of the
+            # body whole finds).
+            if (lines.str.count_matches(quote, literal=True) % 2 == 1).any():
+                return "spans"
             # Each quoted cell one NUL: a quote left is out of place, as is a cell that opens or closes mid-cell.
             q, sep = re.escape(quote), re.escape(self.separator)
             bare = lines.str.replace_all(f"{q}(?:[^{q}]|{q}{q})*{q}", "\x00")
@@ -221,12 +229,53 @@ class Csv:
         numbers = pl.int_range(1, lines.len() + 1, eager=True).alias("number")
         return Lines(cells=cells, widths=widths.cast(pl.UInt32).alias("width"), raw=lines, numbers=numbers)
 
+    def _spanning(self, body: bytes, text: str) -> Lines | None:
+        """Return *text*'s rows where a quoted cell runs on over lines, read by polars, every quote in place.
+
+        ``None`` where a quote is out of place: one left once each quoted cell (its doubled quotes too) is a NUL, or a
+        cell that opens or closes mid-cell. With every quote a quoted cell's, a line break is inside one where the
+        quotes before it are odd in number, so a row's lines are those up to one ending outside, and its width its
+        separators outside them, plus one. :meth:`_parsed` has checked the line breaks are polars'.
+        """
+        assert self.quote is not None  # noqa: S101 (a body with a quote, which a format quoting nothing leaves alone)
+        q, sep = re.escape(self.quote), re.escape(self.separator)
+        bare = pl.Series([text]).str.replace_all(f"{q}(?:[^{q}]|{q}{q})*{q}", "\x00")
+        if bare.str.contains(f"{q}|[^{sep}\n]\x00|\x00[^{sep}\r\n]").any():
+            return None
+        rows = bare.str.strip_suffix("\n").str.split("\n").explode().str.strip_suffix("\r")
+        lines = pl.Series([text.removesuffix("\n")]).str.split("\n").explode()
+        inside = lines.str.count_matches(self.quote, literal=True).cum_sum() % 2 == 1
+        starts = (~inside).shift(1, fill_value=True)
+        # Each row's text is the body's from its first line's start to the line break ending it.
+        offsets = (lines.str.len_chars() + 1).cum_sum().shift(1, fill_value=0).filter(starts).to_list()
+        ends = [*(at - 1 for at in offsets[1:]), len(text.removesuffix("\n"))]
+        raw = pl.Series("raw", [text[at:end] for at, end in zip(offsets, ends, strict=True)], pl.String)
+        raw = raw.str.strip_chars_end("\r\n")
+        widths = rows.str.count_matches(self.separator, literal=True) + 1
+        cells = pl.read_csv(
+            body.removeprefix(_BOM),
+            has_header=False,
+            separator=self.separator,
+            quote_char=self.quote,
+            schema={str(at): pl.String for at in range(widths[0])},
+            truncate_ragged_lines=True,
+        ).select(pl.all().replace("", None))
+        if not rows.len() == raw.len() == cells.height or widths.max() != widths[0]:
+            return None  # a row wider than the first, or rows the parser reads otherwise: csv reads them
+        numbers = starts.arg_true().cast(pl.Int64) + 1
+        return Lines(
+            cells=cells,
+            widths=widths.cast(pl.Int64).alias("width"),
+            raw=raw.alias("raw"),
+            numbers=numbers.alias("number"),
+        )
+
     def _whole(self, text: str, body: bytes, *, parse: bool = True) -> Lines:
         """Return *text*'s rows read by ``csv`` from its lines, a quoted cell running on over as many as it spans.
 
-        ``csv`` reads every row, to check it and to count its cells and the lines it spans. Where the body breaks its
-        lines only at LF or CRLF, as polars' parser does, the parser reads the cells, and each row's raw text is its
-        lines joined in polars; elsewhere (a line break ``str.splitlines`` alone breaks at, or a first row narrower
+        ``csv`` reads every row, to check it and to count its cells and the lines it spans, each row's raw text its
+        lines joined. Where the body breaks its lines only at LF or CRLF, as polars' parser does, the parser reads the
+        cells; elsewhere (a line break ``str.splitlines`` alone breaks at, or a first row narrower
         than the widest, which the parser refuses) ``csv``'s rows are the cells.
         """
         lines = text.splitlines(keepends=True)
@@ -248,8 +297,8 @@ class Csv:
             msg = f"row {len(widths) + 1}: {e}"
             raise (TruncatedFileError if "unexpected end of data" in str(e) else ReadError)(msg) from e
         starts = [1, *(end + 1 for end in ends[:-1])]
+        raw = ["".join(lines[start - 1 : end]).rstrip("\r\n") for start, end in zip(starts, ends, strict=True)]
         if not parsed:
-            raw = ["".join(lines[start - 1 : end]).rstrip("\r\n") for start, end in zip(starts, ends, strict=True)]
             return lines_of(rows, raw, starts)
         try:
             cells = pl.read_csv(
@@ -261,20 +310,12 @@ class Csv:
             ).select(pl.all().replace("", None))
         except pl.exceptions.PolarsError:  # a first row narrower than the widest, which the parser refuses
             return self._whole(text, body, parse=False)
-        spans = pl.Series(ends, dtype=pl.Int64) - pl.Series(starts, dtype=pl.Int64) + 1
-        row = pl.select(pl.int_range(len(ends)).repeat_by(spans).explode()).to_series()
-        raw = (
-            pl.DataFrame({"row": row, "raw": pl.Series(lines, dtype=pl.String)})
-            .group_by("row", maintain_order=True)
-            .agg(pl.col("raw").str.join(""))["raw"]
-            .str.strip_chars_end("\r\n")
-        )
         if cells.height != len(widths):  # the two read the rows otherwise: csv's rows are the cells
             return self._whole(text, body, parse=False)
         return Lines(
             cells=cells,
             widths=pl.Series("width", widths, pl.Int64),
-            raw=raw,
+            raw=pl.Series("raw", raw, pl.String),
             numbers=pl.Series("number", starts, pl.Int64),
         )
 

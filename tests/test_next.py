@@ -27,6 +27,7 @@ from flatread.errors import (
 from flatread.fields import Cell as At
 from flatread.fields import Flag, Format, Joined, Label, Span
 from flatread.fields import Shape as Shaped
+from flatread.next._stages import _breaks_as_polars
 from flatread.pdf import PdfLine
 from tests.support.pdf import pdf
 from tests.support.xlsx import Cell, workbook
@@ -650,13 +651,20 @@ def test_a_csv_s_every_reading_is_its_reading_by_csv(text: str, fmt: fr.Csv) -> 
     try:
         by_csv = fmt._whole(text, body, parse=False)
     except ReadError:
-        assert fmt._parsed(body, text) is None
+        assert not isinstance(fmt._parsed(body, text), fr.Lines)
         assert fmt._split(text) is None
+        assert fmt.quote is None or fmt.quote not in text or fmt._spanning(body, text) is None
         with pytest.raises(ReadError):
             fmt._whole(text, body)
         return
-    for grid in (fmt._parsed(body, text), fmt._split(text), fmt._whole(text, body)):
-        if grid is None:
+    spanning = fmt.quote is not None and fmt.quote in text and _breaks_as_polars(text)
+    for grid in (
+        fmt._parsed(body, text),
+        fmt._split(text),
+        fmt._spanning(body, text) if spanning else None,
+        fmt._whole(text, body),
+    ):
+        if not isinstance(grid, fr.Lines):
             continue
         assert grid.cells.rows() == by_csv.cells.rows()
         for name in ("widths", "raw", "numbers"):
@@ -712,3 +720,17 @@ def test_a_sheet_reads_a_huge_number_and_a_text_written_like_a_moment() -> None:
         Mark(-1e300, "2026-01-02 03:04:05", dt.date(2026, 1, 2)),
         Mark(2.0, "x", None),
     ]
+
+
+def test_a_column_of_few_distinct_cells_is_typed_a_cell_once_and_a_bad_one_named_by_its_row() -> None:
+    class Dated(msgspec.Struct, frozen=True):
+        day: Annotated[dt.date | None, Format("%Y-%m-%d")]
+        v: int
+
+    reader = fr.Reader(Dated, fr.Csv())
+    days = ["2026-11-16", "", "2026-11-16", "2026-11-16", "2026-11-17", "2026-11-16"]
+    body = ("day,v\n" + "".join(f"{day},{n}\n" for n, day in enumerate(days))).encode()
+    expected = [dt.date.fromisoformat(day) if day else None for day in days]
+    assert [row.day for row in reader.rows(body)] == expected
+    with pytest.raises(ReadError, match="row 6"):
+        reader.frame(body.replace(b"2026-11-17", b"2026-13-17"))
