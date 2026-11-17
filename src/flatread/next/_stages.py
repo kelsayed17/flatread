@@ -77,6 +77,10 @@ def records_of(text: pl.DataFrame) -> Cells:
     return Cells(text=text, raw=_unraw(text.height), numbers=_numbered(text.height), header=text.columns)
 
 
+#: The line breaks ``str.splitlines`` breaks at but a CSV row does not end at, and a NUL: a body holding one, or a
+#: lone CR, is not split fast.
+_OTHER_BREAKS = "\x00\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
 # --- Sources ---
 
 
@@ -155,6 +159,11 @@ class Csv:
         if text.startswith(("\n", "\r\n")):
             msg = "the body opens with a blank line, not its header"
             raise UnknownLayoutError(msg)
+        split = self._split(text)
+        return self._whole(text) if split is None else split
+
+    def _whole(self, text: str) -> Lines:
+        """Return *text*'s rows read by ``csv`` from its lines, a quoted cell running on over as many as it spans."""
         lines = text.splitlines(keepends=True)
         taken: list[int] = []
 
@@ -182,6 +191,40 @@ class Csv:
             msg = f"row {len(rows) + 1}: {e}"
             raise (TruncatedFileError if "unexpected end of data" in str(e) else ReadError)(msg) from e
         return lines_of(rows, raw, numbers)
+
+    def _split(self, text: str) -> Lines | None:
+        """Return *text*'s rows where every row is one line, split in polars; ``None`` where a cell may span lines.
+
+        A line holding no quote is split at the separator alone; one holding quotes is read by ``csv`` on its own, and
+        a quote it leaves open (a cell running on past the line) leaves the body to :meth:`grid`'s reading of it whole.
+        So does a line break other than LF or CRLF, which ``str.splitlines`` breaks at too, and a NUL.
+        """
+        if any(c in text for c in _OTHER_BREAKS) or text.count("\r") != text.count("\r\n"):
+            return None
+        lines = pl.Series("raw", text.removesuffix("\n").split("\n"), pl.String).str.strip_suffix("\r")
+        parts = lines.str.split(self.separator)
+        has_quote = lines.str.contains(self.quote, literal=True) if self.quote is not None else None
+        if has_quote is not None and (quoted := has_quote.arg_true()).len():
+            read: list[list[str]] = []
+            for at in quoted:
+                try:
+                    read.append(
+                        next(csv.reader([lines[at]], delimiter=self.separator, quotechar=self.quote, strict=True))
+                    )
+                except csv.Error:  # a quote left open, or one out of place: read the body whole, as it reads it
+                    return None
+            unquoted = pl.DataFrame({"at": pl.int_range(lines.len(), eager=True), "parts": parts}).filter(~has_quote)
+            parsed = pl.DataFrame({"at": quoted.cast(pl.Int64), "parts": pl.Series(read, dtype=pl.List(pl.String))})
+            parts = pl.concat([unquoted, parsed]).sort("at")["parts"]
+        widths = parts.list.len().alias("width")
+        width = widths.max()
+        assert isinstance(width, int)  # noqa: S101 (a body of one line or more)
+        cells = pl.DataFrame({str(at): parts.list.get(at, null_on_oob=True) for at in range(width)}).select(
+            pl.all().replace("", None)
+        )
+        return Lines(
+            cells=cells, widths=widths, raw=lines, numbers=pl.int_range(1, lines.len() + 1, eager=True).alias("number")
+        )
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

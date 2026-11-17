@@ -620,3 +620,32 @@ def test_titled_states_its_titles_groups_and_a_long_sheet_s_keys_are_text() -> N
     assert fr.Titled([re.compile(r"(?P<count>\d+) rows of (?P<day>.+)")]).stated == frozenset({"day"})
     reader = fr.Reader(_Reading, fr.Sheet(), shape=fr.Long(keys=re.compile(r"[A-Z][a-z]{2}"), empty_cells="drop"))
     assert reader.rows(workbook({"S": [[None, "Jan"], ["A", 1.5]]})) == [_Reading("A", "Jan", 1.5)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a,b\n1,2\n",
+        "a,b\r\n1,2\r\n3",
+        "a,b\n\n1,2,3\n4\n",
+        'a,b\n"x,y",z\n"q""r",\n',
+        'a,b\nx"y,z\n',
+        "a,b\n,\n ,  \n",
+    ],
+)
+@pytest.mark.parametrize("fmt", [fr.Csv(), fr.Csv(separator="|", quote=None), fr.Csv(separator=";")])
+def test_a_csv_split_by_line_is_its_grid_read_whole(text: str, fmt: fr.Csv) -> None:
+    split = fmt._split(text)
+    if split is None:  # a quote out of place for this separator: the whole reading refuses it
+        with pytest.raises(ReadError):
+            fmt._whole(text)
+        return
+    whole = fmt._whole(text)
+    assert split.cells.rows() == whole.cells.rows()
+    for name in ("widths", "raw", "numbers"):
+        assert getattr(split, name).to_list() == getattr(whole, name).to_list(), name
+
+
+@pytest.mark.parametrize("text", ['a,b\n"x\ny",z\n', "a,b\n1\x0c2\n", "a,b\n1\r2\n", 'a,b\n"x"y,z\n'])
+def test_a_csv_a_cell_may_span_lines_in_is_read_whole(text: str) -> None:
+    assert fr.Csv()._split(text) is None
