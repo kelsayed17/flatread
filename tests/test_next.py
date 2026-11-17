@@ -833,7 +833,7 @@ def test_a_sheet_s_typed_read_is_its_grid_s_reading(
     by_grid = fr.Reader(_Plain, fr.Sheet(sheet="S"), null_values=null_values, empty=True)
     by_grid._typed = None
     assert direct._typed is not None
-    assert (fr.Sheet(sheet="S").typed(body, direct._typed, null_values) is not None) is loaded
+    assert (fr.Sheet(sheet="S").typed(body, direct._typed, null_values) is not None) is (loaded and not null_values)
     try:
         expected = by_grid.frame(body)
     except ReadError as e:

@@ -465,7 +465,7 @@ class Sheet:
 
     sheet: str | None = None
 
-    def typed(self, body: bytes, dtypes: Mapping[str, type[pl.DataType]], null_values: Sequence[str]) -> Table | None:
+    def typed(self, body: bytes, dtypes: Mapping[str, type[pl.DataType]], null_values: Sequence[str]) -> Table | None:  # noqa: PLR0911 (a None for each doubt)
         """Return the table of a sheet that is its header of *dtypes*' labels and full rows, read typed in one load.
 
         fastexcel's strict load types each column by every one of its cells and refuses a column mixing kinds, so a
@@ -474,10 +474,12 @@ class Sheet:
         else: another header, a cell right of it, a column of another kind or of mixed kinds, a number not whole in an
         integer's column (or past 64 bits), any empty cell (a cell the load reads as none though it may hold an error
         or a word for none), or a row the grid finds empty (each of its cells empty text or spaces); :meth:`grid`'s
-        reading then reads it, and names what is wrong. The sheet is bounded first, as every load of it is. Its text
-        columns are left to the engine, which blanks them and reads *null_values* as :meth:`grid`'s table would.
+        reading then reads it, and names what is wrong. So is a read with *null_values*: a sheet that writes a word for
+        none writes it among numbers, which the load refuses, so it is the grid's to read from the start. The sheet is
+        bounded first, as every load of it is; its text columns are left to the engine, which blanks them.
         """
-        del null_values  # a text column's, the engine's to read; a number's or a boolean's holds none
+        if null_values:  # a sheet that writes a word for none mixes kinds where it does: the grid's loads read it
+            return None
         from flatread.sheets import _BoundedXlsx, _failed, _loading, _sheet_named, _workbook  # noqa: PLC0415
         from flatread.sheets import _whole as _whole_numbers  # noqa: PLC0415 (Csv's own _whole is another)
 
