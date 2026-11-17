@@ -247,8 +247,10 @@ class Engine[RowT: msgspec.Struct]:
                 text.is_not_null() & (kinds != "number").fill_null(value=False), text, column, "number cell", numbers
             )
             if column.scalar is int:
-                whole = floats.is_null() | (floats.round(0) == floats)
-                _refuse(~whole, text, column, "whole number", numbers)
+                _refuse(floats != floats.floor(), text, column, "whole number", numbers)
+                _refuse(
+                    ~floats.is_between(*_INT_RANGE, closed="left"), text, column, "whole number of 64 bits", numbers
+                )
                 return floats.cast(pl.Int64, strict=True).alias(column.field)
             return floats.alias(column.field)
         if column.scalar is bool:
@@ -370,6 +372,10 @@ def _booleans(text: pl.Series, column: Column, numbers: int | pl.Series) -> pl.S
     values = text.replace_strict(_BOOLEANS, default=None, return_dtype=pl.Boolean)
     _refuse(text.is_not_null() & values.is_null(), text, column, "true or false", numbers)
     return values
+
+
+#: The whole numbers an ``int`` field holds, 64 bits' (a float load reads ``1e20`` as one), as floats: low, high.
+_INT_RANGE: typing.Final = (-(2.0**63), 2.0**63)
 
 
 def _refuse(wrong: pl.Series, text: pl.Series, column: Column, what: str, numbers: int | pl.Series) -> None:

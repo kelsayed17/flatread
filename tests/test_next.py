@@ -6,6 +6,7 @@ import io
 import re
 import typing
 import zipfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
@@ -790,3 +791,106 @@ def test_a_csv_s_typed_read_its_parser_reads_otherwise_is_left_to_the_grid(monke
     reader = fr.Reader(_Mixed, fr.Csv())
     assert reader._typed is not None
     assert fr.Csv().typed(_MIXED_BODIES[0], reader._typed, []) is None
+
+
+class _Plain(msgspec.Struct, frozen=True):
+    s: str | None
+    i: int | None
+    f: float | None
+    b: bool | None
+
+
+_HEADER: list[Cell] = ["s", "i", "f", "b"]
+
+#: Each sheet's rows below the header, and whether its one load reads it: the grid's loads read every one the same.
+_PLAIN_SHEETS: list[tuple[list[list[Cell]], bool]] = [
+    ([["a", 1, 1.5, True], ["b", -2, 3, False]], True),
+    ([["  ", 1, 1.5, True]], True),  # a cell of spaces among others, which the engine blanks
+    ([["NA", 1, 1.5, True]], True),  # a word for none, which the engine reads as one where it is
+    ([["a", 1.5, 1.5, True]], False),  # a number not whole in an integer's column
+    ([["a", 2.0**63, 1.5, True]], False),  # a whole number past an integer's
+    ([["a", 1, "x", True]], False),  # a text cell among numbers: kinds mixed
+    ([["a", 1, 1.5, "true"]], False),  # a boolean's column of text
+    ([[1, 1, 1.5, True]], False),  # a text's column of numbers
+    ([["a", 1, 1.5, True], ["b", None, 2.5, False]], False),  # an empty cell
+    ([["a", 1, 1.5, True], [None, None, None, None], ["b", 1, 1.5, True]], False),  # an empty row
+    ([["a", 1, 1.5, True, "stray"]], False),  # a cell right of the header
+    ([["a", 1, dt.date(2026, 11, 16), True]], False),  # a moment
+    ([], False),  # a header and no rows
+]
+
+
+@pytest.mark.parametrize(("rows", "loaded"), _PLAIN_SHEETS)
+@pytest.mark.parametrize("null_values", [(), ("NA",)])
+def test_a_sheet_s_typed_read_is_its_grid_s_reading(
+    rows: list[list[Cell]],
+    loaded: bool,  # noqa: FBT001 (a parameter of the test's)
+    null_values: tuple[str, ...],
+) -> None:
+    """A header and its full rows read typed in one load give the grid's frame, or its error, whichever reads them."""
+    body = workbook({"S": [_HEADER, *rows]})
+    direct = fr.Reader(_Plain, fr.Sheet(sheet="S"), null_values=null_values, empty=True)
+    by_grid = fr.Reader(_Plain, fr.Sheet(sheet="S"), null_values=null_values, empty=True)
+    by_grid._typed = None
+    assert direct._typed is not None
+    assert (fr.Sheet(sheet="S").typed(body, direct._typed, null_values) is not None) is loaded
+    try:
+        expected = by_grid.frame(body)
+    except ReadError as e:
+        with pytest.raises(type(e), match=re.escape(str(e))):
+            direct.frame(body)
+        return
+    assert direct.frame(body).equals(expected)
+
+
+def test_a_sheet_s_typed_read_of_text_alone_leaves_a_row_of_spaces_to_the_grid() -> None:
+    """A row whose every cell is text of spaces is one the grid finds empty, and refuses: the one load leaves it."""
+
+    class Text(msgspec.Struct, frozen=True):
+        s: str | None
+        t: str | None
+
+    body = workbook({"S": [["s", "t"], ["a", "b"], [" ", ""]]})
+    reader = fr.Reader(Text, fr.Sheet(sheet="S"))
+    assert reader._typed is not None
+    assert fr.Sheet(sheet="S").typed(body, reader._typed, []) is None
+    with pytest.raises(ReadError, match="row 3 is empty"):
+        reader.frame(body)
+    assert fr.Sheet(sheet="S").typed(workbook({"S": [["s", "t"], ["a", " "]]}), reader._typed, []) is not None
+
+
+def test_a_sheet_reads_by_its_grid_where_a_field_is_not_plain() -> None:
+    """A date's field, or a flag's, is the grid's to read: its column's kind does not say what each cell holds."""
+
+    class Dated(msgspec.Struct, frozen=True):
+        s: str
+        d: Annotated[dt.date, Format("%Y-%m-%d")]
+
+    assert fr.Reader(Dated, fr.Sheet())._typed is None
+    assert fr.Reader(_Plain, fr.Sheet(), as_written=["s"])._typed is None
+
+
+def test_a_sheet_s_typed_read_raises_what_is_no_failure_of_fastexcel_s(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one load leaves fastexcel's failures to the grid's loads, and raises any other error, as they would."""
+    import fastexcel  # noqa: PLC0415 (the excel extra)
+
+    def broken(*args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:  # noqa: ANN401
+        raise RuntimeError(args, kwargs)
+
+    monkeypatch.setattr(fastexcel.ExcelReader, "load_sheet", broken)
+    with pytest.raises(RuntimeError):
+        fr.Sheet().typed(workbook({"S": [_HEADER, ["a", 1, 1.5, True]]}), {"s": pl.String}, [])
+
+
+def test_an_xls_sheet_is_read_by_its_grid_where_its_one_load_finds_another_header() -> None:
+    """An Excel 97 workbook, bounded as it opens: its one load finds another header, and its grid names the row."""
+
+    class Note(msgspec.Struct, frozen=True):
+        note: str
+
+    body = (Path(__file__).parent / "fixtures" / "eia_ngsstats.xls").read_bytes()
+    reader = fr.Reader(Note, fr.Sheet(sheet="ngsstats 2026 (2021-2025)"))
+    assert reader._typed is not None
+    assert fr.Sheet(sheet="ngsstats 2026 (2021-2025)").typed(body, reader._typed, []) is None
+    with pytest.raises(RaggedRowError, match="row 2 holds a cell right of the header's last"):
+        reader.frame(body)

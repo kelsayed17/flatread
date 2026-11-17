@@ -43,7 +43,7 @@ class Reader[RowT: msgspec.Struct]:
         as_written: Collection[str] = (),
         empty: bool | None = None,
     ) -> None:
-        from flatread.next._stages import Csv, Header  # noqa: PLC0415 (the default finder, built on this module)
+        from flatread.next._stages import Csv, Header, Sheet  # noqa: PLC0415 (the default finder, built on this module)
 
         self.row = row
         self.format = format
@@ -54,12 +54,16 @@ class Reader[RowT: msgspec.Struct]:
         self.empty = self.table.vouches if empty is None else empty
         self.engine = Engine(row, null_values=null_values, as_written=as_written, rows_required=not self.empty)
         self._null_values = list(null_values)
-        # A CSV that is a header and its rows, read with nothing between, has a typed read of its own (Csv.typed): its
-        # numbers by polars' parser, in one pass, and the grid's reading only where that read is unsure or refused.
-        direct = isinstance(self.format, Csv) and isinstance(self.table, Header) and shape is None and not cells
-        self._typed = (
-            {column.label: _parsed_as(column) for column in self.engine.columns} if direct and not as_written else None
-        )
+        # A CSV or a sheet that is a header and its rows, read with nothing between, has a typed read of its own
+        # (Csv.typed, Sheet.typed): its numbers by polars' parser or fastexcel's strict load, in one pass, and the
+        # grid's reading only where that read is unsure or refused. A sheet's every field is a plain one, as a
+        # column's kind then says all its cells are: a text column of a date's or a flag's is the grid's to read.
+        typed = {column.label: _parsed_as(column) for column in self.engine.columns}
+        direct = (
+            isinstance(self.format, Csv)
+            or (isinstance(self.format, Sheet) and all(_plain(column) for column in self.engine.columns))
+        ) and isinstance(self.table, Header)
+        self._typed = typed if direct and shape is None and not cells and not as_written else None
 
     def frame(self, body: bytes) -> pl.DataFrame:
         """Read *body* into a DataFrame of the row's fields, typed, or raise ``ReadError``."""
@@ -95,7 +99,7 @@ class Reader[RowT: msgspec.Struct]:
     def _direct(self, data: bytes, read: ReadContext) -> pl.DataFrame | None:
         """Return *data* read by the format's typed read, where it reads it and the engine takes its table."""
         assert self._typed is not None  # noqa: S101 (a reader that reads directly)
-        table = self.format.typed(data, self._typed, self._null_values)  # ty: ignore[unresolved-attribute] (a Csv)
+        table = self.format.typed(data, self._typed, self._null_values)  # ty: ignore[unresolved-attribute] (a Csv or a Sheet)
         if table is None:
             return None
         try:
@@ -112,8 +116,18 @@ class Reader[RowT: msgspec.Struct]:
                 yield stream
 
 
+#: The dtype a typed read reads a plain field of each scalar as; a text's is text.
+_PARSED: dict[object, type[pl.DataType]] = {int: pl.Int64, float: pl.Float64, bool: pl.Boolean}
+
+
+def _plain(column: Column) -> bool:
+    """Return whether *column* is a plain one: text, a number or a boolean, read with no format and no flag."""
+    return column.written is None and column.flag is None and column.scalar in (str, int, float, bool)
+
+
 def _parsed_as(column: Column) -> type[pl.DataType]:
-    """Return the dtype polars' parser reads *column* as in a typed read: a plain number's own, any other text."""
-    if column.written is None and column.flag is None and column.scalar in (int, float):
-        return pl.Int64 if column.scalar is int else pl.Float64
-    return pl.String
+    """Return the dtype a typed read reads *column* as: a plain number's or boolean's own, any other text.
+
+    A CSV's parser reads a boolean as text, which the engine types; a sheet's load holds it as a boolean cell.
+    """
+    return _PARSED.get(column.scalar, pl.String) if _plain(column) else pl.String

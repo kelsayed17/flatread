@@ -531,6 +531,11 @@ class _BoundedXlsx(fastexcel.ExcelReader):
 
     @typing.override
     def load_sheet(self, idx_or_name: int | str, **options: typing.Any) -> typing.Any:
+        self.bound(idx_or_name)
+        return super().load_sheet(idx_or_name, **options)
+
+    def bound(self, idx_or_name: int | str) -> None:
+        """Bound the sheet *idx_or_name* (:func:`_check_xlsx_span`), unless it is already: what a load does first."""
         if isinstance(idx_or_name, str) and idx_or_name in self._parts:
             parts = self._parts[idx_or_name]
         else:  # a sheet by its index, or by a name the workbook lists not as written: bound every one
@@ -538,7 +543,6 @@ class _BoundedXlsx(fastexcel.ExcelReader):
         if unbounded := [part for part in parts if part in self._unbounded]:
             self._referenced |= _check_xlsx_span(self._body, unbounded, self._kept)
             self._unbounded.difference_update(unbounded)
-        return super().load_sheet(idx_or_name, **options)
 
     def unnumbered(self, sheet: str, columns: Collection[int]) -> pl.DataFrame | None:
         """Return the cells of *columns* (``A`` is 0) on loaded *sheet* that are no number cells, as its part writes.

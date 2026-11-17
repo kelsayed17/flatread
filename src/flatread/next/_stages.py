@@ -427,20 +427,73 @@ class Sheet:
 
     sheet: str | None = None
 
+    def typed(self, body: bytes, dtypes: Mapping[str, type[pl.DataType]], null_values: Sequence[str]) -> Table | None:
+        """Return the table of a sheet that is its header of *dtypes*' labels and full rows, read typed in one load.
+
+        fastexcel's strict load types each column by every one of its cells and refuses a column mixing kinds, so a
+        column it loads as its field's kind (``Float64`` a number's, ``Boolean`` a boolean's, ``String`` a text's)
+        holds cells of that kind alone, as :meth:`grid`'s kinds would find. ``None`` where the sheet may be anything
+        else: another header, a cell right of it, a column of another kind or of mixed kinds, a number not whole in an
+        integer's column (or past 64 bits), any empty cell (a cell the load reads as none though it may hold an error
+        or a word for none), or a row the grid finds empty (each of its cells empty text or spaces); :meth:`grid`'s
+        reading then reads it, and names what is wrong. The sheet is bounded first, as every load of it is. Its text
+        columns are left to the engine, which blanks them and reads *null_values* as :meth:`grid`'s table would.
+        """
+        del null_values  # a text column's, the engine's to read; a number's or a boolean's holds none
+        from flatread.sheets import _BoundedXlsx, _failed, _loading, _sheet_named, _workbook  # noqa: PLC0415
+        from flatread.sheets import _whole as _whole_numbers  # noqa: PLC0415 (Csv's own _whole is another)
+
+        workbook = _workbook(body)
+        name = _sheet_named(workbook, self.sheet)
+        if isinstance(workbook, _BoundedXlsx):
+            with _loading(f"the workbook's {name!r} sheet will not load"):
+                workbook.bound(name)
+        try:
+            frame = workbook.load_sheet(
+                name, header_row=0, dtype_coercion="strict", schema_sample_rows=None
+            ).to_polars()
+        except BaseException as e:  # a mixed column, or a cell calamine panics on typed: the grid's loads read it
+            if not _failed(e):
+                raise
+            return None
+        if frame.columns != list(dtypes) or frame.null_count().sum_horizontal().item():
+            return None
+        typed = []
+        for label, dtype in dtypes.items():
+            column = frame[label]
+            if dtype == pl.Int64 and column.dtype == pl.Float64:
+                if not _whole_numbers(column).all():
+                    return None
+                column = column.cast(pl.Int64)
+            if column.dtype != dtype:  # a column of another kind than its field's: the grid's to refuse or read
+                return None
+            typed.append(column)
+        # A row of text cells each of spaces alone, or empty text, is a row the grid finds empty (and refuses).
+        if all(dtype == pl.String for dtype in dtypes.values()) and (
+            frame.select(pl.all_horizontal(pl.all().str.strip_chars() == "").any()).item()
+        ):
+            return None
+        return Table(pl.DataFrame(typed), pl.int_range(2, frame.height + 2, eager=True).alias("number"))
+
     def grid(self, stream: Stream, read: ReadContext) -> Cells:
         """Return the sheet's cells and their kinds, the sheet loaded three times, a column holding a moment four."""
         del read
-        from flatread.sheets import _loading, _sheet_named, _workbook  # noqa: PLC0415 (the excel extra)
+        import fastexcel  # noqa: PLC0415 (the excel extra)
+
+        from flatread.sheets import _BoundedXlsx, _loading, _sheet_named, _workbook  # noqa: PLC0415
 
         body = stream.read()
         workbook = _workbook(body)
         name = _sheet_named(workbook, self.sheet)
-
-        def load(
-            kind: typing.Literal["float", "boolean"],
-        ) -> pl.DataFrame:  # in a workbook of its own: one workbook loads one sheet at a time
+        if isinstance(workbook, _BoundedXlsx):  # bounded once, before any load: the others open it unbounded
             with _loading(f"the workbook's {name!r} sheet will not load"):
-                return _workbook(body).load_sheet(name, header_row=None, skip_rows=0, dtypes=kind).to_polars()
+                workbook.bound(name)
+
+        def load(kind: typing.Literal["float", "boolean"]) -> pl.DataFrame:
+            """Load the sheet as *kind* in a workbook of its own: one workbook loads one sheet at a time."""
+            with _loading(f"the workbook's {name!r} sheet will not load"):
+                opened = fastexcel.read_excel(body)
+                return opened.load_sheet(name, header_row=None, skip_rows=0, dtypes=kind).to_polars()
 
         # The three loads at once, each its own parse of the sheet: a load holds no lock of Python's.
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
