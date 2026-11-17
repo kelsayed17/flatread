@@ -1,4 +1,4 @@
-"""flatread.next, the 8.0 prototype: a reader is a row struct and a pipeline of stage values."""
+"""flatread.next, the preview: a reader is a row struct and a pipeline of stage values."""
 
 import dataclasses
 import datetime as dt

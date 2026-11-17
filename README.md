@@ -157,97 +157,45 @@ calamine builds it, a pass over the sheet's XML. In CodSpeed's simulation (`benc
 costs about 1.1 times what it did in 5.0 and a sheet read about 1.25 times; a wide or row-by-row CSV read costs
 less. An `.xlsb` or `.ods` is not read.
 
-## From 7.1
+Each release's changes, and how to move a reader from the one before, are in [`CHANGELOG.md`](CHANGELOG.md).
 
-7.2 refuses, when a reader is built, declarations 7.1 read without a word, each reading a file otherwise than it
-says. A reader 7.1 built may raise `LayoutError` now; none of these read its file as declared:
+## flatread.next (preview)
 
-- A switch within two edits of one its pieces read (`_quotechar` for `_quote_char`), which 7.1 ignored. A format that
-  keeps a value of its own under such a name annotates it in its class (`_header_alone: ClassVar[bool] = True`).
-- A switch annotated as a boolean, a number, text or `Literal` values, set to none of them (`_closing_separator =
-  "never"`, read as `None`; `_header = "no"`, a `TypeError` once read).
-- A `CsvFile` separator or `_quote_char` that is not one character of one byte, ends a line, or is the other; a
-  `CsvText` separator of more than one character.
-- A field whose type names a msgspec `Meta` constraint (`ge`, `max_length`, `pattern`, `tz` and the rest), which
-  `rows()` never checked: state a pattern as a `Shape`, values as a `Literal`. A `Meta` of descriptions alone is kept.
-- A keyword-only struct (`kw_only=True`), whose `rows()` raised `TypeError`; a `Flag` whose two words are one, every
-  cell read as false; a `_given` value not of its field's type (`3.7` for an `int`, read as `3`).
+`flatread.next` builds a reader from values rather than classes: a row struct, a format, and a stage for each quirk
+the file has, each a frozen value configured by keyword. It reads the formats and quirks it has stages for, CSV,
+sheets, fixed-width text, PDF and SDMX, and refuses at build any field it cannot yet read as declared. Its names may
+change in any 0.x release.
 
-Three faults now raise the kind they are, each still a `ReadError`: an XML or SDMX body cut short is a
-`TruncatedFileError`, XML bytes its encoding does not read an `EncodingError`, and a fixed-width line of another width
-a `RaggedRowError`. Their messages are 7.1's.
+```python
+import re
 
-## From 7.0
+from flatread.errors import TruncatedFileError
+from flatread.next import Csv, Reader, Trailer
 
-7.1 adds five kinds of `ReadError`: `TruncatedFileError`, `ControlTotalError`, `UnknownLayoutError`,
-`CorruptArchiveError` and `EncodingError`. Each is a `ReadError`, so code that catches one catches them, and the
-messages are 7.0's. A `FoundCsv` cell past `csv`'s field size limit is a `ReadError`, where 7.0 let `csv.Error` out.
+PIPED = Reader(Rate, Csv(separator="|"), table=Trailer(re.compile(r"\d+ rows")), null_values=["ND"])
 
-## From 6.0
+assert PIPED.rows(b"Date|Rate\n01/02/2026|4.33\n01/05/2026|ND\n2 rows\n") == [
+    Rate(dt.date(2026, 1, 2), 4.33),
+    Rate(dt.date(2026, 1, 5), None),
+]
 
-A reader declared for 6.0 reads the same files the same way, but for these:
+for cut in (b"Date|Rate\n01/02/2026|4.33\n", b"Date|Rate\n1/2/2026|4.33\n1 rows\n"):
+    try:
+        PIPED.rows(cut)
+    except TruncatedFileError as e:
+        print("cut:", e)
+    except ReadError as e:
+        print(e)
+# cut: the last line '01/02/2026|4.33' is not the file's trailer: the body was cut
+# the 'Date' cell '1/2/2026' is not a date written %m/%d/%Y: row 2
+```
 
-- `HeadersCsv`, `NamedCsv`, `TrailerCsv`, `SpilledCsv` and `TitledCsv` have no constructor of their own: each takes
-  `CsvFile`'s keywords, as before, and checks its switches in `File._check_switches()`. A misdeclared one raises the
-  same `LayoutError` when built; where it has two faults, which one is named first may differ.
-- A `NamedCsv`'s empty or mistyped cell is named by the header's label, as every other reader names it, not by its
-  field.
-- Blank handling is one switch per reader, in one vocabulary: `SheetFile._gaps = True` → `_blank_rows = "drop"`,
-  `SheetFile._blank_rows = True` → `_blank_rows = "keep"` (the default is `"refuse"`); `ReportFile._skip_blank =
-  False` → `_blank_lines = "read"` (the default is `"drop"`); `LongFile._empty_rows = False` → `_empty_cells = "drop"`
-  (the default is `"keep"`); `LongFile._spacers` → `_spacer_columns`. An old name, or a value none of these, is a
-  `LayoutError` when built, so a format not yet moved is not read otherwise.
-- A `TitledSheet` title with a group (`count`, or one named for a field) is a `LayoutError` when built: a sheet's title
-  states no field and counts no rows, which it ignored before. A `TitledSheet` with no `_titles` is one too.
-- Seven readers and switches have plain names: `SheetsFile` → `EverySheet`, `CellHeaderSheet` →
-  `TypedHeaderSheet`, `NumberTextSheet` → `TextNumbersSheet`, `OnlySheet` → `OneSheet`, `LongReport` → `KeyedReport`
-  (it is no `LongFile`), `FoundTable._row_count` → `_numbered_rows`, `LongFile._bare_header_refused` →
-  `_header_needs_rows`. The old names are gone.
-- A name is a method on every piece that has it, or a value on every piece that has it, since pieces that compose
-  share one class (`tests/test_switch_names.py` checks): `FixedWidthFile._stated` → `_outside_fields` (the fields
-  the lines above or below its table state), `SdmxObservations._value` → `_value_label` (the observation's value
-  attribute). The other six such names were internal. A switch set under its 6.0 name is a `LayoutError` when built.
-
-## From 5.0
-
-6.0 makes 5.0's readers one public API. A reader declared for 5.0 reads the same files the same way, but for these:
-
-- Every body error is a `ReadError`, every declaration error a `LayoutError`; `UnknownLayoutError` is gone.
-- A CSV's boolean column is `true` or `false` exactly, as in every other reader (polars read `TRUE` and `tRuE` too).
-- A CSV's mistyped cell, Flag or date error names the header's label and the row, not polars' message or the field.
-- `GridFile`, `TitledGrid`, `FilledHeader`, `BlankEnded` and `BesideGrid` moved from `flatread.core` to
-  `flatread.grids`, and `FoundSheet` from `flatread.found` to `flatread.sheets` (so `flatread.found` needs no extra).
-- `HeadersCsv._headers`, each header's labels written out again, is `_headers_lacking`: each published header by the
-  fields it lacks (`((), ("shares",))`), so a label is written once, in the struct. A lacked field must admit `None`.
-- `NamedCsv._carried` is gone: a header must name the column of every field that holds a value on every row, which
-  the struct says; `_required_fields` names any other field whose column every header names.
-- The pieces compose in any order where they can (`HeadersCsv` before or after `PaddedCsv` or `TitledCsv`), and an
-  order that cannot read is a `LayoutError` when built: list `LongFile` before `Carried`, and every piece before the
-  CSV or fixed-width reader that ends the read. A field a trailer, title or zip member's name states is stated to
-  every piece (`File._stated_fields()`), so `ZippedFiles` composes with `HeadersCsv`, `NamedCsv` and `LongFile`.
-- A switch is checked when the reader is built (`File._check_switches()`): one left unset, a regex group naming no
-  field, a `Shape` polars cannot compile, an unknown zone, a `Format` that writes what its field cannot hold, `%z`.
-  A constructor that sets a switch (`_keys`, `_member`) sets it before calling `super().__init__()`.
-- Stricter reads: an HTML number, date or boolean cell is one text run (`5.3<sup>1</sup>` raises, not `5.31`); a cut
-  HTML page, a page's bytes that are not its declared charset, a title or trailer that is not UTF-8, and a `FoundCsv`
-  line narrower than its header raise; a sheet's text cell in a number or boolean field raises; `%y` reads 69 as
-  1969, as `strptime` does; `PaddedCsv` strips a cell before matching its tokens; `SectionedCsv` matches where a
-  line begins; an SDMX-CSV's floats are finite but `obs_value`'s (`File._non_finite`).
-- An error names the file's own row in every grid reader, and the header's label, not the field.
-- `null_values=` is every text reader's constructor argument (XML, HTML, PDF, report, found, fixed-width).
-- `SdmxData._member` is `_zipped_member` (it streams the member; `ZippedFile` composes too). `row_one` left
-  `File.__init__`. The hooks' column, `flatread.core.Column`, is public.
-- Renamed switches: `ReportFile._header` → `_header_lines`,
-  `ReportFile._end` → `_last_line`; `LongReport._key` → `_key_field`; `HtmlFile._table` → `_table_selector`;
-  `HtmlRecords._record`, `_heading`, `_stated` → `_record_selector`, `_heading_selector`, `_heading_pattern`;
-  `FoundTable._section`, `_stated` → `_section_prefix`, `_section_field`; `FoundTable._nulls` → the `null_values=`
-  constructor argument.
-- `scalar_type`, `check_ending`, `text_sheet` and `SheetFile.frame_on` are private.
+A row number is the row as the file numbers it: its line in a text file (the header is line 1), its row in a sheet.
 
 ## Install
 
 ```
-uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v7.1.0"
+uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v0.5.0"
 ```
 
 Python 3.14; polars and msgspec, plus each extra's parsers: `excel` fastexcel and xlrd, `xml` lxml, `html` lxml and

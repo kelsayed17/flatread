@@ -1,10 +1,10 @@
-"""flatread 8.0's reader, a prototype: a row struct and a pipeline of stage values, not a class hierarchy.
+"""flatread's next reader, a preview: a row struct and a pipeline of stage values, not a class hierarchy.
 
 ``Reader(Row, Csv(separator="|"), table=Trailer(...), shape=Long(...), cells=[Padded()], source=Zip(...))``: each
 stage is one frozen value with one job, configured by keyword, and a stage of a format's own is a class implementing
 its protocol (:class:`Source`, :class:`Format`, :class:`TableFinder`, :class:`Shape`, :class:`Cleaner`,
 :class:`Records`), handed the read's :class:`ReadContext`. One :class:`Engine` types every format's table. Not yet
-stable: this module's names may change in any release until 8.0.
+stable: this module's names may change in any 0.x release.
 """
 
 from flatread.next._engine import AsWritten, Engine
