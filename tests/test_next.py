@@ -894,3 +894,9 @@ def test_an_xls_sheet_is_read_by_its_grid_where_its_one_load_finds_another_heade
     assert fr.Sheet(sheet="ngsstats 2026 (2021-2025)").typed(body, reader._typed, []) is None
     with pytest.raises(RaggedRowError, match="row 2 holds a cell right of the header's last"):
         reader.frame(body)
+
+
+def test_a_csv_s_rows_too_wide_for_one_pattern_are_left_to_the_grid() -> None:
+    """A width whose row pattern is past the regex engine's size is the grid's to read: no count, and no error."""
+    for width, rows in ((1_000, 1), (3_000, None)):
+        assert fr.Csv()._rows_of('"x"' + ",x" * (width - 1) + "\n", '"', width) == rows

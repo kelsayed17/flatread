@@ -201,16 +201,6 @@ class Csv:
         if len(self.separator.encode()) != 1 or not _breaks_as_polars(text):
             return None
         quote = self.quote if self.quote is not None and self.quote in text else None
-        if quote is None:
-            data = body.removeprefix(_BOM)
-            rows = pl.read_csv(data, has_header=False, separator="\x00", quote_char=None, schema={"raw": pl.String})
-            rows = rows["raw"].fill_null("")
-        else:
-            q, sep = re.escape(quote), re.escape(self.separator)
-            bare = pl.Series([text]).str.replace_all(f"{q}(?:[^{q}]|{q}{q})*{q}", "\x00")
-            if bare.str.contains(f"{q}|[^{sep}\n]\x00|\x00[^{sep}\r\n]").any():
-                return None
-            rows = bare.str.strip_suffix("\n").str.split("\n").explode().str.strip_suffix("\r")
         labels = list(dtypes)
         try:
             header = next(
@@ -220,24 +210,72 @@ class Csv:
             return None
         if _unique(header) != labels:
             return None
-        if (rows.str.count_matches(self.separator, literal=True) != len(labels) - 1).any():
-            return None
-        try:
-            frame = pl.read_csv(
-                body.removeprefix(_BOM),
-                separator=self.separator,
-                quote_char=quote,
-                schema={
-                    label: dtype if dtype in (pl.Int64, pl.Float64) else pl.String for label, dtype in dtypes.items()
-                },
-                null_values=list(null_values),
+        schema = {label: dtype if dtype in (pl.Int64, pl.Float64) else pl.String for label, dtype in dtypes.items()}
+
+        def parsed() -> pl.DataFrame | None:
+            try:
+                return pl.read_csv(
+                    body.removeprefix(_BOM),
+                    separator=self.separator,
+                    quote_char=quote,
+                    schema=schema,
+                    null_values=list(null_values),
+                )
+            except pl.exceptions.PolarsError:  # a cell its parser refuses as its dtype: the grid's reading names it
+                return None
+
+        if quote is None:
+            data = body.removeprefix(_BOM)
+            rows = pl.read_csv(data, has_header=False, separator="\x00", quote_char=None, schema={"raw": pl.String})
+            lines = rows["raw"].fill_null("")
+            if (lines.str.count_matches(self.separator, literal=True) != len(labels) - 1).any():
+                return None
+            frame, breaks = parsed(), lines.len()
+        else:
+            # The rows checked while polars reads them, each in a thread of its own: neither holds Python's lock.
+            with concurrent.futures.ThreadPoolExecutor(1) as pool:
+                checking = pool.submit(self._rows_of, text, quote, len(labels))
+                frame = parsed()
+                breaks = checking.result()
+            if breaks is None or frame is None:
+                return None
+            # Each row ends at a line break outside its quoted cells: the body's breaks less those inside a cell read.
+            breaks -= (
+                frame.select(pl.col(pl.String).str.count_matches("\n", literal=True).sum()).sum_horizontal().item()
             )
-        except pl.exceptions.PolarsError:  # a cell its parser refuses as its dtype: the grid's reading names it
-            return None
-        if frame.height != rows.len() - 1:
+        if frame is None or frame.height != breaks - 1:
             return None
         frame = frame.with_columns(pl.col(pl.String).replace("", None))
         return Table(frame, pl.int_range(2, frame.height + 2, eager=True).alias("number"))
+
+    def _rows_of(self, text: str, quote: str, width: int) -> int | None:
+        """Return how many rows *text* holds, where each is *width* cells quoted whole or holding no quote, or ``None``.
+
+        A quoted cell opens and closes with *quote*, each it holds doubled, and may hold the separator and line breaks;
+        any other cell holds none of them. One fullmatch of polars' regex engine, so a quote out of place, a row of
+        another width or a quoted cell that does not close is ``None``, as :meth:`_spanning` finds each; so is a width
+        whose pattern is past the engine's size, which the grid's reading reads. The rows are counted as the text's
+        line breaks, those inside its quoted cells too, and one more where its last line has none.
+        """
+        q, sep = re.escape(quote), re.escape(self.separator)
+        cell = f"(?:{q}[^{q}]*(?:{q}{q}[^{q}]*)*{q}|[^{sep}\r\n{q}]*)"
+        row = f"{cell}(?:{sep}{cell}){{{width - 1}}}"
+        whole = pl.col("text")
+        try:
+            rows, breaks = (
+                pl.DataFrame({"text": [text]})
+                .select(
+                    whole.str.contains(f"^(?:{row}\r?\n)*{row}(?:\r?\n)?$"),
+                    whole.str.count_matches("\n", literal=True).alias("n"),
+                )
+                .row(0)
+            )
+        except pl.exceptions.ComputeError:  # a pattern past the regex engine's size
+            return None
+        if not rows:
+            return None
+        assert isinstance(breaks, int)  # noqa: S101 (a count)
+        return breaks + (not text.endswith("\n"))
 
     def _parsed(self, body: bytes, text: str) -> Lines | typing.Literal["spans"] | None:
         """Return *text*'s rows where each is one line, none wider than the first, read by polars' parser.
