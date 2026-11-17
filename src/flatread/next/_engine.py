@@ -110,9 +110,12 @@ class Engine[RowT: msgspec.Struct]:
             msg = f"the header {table.cells.columns} is not {expected}"
             raise UnknownLayoutError(msg)
         numbers = table.numbers
+        fused = self._fused(table) if table.kinds is None and not cleaners else {}
         typed = []
         for column in self.columns:
-            if column.label in table.cells.columns:
+            if column.field in fused:
+                typed.append(fused[column.field])
+            elif column.label in table.cells.columns:
                 typed.append(self._typed(column, table, cleaners, numbers))
             else:  # a field the file states once, for every row (a trailer's stamp)
                 text = pl.Series(column.label, [read.stated[column.field]], pl.String)
@@ -126,6 +129,57 @@ class Engine[RowT: msgspec.Struct]:
         return list(map(self.row, *(column.to_list() for column in frame.iter_columns()), strict=True))
 
     # --- typing ---
+
+    def _fused(self, table: Table) -> dict[str, pl.Series]:
+        """Return the text table's plain columns (text, numbers, booleans) typed in one select, by field.
+
+        The same rules as :meth:`_typed`, as expressions polars runs together: a column a cell of which is not its
+        type is left out, for :meth:`_typed` to raise on, naming the cell, as it reads a column alone.
+        """
+        plain = [
+            column
+            for column in self.columns
+            if column.label in table.cells.columns and column.written is None and column.flag is None
+        ]
+        if not plain:
+            return {}
+        # Three steps, each column's intermediate a column of its own, so polars computes it once: its text stripped,
+        # then its text blanked, then its value and whether a cell is not of its type.
+        stripped = [pl.col(column.label).str.strip_chars().alias(f"{column.field}\0s") for column in plain]
+        blanked = [
+            (
+                pl.col(column.label)
+                if column.field in self._as_written
+                else pl.when(pl.col(f"{column.field}\0s") != "")
+                .then(pl.col(column.label))
+                .replace(["", *self._null_values], None)
+            ).alias(f"{column.field}\0b")
+            for column in plain
+        ]
+        typed = (
+            table.cells.lazy()
+            .with_columns(stripped)
+            .with_columns(blanked)
+            .select(expr for column in plain for expr in self._plain(column))
+            .collect()
+        )
+        refused = typed.select(
+            (pl.col(f"{column.field}\0b").is_not_null() & pl.col(column.field).is_null()).any() for column in plain
+        ).row(0)
+        return {column.field: typed[column.field] for column, bad in zip(plain, refused, strict=True) if not bad}
+
+    @staticmethod
+    def _plain(column: Column) -> list[pl.Expr]:
+        """Return the expressions of a plain column's value, from its blanked text, and that text, kept to check it."""
+        text = pl.col(f"{column.field}\0b")
+        if column.scalar is str:
+            value = text
+        elif column.scalar is bool:
+            value = text.replace_strict(_BOOLEANS, default=None, return_dtype=pl.Boolean)
+        else:
+            stripped = pl.col(f"{column.field}\0s")
+            value = pl.when(text.is_not_null()).then(stripped.cast(_DTYPES[column.scalar], strict=False))
+        return [value.alias(column.field), text]
 
     def _blanked(self, column: Column, text: pl.Series, cleaners: Sequence[Cleaner]) -> pl.Series:
         """Return *column*'s text cells, a blank one no value, cleaned, and one of the null words no value."""

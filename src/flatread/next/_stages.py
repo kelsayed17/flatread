@@ -201,7 +201,7 @@ class Csv:
         """
         if any(c in text for c in _OTHER_BREAKS) or text.count("\r") != text.count("\r\n"):
             return None
-        lines = pl.Series("raw", text.removesuffix("\n").split("\n"), pl.String).str.strip_suffix("\r")
+        lines = pl.Series("raw", [text.removesuffix("\n")], pl.String).str.split("\n").explode().str.strip_suffix("\r")
         parts = lines.str.split(self.separator)
         has_quote = lines.str.contains(self.quote, literal=True) if self.quote is not None else None
         if has_quote is not None and (quoted := has_quote.arg_true()).len():

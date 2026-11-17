@@ -649,3 +649,19 @@ def test_a_csv_split_by_line_is_its_grid_read_whole(text: str, fmt: fr.Csv) -> N
 @pytest.mark.parametrize("text", ['a,b\n"x\ny",z\n', "a,b\n1\x0c2\n", "a,b\n1\r2\n", 'a,b\n"x"y,z\n'])
 def test_a_csv_a_cell_may_span_lines_in_is_read_whole(text: str) -> None:
     assert fr.Csv()._split(text) is None
+
+
+def test_a_csv_s_dates_alone_booleans_and_as_written_text_under_a_cleaner() -> None:
+    class Day(msgspec.Struct, frozen=True):
+        day: dt.date
+
+    assert fr.Reader(Day, fr.Csv()).rows(b"day\n2026-11-16\n") == [Day(dt.date(2026, 11, 16))]
+
+    class Open(msgspec.Struct, frozen=True):
+        name: str
+        open: bool
+
+    reader = fr.Reader(Open, fr.Csv(), cells=[fr.Padded()], as_written=["name"])
+    assert reader.rows(b"name,open\n a ,true\nb, false\n") == [Open(" a ", open=True), Open("b", open=False)]
+    with pytest.raises(ReadError, match="'yes' is not a true or false: row 2"):
+        fr.Reader(Open, fr.Csv()).frame(b"name,open\na,yes\n")
