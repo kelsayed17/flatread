@@ -110,9 +110,19 @@ class Engine[RowT: msgspec.Struct]:
             msg = f"the header {table.cells.columns} is not {expected}"
             raise UnknownLayoutError(msg)
         numbers = table.numbers
+        # A column a format read typed (a CSV's numbers, by polars' parser) is its values.
+        fused = {
+            column.field: table.cells[column.label].alias(column.field)
+            for column in self.columns
+            if column.label in table.cells.columns and table.cells.schema[column.label] != pl.String
+        }
+        if table.kinds is None and not cleaners:
+            fused |= self._fused(table, fused)
         typed = []
         for column in self.columns:
-            if column.label in table.cells.columns:
+            if column.field in fused:
+                typed.append(fused[column.field])
+            elif column.label in table.cells.columns:
                 typed.append(self._typed(column, table, cleaners, numbers))
             else:  # a field the file states once, for every row (a trailer's stamp)
                 text = pl.Series(column.label, [read.stated[column.field]], pl.String)
@@ -127,6 +137,61 @@ class Engine[RowT: msgspec.Struct]:
 
     # --- typing ---
 
+    def _fused(self, table: Table, done: Collection[str] = ()) -> dict[str, pl.Series]:
+        """Return the text table's plain columns (text, numbers, booleans) typed in one select, by field.
+
+        The same rules as :meth:`_typed`, as expressions polars runs together: a column a cell of which is not its
+        type is left out, for :meth:`_typed` to raise on, naming the cell, as it reads a column alone. A column of
+        *done*'s fields a format has typed already.
+        """
+        plain = [
+            column
+            for column in self.columns
+            if column.label in table.cells.columns
+            and column.written is None
+            and column.flag is None
+            and column.field not in done
+        ]
+        if not plain:
+            return {}
+        # Three steps, each column's intermediate a column of its own, so polars computes it once: its text stripped,
+        # then its text blanked, then its value and whether a cell is not of its type.
+        stripped = [pl.col(column.label).str.strip_chars().alias(f"{column.field}\0s") for column in plain]
+        blanked = [
+            (
+                pl.col(column.label)
+                if column.field in self._as_written
+                else pl.when(pl.col(f"{column.field}\0s") != "")
+                .then(pl.col(column.label))
+                .replace(["", *self._null_values], None)
+            ).alias(f"{column.field}\0b")
+            for column in plain
+        ]
+        typed = (
+            table.cells.lazy()
+            .with_columns(stripped)
+            .with_columns(blanked)
+            .select(expr for column in plain for expr in self._plain(column))
+            .collect()
+        )
+        refused = typed.select(
+            (pl.col(f"{column.field}\0b").is_not_null() & pl.col(column.field).is_null()).any() for column in plain
+        ).row(0)
+        return {column.field: typed[column.field] for column, bad in zip(plain, refused, strict=True) if not bad}
+
+    @staticmethod
+    def _plain(column: Column) -> list[pl.Expr]:
+        """Return the expressions of a plain column's value, from its blanked text, and that text, kept to check it."""
+        text = pl.col(f"{column.field}\0b")
+        if column.scalar is str:
+            value = text
+        elif column.scalar is bool:
+            value = text.replace_strict(_BOOLEANS, default=None, return_dtype=pl.Boolean)
+        else:
+            stripped = pl.col(f"{column.field}\0s")
+            value = pl.when(text.is_not_null()).then(stripped.cast(_DTYPES[column.scalar], strict=False))
+        return [value.alias(column.field), text]
+
     def _blanked(self, column: Column, text: pl.Series, cleaners: Sequence[Cleaner]) -> pl.Series:
         """Return *column*'s text cells, a blank one no value, cleaned, and one of the null words no value."""
         if column.field in self._as_written:
@@ -136,6 +201,27 @@ class Engine[RowT: msgspec.Struct]:
             text = cleaner.clean(text, column)
         return text.replace(["", *self._null_values], None)
 
+    def _from_cells(
+        self, column: Column, cells: pl.Series, cleaners: Sequence[Cleaner], numbers: pl.Series
+    ) -> pl.Series:
+        """Return *column*'s values from a text table's *cells*, blanked, cleaned and typed.
+
+        A column of few distinct cells (a long table's record, its date repeated on each key's row) is typed a cell
+        once, unless a cleaner cleans it, which may read the column whole.
+        """
+        uniques = cells.unique(maintain_order=True)
+        if cleaners or uniques.len() * 2 > cells.len():
+            return self._from_text(column, self._blanked(column, cells, cleaners), numbers)
+        try:
+            values = self._from_text(column, self._blanked(column, uniques, cleaners), 1)
+        except ReadError:  # typed whole again, to name the first row holding the cell refused
+            return self._from_text(column, self._blanked(column, cells, cleaners), numbers)
+        typed = pl.DataFrame({"cell": uniques, "value": values})
+        joined = (
+            cells.alias("cell").to_frame().join(typed, on="cell", how="left", nulls_equal=True, maintain_order="left")
+        )
+        return joined["value"].alias(values.name)
+
     def _from_text(self, column: Column, text: pl.Series, numbers: int | pl.Series) -> pl.Series:
         """Return *column*'s values from its text cells: the rules every text format shares."""
         return _typed(column, text, f"{column.label!r} cell", numbers)
@@ -143,9 +229,9 @@ class Engine[RowT: msgspec.Struct]:
     def _typed(  # noqa: PLR0911 (one answer a scalar)
         self, column: Column, table: Table, cleaners: Sequence[Cleaner], numbers: pl.Series
     ) -> pl.Series:
-        text = self._blanked(column, table.cells[column.label], cleaners)
         if table.kinds is None:
-            return self._from_text(column, text, numbers)
+            return self._from_cells(column, table.cells[column.label], cleaners, numbers)
+        text = self._blanked(column, table.cells[column.label], cleaners)
         assert table.floats is not None  # noqa: S101 (a Cells grid has all three)
         assert table.moments is not None  # noqa: S101
         kinds = table.kinds[column.label]
@@ -161,8 +247,10 @@ class Engine[RowT: msgspec.Struct]:
                 text.is_not_null() & (kinds != "number").fill_null(value=False), text, column, "number cell", numbers
             )
             if column.scalar is int:
-                whole = floats.is_null() | (floats.round(0) == floats)
-                _refuse(~whole, text, column, "whole number", numbers)
+                _refuse(floats != floats.floor(), text, column, "whole number", numbers)
+                _refuse(
+                    ~floats.is_between(*_INT_RANGE, closed="left"), text, column, "whole number of 64 bits", numbers
+                )
                 return floats.cast(pl.Int64, strict=True).alias(column.field)
             return floats.alias(column.field)
         if column.scalar is bool:
@@ -284,6 +372,10 @@ def _booleans(text: pl.Series, column: Column, numbers: int | pl.Series) -> pl.S
     values = text.replace_strict(_BOOLEANS, default=None, return_dtype=pl.Boolean)
     _refuse(text.is_not_null() & values.is_null(), text, column, "true or false", numbers)
     return values
+
+
+#: The whole numbers an ``int`` field holds, 64 bits' (a float load reads ``1e20`` as one), as floats: low, high.
+_INT_RANGE: typing.Final = (-(2.0**63), 2.0**63)
 
 
 def _refuse(wrong: pl.Series, text: pl.Series, column: Column, what: str, numbers: int | pl.Series) -> None:

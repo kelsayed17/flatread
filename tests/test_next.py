@@ -6,6 +6,7 @@ import io
 import re
 import typing
 import zipfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
@@ -27,6 +28,7 @@ from flatread.errors import (
 from flatread.fields import Cell as At
 from flatread.fields import Flag, Format, Joined, Label, Span
 from flatread.fields import Shape as Shaped
+from flatread.next._stages import _breaks_as_polars
 from flatread.pdf import PdfLine
 from tests.support.pdf import pdf
 from tests.support.xlsx import Cell, workbook
@@ -593,14 +595,17 @@ def test_a_rust_panic_is_a_read_error_and_any_other_base_exception_passes() -> N
         fr.Reader(_Price, Raising(KeyboardInterrupt())).frame(b"")
 
 
-def test_a_sheet_s_loads_that_disagree_on_its_shape_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("kind", ["float", "datetime"])
+def test_a_sheet_s_loads_that_disagree_on_its_shape_raise(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
     import fastexcel  # noqa: PLC0415 (the excel extra)
 
     load = fastexcel.ExcelReader.load_sheet
 
     def short(self: fastexcel.ExcelReader, *args: typing.Any, **kwargs: typing.Any) -> object:  # noqa: ANN401
         sheet = load(self, *args, **kwargs)
-        return _Short(sheet) if kwargs.get("dtypes") == "float" else sheet
+        dtypes = kwargs.get("dtypes")
+        loads = dtypes == kind or (isinstance(dtypes, dict) and kind in dtypes.values())
+        return _Short(sheet) if loads else sheet
 
     class _Short:
         def __init__(self, sheet: typing.Any) -> None:  # noqa: ANN401
@@ -612,11 +617,286 @@ def test_a_sheet_s_loads_that_disagree_on_its_shape_raise(monkeypatch: pytest.Mo
             return frame.head(0)
 
     monkeypatch.setattr(fastexcel.ExcelReader, "load_sheet", short)
-    with pytest.raises(ReadError, match="float load"):
-        _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"], ["a", 7, True, None]]}))
+    with pytest.raises(ReadError, match=f"{kind} load"):
+        _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"], ["a", 7, True, dt.date(2026, 1, 2)]]}))
 
 
 def test_titled_states_its_titles_groups_and_a_long_sheet_s_keys_are_text() -> None:
     assert fr.Titled([re.compile(r"(?P<count>\d+) rows of (?P<day>.+)")]).stated == frozenset({"day"})
     reader = fr.Reader(_Reading, fr.Sheet(), shape=fr.Long(keys=re.compile(r"[A-Z][a-z]{2}"), empty_cells="drop"))
     assert reader.rows(workbook({"S": [[None, "Jan"], ["A", 1.5]]})) == [_Reading("A", "Jan", 1.5)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "a,b\n1,2\n",
+        "a,b\r\n1,2\r\n3",
+        "a,b\n\n1,2,3\n4\n",
+        'a,b\n"x,y",z\n"q""r",\n',
+        'a,b\nx"y,z\n',
+        "a,b\n,\n ,  \n",
+        "a\n1,2\n",
+        'a,b\n"x\ny",z\n\n"p\r\nq"\n',
+        'a\n"x\ny",z\n',
+        'a,"b"\n"x"y,z\n',
+        'a,b\n"x\n',
+        "a,b\n1\x0c2\n",
+        "a,b\n1\r2\n",
+    ],
+)
+@pytest.mark.parametrize("fmt", [fr.Csv(), fr.Csv(separator="|", quote=None), fr.Csv(separator=";")])
+def test_a_csv_s_every_reading_is_its_reading_by_csv(text: str, fmt: fr.Csv) -> None:
+    """Each faster reading, where it reads a body, reads it as ``csv`` does; where ``csv`` refuses it, none reads it."""
+    body = text.encode()
+    try:
+        by_csv = fmt._whole(text, body, parse=False)
+    except ReadError:
+        assert not isinstance(fmt._parsed(body, text), fr.Lines)
+        assert fmt._split(text) is None
+        assert fmt.quote is None or fmt.quote not in text or fmt._spanning(body, text) is None
+        with pytest.raises(ReadError):
+            fmt._whole(text, body)
+        return
+    spanning = fmt.quote is not None and fmt.quote in text and _breaks_as_polars(text)
+    for grid in (
+        fmt._parsed(body, text),
+        fmt._split(text),
+        fmt._spanning(body, text) if spanning else None,
+        fmt._whole(text, body),
+    ):
+        if not isinstance(grid, fr.Lines):
+            continue
+        assert grid.cells.rows() == by_csv.cells.rows()
+        for name in ("widths", "raw", "numbers"):
+            assert getattr(grid, name).to_list() == getattr(by_csv, name).to_list(), name
+
+
+def test_a_csv_the_parser_reads_otherwise_than_its_lines_is_read_by_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where polars' parser reads other rows than the lines (never yet seen), the body is read as ``csv`` reads it."""
+    read_csv = pl.read_csv
+
+    def short(*args: typing.Any, **kwargs: typing.Any) -> pl.DataFrame:  # noqa: ANN401
+        frame = read_csv(*args, **kwargs)
+        return frame if kwargs.get("separator") == "\x00" else frame.head(-1)
+
+    monkeypatch.setattr(pl, "read_csv", short)
+    for text in ("a,b\n1,2\n", 'a,b\n"x\ny",z\n'):
+        body = text.encode()
+        by_csv = fr.Csv()._whole(text, body, parse=False)
+        assert fr.Csv().grid(io.BytesIO(body), fr.ReadContext(body, row=_Price)).cells.rows() == by_csv.cells.rows()
+
+
+@pytest.mark.parametrize("text", ['a,b\n"x\ny",z\n', "a,b\n1\x0c2\n", "a,b\n1\r2\n", 'a,b\n"x"y,z\n'])
+def test_a_csv_a_cell_may_span_lines_in_is_read_whole(text: str) -> None:
+    assert fr.Csv()._split(text) is None
+
+
+def test_a_csv_s_dates_alone_booleans_and_as_written_text_under_a_cleaner() -> None:
+    class Day(msgspec.Struct, frozen=True):
+        day: dt.date
+
+    assert fr.Reader(Day, fr.Csv()).rows(b"day\n2026-11-16\n") == [Day(dt.date(2026, 11, 16))]
+
+    class Open(msgspec.Struct, frozen=True):
+        name: str
+        open: bool
+
+    reader = fr.Reader(Open, fr.Csv(), cells=[fr.Padded()], as_written=["name"])
+    assert reader.rows(b"name,open\n a ,true\nb, false\n") == [Open(" a ", open=True), Open("b", open=False)]
+    with pytest.raises(ReadError, match="'yes' is not a true or false: row 2"):
+        fr.Reader(Open, fr.Csv()).frame(b"name,open\na,yes\n")
+
+
+def test_a_sheet_reads_a_huge_number_and_a_text_written_like_a_moment() -> None:
+    class Mark(msgspec.Struct, frozen=True):
+        size: float
+        note: str
+        at: dt.date | None
+
+    body = workbook(
+        {"S": [["size", "note", "at"], [-1e300, "2026-01-02 03:04:05", dt.date(2026, 1, 2)], [2, "x", None]]}
+    )
+    assert fr.Reader(Mark, fr.Sheet()).rows(body) == [
+        Mark(-1e300, "2026-01-02 03:04:05", dt.date(2026, 1, 2)),
+        Mark(2.0, "x", None),
+    ]
+
+
+def test_a_column_of_few_distinct_cells_is_typed_a_cell_once_and_a_bad_one_named_by_its_row() -> None:
+    class Dated(msgspec.Struct, frozen=True):
+        day: Annotated[dt.date | None, Format("%Y-%m-%d")]
+        v: int
+
+    reader = fr.Reader(Dated, fr.Csv())
+    days = ["2026-11-16", "", "2026-11-16", "2026-11-16", "2026-11-17", "2026-11-16"]
+    body = ("day,v\n" + "".join(f"{day},{n}\n" for n, day in enumerate(days))).encode()
+    expected = [dt.date.fromisoformat(day) if day else None for day in days]
+    assert [row.day for row in reader.rows(body)] == expected
+    with pytest.raises(ReadError, match="row 6"):
+        reader.frame(body.replace(b"2026-11-17", b"2026-13-17"))
+
+
+class _Mixed(msgspec.Struct, frozen=True):
+    s: str | None
+    i: int | None
+    f: float | None
+    b: bool | None
+    d: Annotated[dt.date | None, Format("%Y-%m-%d")]
+
+
+_MIXED_BODIES = [
+    b"s,i,f,b,d\na,1,1.5,true,2026-11-16\n",
+    b"s,i,f,b,d\r\n,,,,\r\n  ,+3,.5,false,\r\n",
+    b's,i,f,b,d\n"x,y",-2,1e-400,,\n"q""r",7,nan,,\n',
+    b's,i,f,b,d\n"a\nb",1,2,true,2026-11-16\n',
+    b's,i,f,b,d\na"b,1,2,true,\n',
+    b'"s\nt",i,f,b,d\na,1,2,true,\n',
+    b"s,i,f,b,d\na,x,2,true,\n",
+    b"s,i,f,b,d\na,1,2,true\n",
+    b"s,i,f,b,d\na,1,2,true,,\n",
+    b"s,i,f,b,d\n\na,1,2,true,\n",
+    b"s,i,f,b,d\nNA,NA,NA,NA,NA\n",
+    b"s,i,f\n",
+    b"s,i,f,b,d\na,1,2,True,\n",
+    b"s,i,f,b,d\na,1,2,true,2026-13-01\n",
+]
+
+
+@pytest.mark.parametrize("body", _MIXED_BODIES)
+@pytest.mark.parametrize("null_values", [(), ("NA",)])
+def test_a_csv_s_typed_read_is_its_grid_s_reading(body: bytes, null_values: tuple[str, ...]) -> None:
+    """A header and its rows read typed in one pass give the grid's frame, or its error, whichever path reads them."""
+    direct = fr.Reader(_Mixed, fr.Csv(), null_values=null_values, empty=True)
+    by_grid = fr.Reader(_Mixed, fr.Csv(), null_values=null_values, empty=True)
+    by_grid._typed = None
+    try:
+        expected = by_grid.frame(body)
+    except ReadError as e:
+        with pytest.raises(type(e), match=re.escape(str(e))):
+            direct.frame(body)
+        return
+    assert direct.frame(body).equals(expected)
+
+
+def test_a_csv_s_typed_read_its_parser_reads_otherwise_is_left_to_the_grid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where polars' typed read holds other rows than the lines (never yet seen), the grid reads the body."""
+    read_csv = pl.read_csv
+
+    def short(*args: typing.Any, **kwargs: typing.Any) -> pl.DataFrame:  # noqa: ANN401
+        frame = read_csv(*args, **kwargs)
+        return frame if "has_header" in kwargs else frame.head(-1)
+
+    monkeypatch.setattr(pl, "read_csv", short)
+    reader = fr.Reader(_Mixed, fr.Csv())
+    assert reader._typed is not None
+    assert fr.Csv().typed(_MIXED_BODIES[0], reader._typed, []) is None
+
+
+class _Plain(msgspec.Struct, frozen=True):
+    s: str | None
+    i: int | None
+    f: float | None
+    b: bool | None
+
+
+_HEADER: list[Cell] = ["s", "i", "f", "b"]
+
+#: Each sheet's rows below the header, and whether its one load reads it: the grid's loads read every one the same.
+_PLAIN_SHEETS: list[tuple[list[list[Cell]], bool]] = [
+    ([["a", 1, 1.5, True], ["b", -2, 3, False]], True),
+    ([["  ", 1, 1.5, True]], True),  # a cell of spaces among others, which the engine blanks
+    ([["NA", 1, 1.5, True]], True),  # a word for none, which the engine reads as one where it is
+    ([["a", 1.5, 1.5, True]], False),  # a number not whole in an integer's column
+    ([["a", 2.0**63, 1.5, True]], False),  # a whole number past an integer's
+    ([["a", 1, "x", True]], False),  # a text cell among numbers: kinds mixed
+    ([["a", 1, 1.5, "true"]], False),  # a boolean's column of text
+    ([[1, 1, 1.5, True]], False),  # a text's column of numbers
+    ([["a", 1, 1.5, True], ["b", None, 2.5, False]], False),  # an empty cell
+    ([["a", 1, 1.5, True], [None, None, None, None], ["b", 1, 1.5, True]], False),  # an empty row
+    ([["a", 1, 1.5, True, "stray"]], False),  # a cell right of the header
+    ([["a", 1, dt.date(2026, 11, 16), True]], False),  # a moment
+    ([], False),  # a header and no rows
+]
+
+
+@pytest.mark.parametrize(("rows", "loaded"), _PLAIN_SHEETS)
+@pytest.mark.parametrize("null_values", [(), ("NA",)])
+def test_a_sheet_s_typed_read_is_its_grid_s_reading(
+    rows: list[list[Cell]],
+    loaded: bool,  # noqa: FBT001 (a parameter of the test's)
+    null_values: tuple[str, ...],
+) -> None:
+    """A header and its full rows read typed in one load give the grid's frame, or its error, whichever reads them."""
+    body = workbook({"S": [_HEADER, *rows]})
+    direct = fr.Reader(_Plain, fr.Sheet(sheet="S"), null_values=null_values, empty=True)
+    by_grid = fr.Reader(_Plain, fr.Sheet(sheet="S"), null_values=null_values, empty=True)
+    by_grid._typed = None
+    assert direct._typed is not None
+    assert (fr.Sheet(sheet="S").typed(body, direct._typed, null_values) is not None) is (loaded and not null_values)
+    try:
+        expected = by_grid.frame(body)
+    except ReadError as e:
+        with pytest.raises(type(e), match=re.escape(str(e))):
+            direct.frame(body)
+        return
+    assert direct.frame(body).equals(expected)
+
+
+def test_a_sheet_s_typed_read_of_text_alone_leaves_a_row_of_spaces_to_the_grid() -> None:
+    """A row whose every cell is text of spaces is one the grid finds empty, and refuses: the one load leaves it."""
+
+    class Text(msgspec.Struct, frozen=True):
+        s: str | None
+        t: str | None
+
+    body = workbook({"S": [["s", "t"], ["a", "b"], [" ", ""]]})
+    reader = fr.Reader(Text, fr.Sheet(sheet="S"))
+    assert reader._typed is not None
+    assert fr.Sheet(sheet="S").typed(body, reader._typed, []) is None
+    with pytest.raises(ReadError, match="row 3 is empty"):
+        reader.frame(body)
+    assert fr.Sheet(sheet="S").typed(workbook({"S": [["s", "t"], ["a", " "]]}), reader._typed, []) is not None
+
+
+def test_a_sheet_reads_by_its_grid_where_a_field_is_not_plain() -> None:
+    """A date's field, or a flag's, is the grid's to read: its column's kind does not say what each cell holds."""
+
+    class Dated(msgspec.Struct, frozen=True):
+        s: str
+        d: Annotated[dt.date, Format("%Y-%m-%d")]
+
+    assert fr.Reader(Dated, fr.Sheet())._typed is None
+    assert fr.Reader(_Plain, fr.Sheet(), as_written=["s"])._typed is None
+
+
+def test_a_sheet_s_typed_read_raises_what_is_no_failure_of_fastexcel_s(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one load leaves fastexcel's failures to the grid's loads, and raises any other error, as they would."""
+    import fastexcel  # noqa: PLC0415 (the excel extra)
+
+    def broken(*args: typing.Any, **kwargs: typing.Any) -> typing.NoReturn:  # noqa: ANN401
+        raise RuntimeError(args, kwargs)
+
+    monkeypatch.setattr(fastexcel.ExcelReader, "load_sheet", broken)
+    with pytest.raises(RuntimeError):
+        fr.Sheet().typed(workbook({"S": [_HEADER, ["a", 1, 1.5, True]]}), {"s": pl.String}, [])
+
+
+def test_an_xls_sheet_is_read_by_its_grid_where_its_one_load_finds_another_header() -> None:
+    """An Excel 97 workbook, bounded as it opens: its one load finds another header, and its grid names the row."""
+
+    class Note(msgspec.Struct, frozen=True):
+        note: str
+
+    body = (Path(__file__).parent / "fixtures" / "eia_ngsstats.xls").read_bytes()
+    reader = fr.Reader(Note, fr.Sheet(sheet="ngsstats 2026 (2021-2025)"))
+    assert reader._typed is not None
+    assert fr.Sheet(sheet="ngsstats 2026 (2021-2025)").typed(body, reader._typed, []) is None
+    with pytest.raises(RaggedRowError, match="row 2 holds a cell right of the header's last"):
+        reader.frame(body)
+
+
+def test_a_csv_s_rows_too_wide_for_one_pattern_are_left_to_the_grid() -> None:
+    """A width whose row pattern is past the regex engine's size is the grid's to read: no count, and no error."""
+    for width, rows in ((1_000, 1), (3_000, None)):
+        assert fr.Csv()._rows_of('"x"' + ",x" * (width - 1) + "\n", '"', width) == rows
