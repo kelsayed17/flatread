@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.14"
 
 [options]
@@ -374,7 +374,7 @@ wheels = [
 
 [[package]]
 name = "flatread"
-version = "7.2.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "msgspec" },

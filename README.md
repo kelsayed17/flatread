@@ -159,10 +159,43 @@ less. An `.xlsb` or `.ods` is not read.
 
 Each release's changes, and how to move a reader from the one before, are in [`CHANGELOG.md`](CHANGELOG.md).
 
+## flatread.next (preview)
+
+`flatread.next` builds a reader from values rather than classes: a row struct, a format, and a stage for each quirk
+the file has, each a frozen value configured by keyword. It reads the formats and quirks it has stages for, CSV,
+sheets, fixed-width text, PDF and SDMX, and refuses at build any field it cannot yet read as declared. Its names may
+change in any 0.x release.
+
+```python
+import re
+
+from flatread.errors import TruncatedFileError
+from flatread.next import Csv, Reader, Trailer
+
+PIPED = Reader(Rate, Csv(separator="|"), table=Trailer(re.compile(r"\d+ rows")), null_values=["ND"])
+
+assert PIPED.rows(b"Date|Rate\n01/02/2026|4.33\n01/05/2026|ND\n2 rows\n") == [
+    Rate(dt.date(2026, 1, 2), 4.33),
+    Rate(dt.date(2026, 1, 5), None),
+]
+
+for cut in (b"Date|Rate\n01/02/2026|4.33\n", b"Date|Rate\n1/2/2026|4.33\n1 rows\n"):
+    try:
+        PIPED.rows(cut)
+    except TruncatedFileError as e:
+        print("cut:", e)
+    except ReadError as e:
+        print(e)
+# cut: the last line '01/02/2026|4.33' is not the file's trailer: the body was cut
+# the 'Date' cell '1/2/2026' is not a date written %m/%d/%Y: row 2
+```
+
+A row number is the row as the file numbers it: its line in a text file (the header is line 1), its row in a sheet.
+
 ## Install
 
 ```
-uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v7.2.0"
+uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatread@v0.5.0"
 ```
 
 Python 3.14; polars and msgspec, plus each extra's parsers: `excel` fastexcel and xlrd, `xml` lxml, `html` lxml and

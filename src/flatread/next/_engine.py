@@ -329,11 +329,11 @@ def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Colu
     metadata = _metadata(field.type)
     for marker in (Span, Joined, Cell):
         if _marker(metadata, marker) is not None:
-            msg = f"the field {row.__name__}.{field.name} is a {marker.__name__}'s, which the 8.0 prototype lacks"
+            msg = f"the field {row.__name__}.{field.name} is a {marker.__name__}'s, which flatread.next lacks"
             raise LayoutError(msg)
     named = _marker(metadata, Label)
     if named is not None and named.alternatives:
-        msg = f"the field {row.__name__}.{field.name} names Label alternatives, which the 8.0 prototype lacks"
+        msg = f"the field {row.__name__}.{field.name} names Label alternatives, which flatread.next lacks"
         raise LayoutError(msg)
     try:
         scalar = _scalar_type(field.type)
@@ -342,7 +342,7 @@ def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Colu
         raise LayoutError(msg) from e
     written = _marker(metadata, Format)
     if written is None and scalar is dt.date:
-        written = _ISO_DATE  # 8.0: a bare date is ISO 8601's, exactly
+        written = _ISO_DATE  # flatread.next: a bare date is ISO 8601's, exactly
     if written is None and scalar in _MOMENTS - {dt.date}:
         msg = f"the field {field.name!r} needs the Format its text is written in"
         raise LayoutError(msg)
