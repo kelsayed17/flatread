@@ -734,3 +734,59 @@ def test_a_column_of_few_distinct_cells_is_typed_a_cell_once_and_a_bad_one_named
     assert [row.day for row in reader.rows(body)] == expected
     with pytest.raises(ReadError, match="row 6"):
         reader.frame(body.replace(b"2026-11-17", b"2026-13-17"))
+
+
+class _Mixed(msgspec.Struct, frozen=True):
+    s: str | None
+    i: int | None
+    f: float | None
+    b: bool | None
+    d: Annotated[dt.date | None, Format("%Y-%m-%d")]
+
+
+_MIXED_BODIES = [
+    b"s,i,f,b,d\na,1,1.5,true,2026-11-16\n",
+    b"s,i,f,b,d\r\n,,,,\r\n  ,+3,.5,false,\r\n",
+    b's,i,f,b,d\n"x,y",-2,1e-400,,\n"q""r",7,nan,,\n',
+    b's,i,f,b,d\n"a\nb",1,2,true,2026-11-16\n',
+    b's,i,f,b,d\na"b,1,2,true,\n',
+    b'"s\nt",i,f,b,d\na,1,2,true,\n',
+    b"s,i,f,b,d\na,x,2,true,\n",
+    b"s,i,f,b,d\na,1,2,true\n",
+    b"s,i,f,b,d\na,1,2,true,,\n",
+    b"s,i,f,b,d\n\na,1,2,true,\n",
+    b"s,i,f,b,d\nNA,NA,NA,NA,NA\n",
+    b"s,i,f\n",
+    b"s,i,f,b,d\na,1,2,True,\n",
+    b"s,i,f,b,d\na,1,2,true,2026-13-01\n",
+]
+
+
+@pytest.mark.parametrize("body", _MIXED_BODIES)
+@pytest.mark.parametrize("null_values", [(), ("NA",)])
+def test_a_csv_s_typed_read_is_its_grid_s_reading(body: bytes, null_values: tuple[str, ...]) -> None:
+    """A header and its rows read typed in one pass give the grid's frame, or its error, whichever path reads them."""
+    direct = fr.Reader(_Mixed, fr.Csv(), null_values=null_values, empty=True)
+    by_grid = fr.Reader(_Mixed, fr.Csv(), null_values=null_values, empty=True)
+    by_grid._typed = None
+    try:
+        expected = by_grid.frame(body)
+    except ReadError as e:
+        with pytest.raises(type(e), match=re.escape(str(e))):
+            direct.frame(body)
+        return
+    assert direct.frame(body).equals(expected)
+
+
+def test_a_csv_s_typed_read_its_parser_reads_otherwise_is_left_to_the_grid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where polars' typed read holds other rows than the lines (never yet seen), the grid reads the body."""
+    read_csv = pl.read_csv
+
+    def short(*args: typing.Any, **kwargs: typing.Any) -> pl.DataFrame:  # noqa: ANN401
+        frame = read_csv(*args, **kwargs)
+        return frame if "has_header" in kwargs else frame.head(-1)
+
+    monkeypatch.setattr(pl, "read_csv", short)
+    reader = fr.Reader(_Mixed, fr.Csv())
+    assert reader._typed is not None
+    assert fr.Csv().typed(_MIXED_BODIES[0], reader._typed, []) is None

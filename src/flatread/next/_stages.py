@@ -159,6 +159,15 @@ class Csv:
         """Return the file's rows of cells: each line's (a quoted cell may span lines), its raw text and line number."""
         del read
         body = stream.read()
+        text = self._text(body)
+        parsed = self._parsed(body, text)
+        if isinstance(parsed, Lines):
+            return parsed
+        split = self._spanning(body, text) if parsed == "spans" else self._split(text)
+        return self._whole(text, body) if split is None else split
+
+    def _text(self, body: bytes) -> str:
+        """Return *body*'s text, or raise for a body empty, cut (by *final_line_ending*), not UTF-8 or opening blank."""
         if not body or body.isspace():
             msg = "the body is empty"
             raise EmptyBodyError(msg)
@@ -172,11 +181,63 @@ class Csv:
         if text.startswith(("\n", "\r\n")):
             msg = "the body opens with a blank line, not its header"
             raise UnknownLayoutError(msg)
-        parsed = self._parsed(body, text)
-        if isinstance(parsed, Lines):
-            return parsed
-        split = self._spanning(body, text) if parsed == "spans" else self._split(text)
-        return self._whole(text, body) if split is None else split
+        return text
+
+    def typed(  # noqa: PLR0911 (a None for each doubt)
+        self, body: bytes, dtypes: Mapping[str, type[pl.DataType]], null_values: Sequence[str]
+    ) -> Table | None:
+        """Return the table of a file that is its header of *dtypes*' labels and rows as wide, read typed in one pass.
+
+        polars' parser reads each column as its dtype in *dtypes* (``Int64``, ``Float64``, else ``String``), each of
+        *null_values* no value, so the engine has the text columns alone to type. ``None`` where the body may be
+        anything else: another header, a row of another width (counted from its separators outside quoted cells), a
+        quote out of place (as :meth:`_spanning` finds one), a line break polars does not break at, or a cell its
+        parser refuses as its dtype; :meth:`grid`'s reading then reads it, and names what is wrong. A body that is
+        empty, cut, not UTF-8 or opening blank raises as :meth:`grid` raises. Every number polars' parser takes, its
+        cast from text takes as the same value, so the table types as the grid's would; its rows are numbered by
+        place, which only a refusal names, and the engine's refusal of it reads the body again by :meth:`grid`.
+        """
+        text = self._text(body)
+        if len(self.separator.encode()) != 1 or not _breaks_as_polars(text):
+            return None
+        quote = self.quote if self.quote is not None and self.quote in text else None
+        if quote is None:
+            data = body.removeprefix(_BOM)
+            rows = pl.read_csv(data, has_header=False, separator="\x00", quote_char=None, schema={"raw": pl.String})
+            rows = rows["raw"].fill_null("")
+        else:
+            q, sep = re.escape(quote), re.escape(self.separator)
+            bare = pl.Series([text]).str.replace_all(f"{q}(?:[^{q}]|{q}{q})*{q}", "\x00")
+            if bare.str.contains(f"{q}|[^{sep}\n]\x00|\x00[^{sep}\r\n]").any():
+                return None
+            rows = bare.str.strip_suffix("\n").str.split("\n").explode().str.strip_suffix("\r")
+        labels = list(dtypes)
+        try:
+            header = next(
+                csv.reader([text.partition("\n")[0]], delimiter=self.separator, quotechar=quote or '"', strict=True)
+            )
+        except csv.Error:  # a header cell running on past its line
+            return None
+        if _unique(header) != labels:
+            return None
+        if (rows.str.count_matches(self.separator, literal=True) != len(labels) - 1).any():
+            return None
+        try:
+            frame = pl.read_csv(
+                body.removeprefix(_BOM),
+                separator=self.separator,
+                quote_char=quote,
+                schema={
+                    label: dtype if dtype in (pl.Int64, pl.Float64) else pl.String for label, dtype in dtypes.items()
+                },
+                null_values=list(null_values),
+            )
+        except pl.exceptions.PolarsError:  # a cell its parser refuses as its dtype: the grid's reading names it
+            return None
+        if frame.height != rows.len() - 1:
+            return None
+        frame = frame.with_columns(pl.col(pl.String).replace("", None))
+        return Table(frame, pl.int_range(2, frame.height + 2, eager=True).alias("number"))
 
     def _parsed(self, body: bytes, text: str) -> Lines | typing.Literal["spans"] | None:
         """Return *text*'s rows where each is one line, none wider than the first, read by polars' parser.

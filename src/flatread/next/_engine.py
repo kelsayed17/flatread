@@ -110,7 +110,14 @@ class Engine[RowT: msgspec.Struct]:
             msg = f"the header {table.cells.columns} is not {expected}"
             raise UnknownLayoutError(msg)
         numbers = table.numbers
-        fused = self._fused(table) if table.kinds is None and not cleaners else {}
+        # A column a format read typed (a CSV's numbers, by polars' parser) is its values.
+        fused = {
+            column.field: table.cells[column.label].alias(column.field)
+            for column in self.columns
+            if column.label in table.cells.columns and table.cells.schema[column.label] != pl.String
+        }
+        if table.kinds is None and not cleaners:
+            fused |= self._fused(table, fused)
         typed = []
         for column in self.columns:
             if column.field in fused:
@@ -130,16 +137,20 @@ class Engine[RowT: msgspec.Struct]:
 
     # --- typing ---
 
-    def _fused(self, table: Table) -> dict[str, pl.Series]:
+    def _fused(self, table: Table, done: Collection[str] = ()) -> dict[str, pl.Series]:
         """Return the text table's plain columns (text, numbers, booleans) typed in one select, by field.
 
         The same rules as :meth:`_typed`, as expressions polars runs together: a column a cell of which is not its
-        type is left out, for :meth:`_typed` to raise on, naming the cell, as it reads a column alone.
+        type is left out, for :meth:`_typed` to raise on, naming the cell, as it reads a column alone. A column of
+        *done*'s fields a format has typed already.
         """
         plain = [
             column
             for column in self.columns
-            if column.label in table.cells.columns and column.written is None and column.flag is None
+            if column.label in table.cells.columns
+            and column.written is None
+            and column.flag is None
+            and column.field not in done
         ]
         if not plain:
             return {}
