@@ -470,6 +470,9 @@ class File[RowT: msgspec.Struct](abc.ABC):
     body and every thread. A format subclasses a reader of this class's family and implements :meth:`_read`.
     """
 
+    #: Whether the reader checks msgspec ``Meta`` constraints itself (flatread.next's readers do), so none is refused.
+    _meta_checked: typing.ClassVar[bool] = False
+
     #: The float fields that may hold ``NaN`` and infinities as values (SDMX's ``obs_value``); every other float field
     #: is finite, and polars' reading of ``nan``, ``inf`` or an overflowing ``1e400`` as a float is refused there.
     _non_finite: typing.ClassVar[Collection[str]] = ()
@@ -538,7 +541,8 @@ class File[RowT: msgspec.Struct](abc.ABC):
             raise LayoutError(msg)
         fields = msgspec.structs.fields(row)
         for field in fields:
-            _check_constraints(row, field)
+            if not self._meta_checked:
+                _check_constraints(row, field)
             if field.name in self._given:
                 _check_given(row, field, self._given[field.name])
         columns = [self._column(field) for field in fields if field.name not in self._given]
