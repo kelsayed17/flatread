@@ -1,0 +1,22 @@
+name: Feature request
+description: A file shape or publisher quirk flatread should read.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The file
+      description: The publisher, the file's shape, and what in it flatread cannot read today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: How the row struct or reader would look.
+      render: python
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: A link to a sample file or the publisher's documentation of its format.
