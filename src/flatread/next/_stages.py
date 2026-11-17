@@ -1,5 +1,6 @@
 """The built-in stages: sources, formats, table finders, shapes and cleaners, each one frozen value with one job."""
 
+import concurrent.futures
 import contextlib
 import csv
 import dataclasses
@@ -80,6 +81,15 @@ def records_of(text: pl.DataFrame) -> Cells:
 #: The line breaks ``str.splitlines`` breaks at but a CSV row does not end at, and a NUL: a body holding one, or a
 #: lone CR, is not split fast.
 _OTHER_BREAKS = "\x00\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+
+
+def _breaks_as_polars(text: str) -> bool:
+    """Return whether *text* breaks its lines only where polars' parser does, at LF and CRLF, and holds no NUL.
+
+    ``str.splitlines`` breaks at a CR alone and at the other breaks too (``_OTHER_BREAKS``), where polars reads on.
+    """
+    return not any(c in text for c in _OTHER_BREAKS) and ("\r" not in text or text.count("\r") == text.count("\r\n"))
+
 
 #: The text fastexcel gives a moment cell (a date, a time, both): what makes a cell's column loaded as times too.
 _MOMENT_TEXT = r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$"
@@ -162,38 +172,111 @@ class Csv:
         if text.startswith(("\n", "\r\n")):
             msg = "the body opens with a blank line, not its header"
             raise UnknownLayoutError(msg)
-        split = self._split(text)
-        return self._whole(text) if split is None else split
+        for read_as in (lambda: self._parsed(body, text), lambda: self._split(text)):
+            if (grid := read_as()) is not None:
+                return grid
+        return self._whole(text, body)
 
-    def _whole(self, text: str) -> Lines:
-        """Return *text*'s rows read by ``csv`` from its lines, a quoted cell running on over as many as it spans."""
+    def _parsed(self, body: bytes, text: str) -> Lines | None:
+        """Return *text*'s rows where each is one line, none wider than the first, read by polars' parser.
+
+        ``None`` where a line breaks other than at LF or CRLF, a quote is out of place on its line (a cell running on
+        past it, or a quote inside a cell not quoted), or a row is wider than the first. Each line is read twice by
+        ``read_csv``: whole (its separator a NUL, which no such body holds), then split into the first row's width, a
+        short row padded with nulls and a long one cut. A row's width is its separators outside its quoted cells, plus
+        one; where nothing is quoted, its line's bytes less its cells', so a row cut shows as wider than the first.
+        """
+        if len(self.separator.encode()) != 1 or not _breaks_as_polars(text):
+            return None
+        body = body.removeprefix(_BOM)
+        lines = pl.read_csv(body, has_header=False, separator="\x00", quote_char=None, schema={"raw": pl.String})
+        lines = lines["raw"].fill_null("")
+        quote = self.quote if self.quote is not None and self.quote in text else None
+        bare, widths = lines, None
+        if quote is not None:
+            # Each quoted cell one NUL: a quote left is out of place, as is a cell that opens or closes mid-cell.
+            q, sep = re.escape(quote), re.escape(self.separator)
+            bare = lines.str.replace_all(f"{q}(?:[^{q}]|{q}{q})*{q}", "\x00")
+            if (bare.str.contains(quote, literal=True) | bare.str.contains(f"[^{sep}]\x00|\x00[^{sep}]")).any():
+                return None
+            widths = bare.str.count_matches(self.separator, literal=True) + 1
+        width = bare[0].count(self.separator) + 1
+        cells = pl.read_csv(
+            body,
+            has_header=False,
+            separator=self.separator,
+            quote_char=quote,
+            schema={str(at): pl.String for at in range(width)},
+            truncate_ragged_lines=True,
+        )
+        if lines.len() != cells.height:  # the parsers disagree on the lines: split them as the line splitter does
+            return None
+        if widths is None:
+            held = cells.select(pl.sum_horizontal(pl.all().str.len_bytes().fill_null(0)))[:, 0]
+            widths = lines.str.len_bytes() - held + 1
+        if quote is not None:  # a quoted empty cell is read as text, and holds no value as an unquoted one does
+            cells = cells.select(pl.all().replace("", None))
+        if widths.max() != width:  # a row wider than the first, its surplus cut by the parser: split a line at a time
+            return None
+        numbers = pl.int_range(1, lines.len() + 1, eager=True).alias("number")
+        return Lines(cells=cells, widths=widths.cast(pl.UInt32).alias("width"), raw=lines, numbers=numbers)
+
+    def _whole(self, text: str, body: bytes, *, parse: bool = True) -> Lines:
+        """Return *text*'s rows read by ``csv`` from its lines, a quoted cell running on over as many as it spans.
+
+        ``csv`` reads every row, to check it and to count its cells and the lines it spans. Where the body breaks its
+        lines only at LF or CRLF, as polars' parser does, the parser reads the cells, and each row's raw text is its
+        lines joined in polars; elsewhere (a line break ``str.splitlines`` alone breaks at, or a first row narrower
+        than the widest, which the parser refuses) ``csv``'s rows are the cells.
+        """
         lines = text.splitlines(keepends=True)
-        taken: list[int] = []
-
-        def feed() -> Iterator[str]:
-            for line in lines:
-                taken.append(1)
-                yield line
-
         quoting = csv.QUOTE_NONE if self.quote is None else csv.QUOTE_MINIMAL
-        reader = csv.reader(feed(), delimiter=self.separator, quotechar=self.quote or '"', quoting=quoting, strict=True)
+        reader = csv.reader(lines, delimiter=self.separator, quotechar=self.quote or '"', quoting=quoting, strict=True)
+        parsed = parse and _breaks_as_polars(text) and len(self.separator.encode()) == 1
         rows: list[list[str | None]] = []
-        raw: list[str] = []
-        numbers: list[int] = []
-        start = 0
+        widths: list[int] = []
+        ends: list[int] = []
         try:
             for cells in reader:
-                end = len(taken)
                 # A blank line is a row of one empty cell, which a table as wide as its header refuses.
-                rows.append([cell or None for cell in cells] or [None])
-                raw.append("".join(lines[start:end]).rstrip("\r\n"))
-                numbers.append(start + 1)
-                start = end
+                widths.append(len(cells) or 1)
+                ends.append(reader.line_num)
+                if not parsed:
+                    rows.append([cell or None for cell in cells] or [None])
         except csv.Error as e:
             # A quoted cell open at the body's end was cut; any other quote out of place is a malformed row.
-            msg = f"row {len(rows) + 1}: {e}"
+            msg = f"row {len(widths) + 1}: {e}"
             raise (TruncatedFileError if "unexpected end of data" in str(e) else ReadError)(msg) from e
-        return lines_of(rows, raw, numbers)
+        starts = [1, *(end + 1 for end in ends[:-1])]
+        if not parsed:
+            raw = ["".join(lines[start - 1 : end]).rstrip("\r\n") for start, end in zip(starts, ends, strict=True)]
+            return lines_of(rows, raw, starts)
+        try:
+            cells = pl.read_csv(
+                body.removeprefix(_BOM),
+                has_header=False,
+                separator=self.separator,
+                quote_char=self.quote,
+                schema={str(at): pl.String for at in range(max(widths))},
+            ).select(pl.all().replace("", None))
+        except pl.exceptions.PolarsError:  # a first row narrower than the widest, which the parser refuses
+            return self._whole(text, body, parse=False)
+        spans = pl.Series(ends, dtype=pl.Int64) - pl.Series(starts, dtype=pl.Int64) + 1
+        row = pl.select(pl.int_range(len(ends)).repeat_by(spans).explode()).to_series()
+        raw = (
+            pl.DataFrame({"row": row, "raw": pl.Series(lines, dtype=pl.String)})
+            .group_by("row", maintain_order=True)
+            .agg(pl.col("raw").str.join(""))["raw"]
+            .str.strip_chars_end("\r\n")
+        )
+        if cells.height != len(widths):  # the two read the rows otherwise: csv's rows are the cells
+            return self._whole(text, body, parse=False)
+        return Lines(
+            cells=cells,
+            widths=pl.Series("width", widths, pl.Int64),
+            raw=raw,
+            numbers=pl.Series("number", starts, pl.Int64),
+        )
 
     def _split(self, text: str) -> Lines | None:
         """Return *text*'s rows where every row is one line, split in polars; ``None`` where a cell may span lines.
@@ -202,7 +285,7 @@ class Csv:
         a quote it leaves open (a cell running on past the line) leaves the body to :meth:`grid`'s reading of it whole.
         So does a line break other than LF or CRLF, which ``str.splitlines`` breaks at too, and a NUL.
         """
-        if any(c in text for c in _OTHER_BREAKS) or text.count("\r") != text.count("\r\n"):
+        if not _breaks_as_polars(text):
             return None
         lines = pl.Series("raw", [text.removesuffix("\n")], pl.String).str.split("\n").explode().str.strip_suffix("\r")
         parts = lines.str.split(self.separator)
@@ -247,18 +330,26 @@ class Sheet:
         del read
         from flatread.sheets import _loading, _sheet_named, _workbook  # noqa: PLC0415 (the excel extra)
 
-        workbook = _workbook(stream.read())
+        body = stream.read()
+        workbook = _workbook(body)
         name = _sheet_named(workbook, self.sheet)
-        with _loading(f"the workbook's {name!r} sheet will not load"):
-            sheet = workbook.load_sheet(name, header_row=None, skip_rows=0, dtypes="string")
-            places = [column.absolute_index for column in sheet.available_columns()]
-            text = sheet.to_polars()
-            if not text.width:
-                return Cells(text=text, raw=_unraw(text.height), numbers=_numbered(text.height))
-            floats, bools = (
-                workbook.load_sheet(name, header_row=None, skip_rows=0, dtypes=dict.fromkeys(places, kind)).to_polars()
-                for kind in ("float", "boolean")
-            )
+
+        def load(
+            kind: typing.Literal["float", "boolean"],
+        ) -> pl.DataFrame:  # in a workbook of its own: one workbook loads one sheet at a time
+            with _loading(f"the workbook's {name!r} sheet will not load"):
+                return _workbook(body).load_sheet(name, header_row=None, skip_rows=0, dtypes=kind).to_polars()
+
+        # The three loads at once, each its own parse of the sheet: a load holds no lock of Python's.
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            loading = [pool.submit(load, kind) for kind in ("float", "boolean")]
+            with _loading(f"the workbook's {name!r} sheet will not load"):
+                sheet = workbook.load_sheet(name, header_row=None, skip_rows=0, dtypes="string")
+                places = [column.absolute_index for column in sheet.available_columns()]
+                text = sheet.to_polars()
+            floats, bools = (future.result() for future in loading)
+        if not text.width:
+            return Cells(text=text, raw=_unraw(text.height), numbers=_numbered(text.height))
         names = [str(at) for at in range(text.width)]
         for kind, frame in (("text", text), ("float", floats), ("boolean", bools)):
             if frame.shape != (text.height, len(places)):
@@ -793,7 +884,6 @@ class Long:
         if len(set(keyed.values())) != len(keyed):
             msg = f"the header names a key twice: {list(keyed.values())!r}"
             raise UnknownLayoutError(msg)
-        order = {name: at for at, name in enumerate(keyed)}
         record_columns = table.cells.columns[: len(labels)]
 
         def long(frame: pl.DataFrame | None) -> pl.DataFrame | None:
@@ -802,7 +892,9 @@ class Long:
             cells = frame.with_row_index("_row").unpivot(
                 index=["_row", *record_columns], on=list(keyed), variable_name="_key", value_name=value_column.label
             )
-            cells = cells.sort("_row", pl.col("_key").replace_strict(order, return_dtype=pl.Int64))
+            # unpivot writes key by key; row r's key j is at j * height + r, so rows come record by record in key order.
+            height, at = frame.height, pl.int_range(frame.height * len(keyed))
+            cells = cells.select(pl.all().gather((at % len(keyed)) * height + at // len(keyed)))
             key = pl.col("_key").replace_strict(keyed, return_dtype=pl.String).alias(key_column.label)
             return cells.select("_row", *record_columns, key, value_column.label)
 

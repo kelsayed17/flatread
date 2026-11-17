@@ -602,7 +602,8 @@ def test_a_sheet_s_loads_that_disagree_on_its_shape_raise(monkeypatch: pytest.Mo
     def short(self: fastexcel.ExcelReader, *args: typing.Any, **kwargs: typing.Any) -> object:  # noqa: ANN401
         sheet = load(self, *args, **kwargs)
         dtypes = kwargs.get("dtypes")
-        return _Short(sheet) if isinstance(dtypes, dict) and kind in dtypes.values() else sheet
+        loads = dtypes == kind or (isinstance(dtypes, dict) and kind in dtypes.values())
+        return _Short(sheet) if loads else sheet
 
     class _Short:
         def __init__(self, sheet: typing.Any) -> None:  # noqa: ANN401
@@ -633,19 +634,48 @@ def test_titled_states_its_titles_groups_and_a_long_sheet_s_keys_are_text() -> N
         'a,b\n"x,y",z\n"q""r",\n',
         'a,b\nx"y,z\n',
         "a,b\n,\n ,  \n",
+        "a\n1,2\n",
+        'a,b\n"x\ny",z\n\n"p\r\nq"\n',
+        'a\n"x\ny",z\n',
+        'a,"b"\n"x"y,z\n',
+        'a,b\n"x\n',
+        "a,b\n1\x0c2\n",
+        "a,b\n1\r2\n",
     ],
 )
 @pytest.mark.parametrize("fmt", [fr.Csv(), fr.Csv(separator="|", quote=None), fr.Csv(separator=";")])
-def test_a_csv_split_by_line_is_its_grid_read_whole(text: str, fmt: fr.Csv) -> None:
-    split = fmt._split(text)
-    if split is None:  # a quote out of place for this separator: the whole reading refuses it
+def test_a_csv_s_every_reading_is_its_reading_by_csv(text: str, fmt: fr.Csv) -> None:
+    """Each faster reading, where it reads a body, reads it as ``csv`` does; where ``csv`` refuses it, none reads it."""
+    body = text.encode()
+    try:
+        by_csv = fmt._whole(text, body, parse=False)
+    except ReadError:
+        assert fmt._parsed(body, text) is None
+        assert fmt._split(text) is None
         with pytest.raises(ReadError):
-            fmt._whole(text)
+            fmt._whole(text, body)
         return
-    whole = fmt._whole(text)
-    assert split.cells.rows() == whole.cells.rows()
-    for name in ("widths", "raw", "numbers"):
-        assert getattr(split, name).to_list() == getattr(whole, name).to_list(), name
+    for grid in (fmt._parsed(body, text), fmt._split(text), fmt._whole(text, body)):
+        if grid is None:
+            continue
+        assert grid.cells.rows() == by_csv.cells.rows()
+        for name in ("widths", "raw", "numbers"):
+            assert getattr(grid, name).to_list() == getattr(by_csv, name).to_list(), name
+
+
+def test_a_csv_the_parser_reads_otherwise_than_its_lines_is_read_by_csv(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Where polars' parser reads other rows than the lines (never yet seen), the body is read as ``csv`` reads it."""
+    read_csv = pl.read_csv
+
+    def short(*args: typing.Any, **kwargs: typing.Any) -> pl.DataFrame:  # noqa: ANN401
+        frame = read_csv(*args, **kwargs)
+        return frame if kwargs.get("separator") == "\x00" else frame.head(-1)
+
+    monkeypatch.setattr(pl, "read_csv", short)
+    for text in ("a,b\n1,2\n", 'a,b\n"x\ny",z\n'):
+        body = text.encode()
+        by_csv = fr.Csv()._whole(text, body, parse=False)
+        assert fr.Csv().grid(io.BytesIO(body), fr.ReadContext(body, row=_Price)).cells.rows() == by_csv.cells.rows()
 
 
 @pytest.mark.parametrize("text", ['a,b\n"x\ny",z\n', "a,b\n1\x0c2\n", "a,b\n1\r2\n", 'a,b\n"x"y,z\n'])
