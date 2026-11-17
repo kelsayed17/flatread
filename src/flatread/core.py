@@ -21,7 +21,8 @@ checked frame by position, without a second check.
 **Composition.** A reader is one class doing one thing, and a format is a subclass naming the pieces it needs, each
 overriding one step and calling the next: ``class _Volumes(TrailerCsv[Row], HeadersCsv[Row])``. The switches are
 underscored class attributes a subclass sets (``_header = False``), a required one left unset a ``LayoutError`` when the
-reader is built (:meth:`File._check_switches`); the hooks are underscored methods it overrides
+reader is built (:meth:`File._check_switches`), as is one misspelled (``_quotechar``) or set to a value its annotation
+does not admit (``_header = "no"``); the hooks are underscored methods it overrides
 (:meth:`File._label` derives a label for a field without one, :meth:`File._format` a ``Format``). Two pieces here
 compose with any reader of text cells: :class:`Thousands` reads ``1,782,319`` as its number, and :class:`Carried` fills
 a group's label, printed on its first row only, down to the rows below. :class:`Reshaped` reshapes the frame another
@@ -39,8 +40,10 @@ with ``end=True``. A date written across two columns is one field, its second co
 """
 
 import abc
+import annotationlib
 import codecs
 import datetime as dt
+import inspect
 import re
 import types
 import typing
@@ -163,6 +166,132 @@ def _check_renamed(reader: object, renamed: Mapping[str, str]) -> None:
     if old := [name for name in renamed if hasattr(reader, name)]:
         msg = f"the {type(reader).__name__} format sets {old}, renamed in 7.0: {[renamed[name] for name in old]}"
         raise LayoutError(msg)
+
+
+#: The msgspec ``Meta`` constraints msgspec checks where it decodes, which a reader does not: it builds each row from
+#: its checked frame, by position, so a field naming one would read a value outside it without a word.
+_CONSTRAINTS: Final = ("gt", "ge", "lt", "le", "multiple_of", "pattern", "min_length", "max_length", "tz")
+
+
+def _check_constraints(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> None:
+    """Refuse a *field* of *row* whose type names a msgspec ``Meta`` constraint, which no reader checks (above)."""
+    stack = [field.type]
+    while stack:
+        annotation = stack.pop()
+        if typing.get_origin(annotation) is typing.Annotated:
+            for meta in annotation.__metadata__:
+                if not isinstance(meta, msgspec.Meta):
+                    continue
+                if named := [constraint for constraint in _CONSTRAINTS if getattr(meta, constraint) is not None]:
+                    msg = (
+                        f"the field {row.__name__}.{field.name}'s msgspec Meta names {named}, which a reader does not"
+                        " check: state a text field's pattern as a Shape, its values as a Literal, or check the rows"
+                    )
+                    raise LayoutError(msg)
+        stack.extend(typing.get_args(annotation))
+
+
+def _check_given(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo, value: object) -> None:
+    """Refuse a *value* a format gives *row*'s *field* that is not of its type, which a column would coerce."""
+    try:
+        msgspec.convert(value, field.type, strict=True)
+    except msgspec.ValidationError as e:
+        msg = f"the format gives {row.__name__}.{field.name} {value!r}, which is no value of its type: {e}"
+        raise LayoutError(msg) from None
+
+
+def _distance(one: str, other: str) -> int:
+    """Return how many edits turn *one* into *other*: a character added, dropped or changed, or two swapped."""
+    rows: list[list[int]] = [list(range(len(other) + 1))]
+    for i, a in enumerate(one, 1):
+        row = [i, *[0] * len(other)]
+        for j, b in enumerate(other, 1):
+            row[j] = min(rows[-1][j] + 1, row[j - 1] + 1, rows[-1][j - 1] + int(a != b))
+            if i > 1 and j > 1 and a == other[j - 2] and one[i - 2] == b:
+                row[j] = min(row[j], rows[-2][j - 2] + 1)
+        rows.append(row)
+    return rows[-1][-1]
+
+
+def _settings(cls: type) -> set[str]:
+    """Return the underscored names *cls* sets or annotates as values, not methods: its switches, if flatread's."""
+    annotated = annotationlib.get_annotations(cls, format=annotationlib.Format.FORWARDREF)
+    values = {
+        name
+        for name, value in vars(cls).items()
+        if not (inspect.isfunction(value) or isinstance(value, (staticmethod, classmethod, property)))
+    }
+    names = {name for name in {*annotated, *values} if name.startswith("_") and not name.startswith("__")}
+    return names - {"_abc_impl"}  # abc's own cache, in every reader's namespace, is no switch
+
+
+#: The most edits a name is from a switch it misspells: ``_quote_chr`` is two from ``_quote_char``.
+_MISSPELT: Final = 2
+
+
+def _check_spelling(reader: object) -> None:
+    """Refuse a switch *reader*'s format sets under a misspelling of one its pieces read, which it would ignore.
+
+    A name within two edits of a switch of flatread's (``_quotechar`` for ``_quote_char``, ``_trailr``) and no switch
+    itself reads nothing: the file is read as if it were unset. A format that keeps a value of its own under such a
+    name, for a hook of its own, annotates it in its class (``_header_alone: ClassVar[bool] = True``), and it is kept.
+    """
+    pieces = [cls for cls in type(reader).__mro__ if cls.__module__.partition(".")[0] == "flatread"]
+    switches = set().union(*map(_settings, pieces))
+    for cls in type(reader).__mro__:
+        if cls in pieces or cls is object:
+            continue
+        annotated = annotationlib.get_annotations(cls, format=annotationlib.Format.FORWARDREF)
+        for name in sorted(_settings(cls) - switches - annotated.keys()):
+            if near := sorted(switch for switch in switches if _distance(name, switch) <= _MISSPELT):
+                msg = (
+                    f"the {type(reader).__name__} format sets {name}, which none of its pieces reads: is it {near}?"
+                    f" (annotate {name} in {cls.__name__} to keep a value of the format's own under that name)"
+                )
+                raise LayoutError(msg)
+
+
+def _plain(annotation: object) -> bool:
+    """Return whether *annotation* is of booleans, whole numbers, text, ``None`` and ``Literal`` values alone."""
+    if annotation in {bool, int, str, types.NoneType, None}:
+        return True
+    origin = typing.get_origin(annotation)
+    if origin is Literal:
+        return True
+    return origin in {typing.Union, types.UnionType} and all(map(_plain, typing.get_args(annotation)))
+
+
+def _admitted(annotation: object) -> str:
+    """Return what an error says a switch of *annotation* takes: ``one of [...]``, or the kinds it takes."""
+    kinds = typing.get_args(annotation) if typing.get_origin(annotation) in {typing.Union, types.UnionType} else ()
+    leaves = [*kinds] or [annotation]
+    if all(typing.get_origin(leaf) is Literal or leaf in {types.NoneType, None} for leaf in leaves):
+        values = [value for leaf in leaves for value in (typing.get_args(leaf) or (None,))]
+        return f"one of {values!r}"
+    names = [getattr(leaf, "__name__", None) or repr(leaf) for leaf in leaves]
+    return "a " + " or ".join("None" if name == "NoneType" else name for name in names)
+
+
+def _check_values(reader: object) -> None:
+    """Refuse a switch of *reader*'s set to a value its piece's annotation does not admit (``"never"``, ``"no"``).
+
+    Only a switch annotated as booleans, whole numbers, text, ``None`` or ``Literal`` values is checked here: one of
+    any other kind (a pattern, a collection) is its piece's to check (:meth:`File._check_switches`).
+    """
+    for cls in type(reader).__mro__:
+        if cls.__module__.partition(".")[0] != "flatread":
+            continue
+        for name, annotation in annotationlib.get_annotations(cls, format=annotationlib.Format.FORWARDREF).items():
+            classvar = typing.get_origin(annotation) is typing.ClassVar
+            declared = typing.get_args(annotation)[0] if classvar else annotation
+            if not name.startswith("_") or not _plain(declared) or not hasattr(reader, name):
+                continue
+            value = getattr(reader, name)
+            try:
+                msgspec.convert(value, declared, strict=True)
+            except msgspec.ValidationError:
+                msg = f"the {type(reader).__name__} format's {name} is {value!r}, not {_admitted(declared)}"
+                raise LayoutError(msg) from None
 
 
 def _stacked(rows: Sequence[Sequence[str | None]]) -> list[str]:
@@ -316,6 +445,9 @@ def _check_markers(column: Column) -> None:
     if column.flag is not None and scalar is not bool:
         msg = f"the field {name!r} is no boolean, so it takes no Flag"
         raise LayoutError(msg)
+    if column.flag is not None and column.flag.true == column.flag.false:
+        msg = f"the field {name!r}'s Flag writes true and false both as {column.flag.true!r}, which tells neither apart"
+        raise LayoutError(msg)
     if column.joined is not None and (written is None or column.span is not None):
         msg = f"the field {name!r} is Joined, so it is a date or time read by its Format, and has no Span"
         raise LayoutError(msg)
@@ -380,8 +512,14 @@ class File[RowT: msgspec.Struct](abc.ABC):
         that is no date or time, with a zone on a date, naming a zone polars does not know, writing a zone in its cells
         (``%z``, ``%Z``), or that polars does not read and write the field's type in (a date's ``%H:%M``); a ``Shape``
         polars' regex engine does not compile (a look-around); a field of a type no column reads, a ``Literal``
-        neither all whole numbers nor all text among them; or a switch a piece refuses (:meth:`_check_switches`).
+        neither all whole numbers nor all text among them; a msgspec ``Meta`` constraint, which no reader checks; a
+        keyword-only struct; a ``Flag`` whose words are one; a ``_given`` value not of its field's type; a switch
+        misspelled, set to a value its annotation does not admit, or that a piece refuses (:meth:`_check_switches`).
         """
+        _check_spelling(self)
+        if keyword := [p.name for p in inspect.signature(row).parameters.values() if p.kind is p.KEYWORD_ONLY]:
+            msg = f"the fields {keyword} of {row.__name__} are keyword-only, and a reader builds its rows by position"
+            raise LayoutError(msg)
         self._row = row
         self._fields = list(row.__struct_fields__)
         # A field's default is its value where its file holds none (an attribute SEC writes only when true).
@@ -399,6 +537,10 @@ class File[RowT: msgspec.Struct](abc.ABC):
             msg = f"the format gives {sorted(stray)}, which are no fields of {row.__name__}"
             raise LayoutError(msg)
         fields = msgspec.structs.fields(row)
+        for field in fields:
+            _check_constraints(row, field)
+            if field.name in self._given:
+                _check_given(row, field, self._given[field.name])
         columns = [self._column(field) for field in fields if field.name not in self._given]
         # A field written across two columns is read as two text columns, joined into its value by frame().
         self._joined = {
@@ -421,6 +563,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         # An error names a column by its label, its field's (a Joined field's first).
         self._labeled = {column.field: column.label for column in columns}
         self._check_switches()
+        _check_values(self)
 
     def _check_switches(self) -> None:  # noqa: B027 (a hook each piece with switches extends)
         """Refuse a switch the format leaves unset or sets to describe no file: none, unless a piece has switches.
