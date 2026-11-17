@@ -43,7 +43,7 @@ from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzippe
 from flatread.core import File, _check_renamed
 from flatread.delimited import HeadersCsv
 from flatread.errors import CorruptArchiveError, LayoutError, ReadError, UnknownLayoutError
-from flatread.markup import NestedXml
+from flatread.markup import NestedXml, _malformed
 
 __all__ = ["SdmxCsv", "SdmxData", "SdmxObservations", "SdmxSeries", "SdmxStructure"]
 
@@ -178,10 +178,24 @@ class _Metered:
         #: Whether the parse is outside any series: the reader sets it as each series starts and ends.
         self.outside = True
         self._loose = 0
+        #: The line and column of the last byte read that is no whitespace, as :func:`~flatread.markup._end` gives a
+        #: whole body's, once the stream is spent: where a fault stands if the message was cut.
+        self.end: tuple[int, int] | None = None
+        self._last = (1, 0)
+        self._lines, self._column = 1, 0
 
     def read(self, size: int = -1) -> bytes:
         """Return up to *size* more bytes of the message, counting those read outside a series."""
         data = self._stream.read(size)
+        if not data:
+            self.end = self._last
+        elif text := data.rstrip():
+            lines = text.count(b"\n")
+            tail = len(text) - text.rfind(b"\n") - 1
+            self._last = (self._lines + lines, tail + (0 if lines else self._column))
+        lines = data.count(b"\n")
+        tail = len(data) - data.rfind(b"\n") - 1
+        self._lines, self._column = self._lines + lines, tail + (0 if lines else self._column)
         if self.outside:
             self._loose += len(data)
             if self._loose > _LOOSE:
@@ -337,8 +351,8 @@ class SdmxData[RowT: msgspec.Struct](File[RowT]):
                     element.tail = tail
                     _drop_read(element, parent, self._series, sets[-1], name)
             except etree.XMLSyntaxError as e:
-                msg = f"{name} is not well-formed XML: {e}"
-                raise ReadError(msg) from e
+                error = _malformed(name, e, stream.end)
+                raise error from e
             self._ended(name, sets, last, found=found)
 
     def _ended(self, name: str, sets: list[str], last: etree._Element | None, *, found: int) -> None:

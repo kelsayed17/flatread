@@ -116,6 +116,23 @@ _BOOLEAN_WORDS: Final = Flag("true", "false")
 _KINDS: Final[Mapping[object, str]] = {dt.date: "date", dt.datetime: "datetime", dt.time: "time-of-day"}
 
 
+def _check_separator(reader: object, separator: str, quote_char: str | None, *, byte: bool = True) -> None:
+    """Refuse a *separator* (or a *quote_char*) no delimited file is split by: one character, ending no line.
+
+    :mod:`csv` takes one character and polars, where *byte*, one byte (``"||"`` or ``""`` raised a ``TypeError`` once
+    read); a separator that is the quote character, or a line ending, describes no file.
+    """
+    name = type(reader).__name__
+    one = "one character of one byte" if byte else "one character"
+    for what, character in (("separator", separator), ("_quote_char", quote_char)):
+        if character is not None and (len(character.encode() if byte else character) != 1 or character in "\r\n"):
+            msg = f"the {name} format's {what} is {character!r}, not {one} that ends no line"
+            raise LayoutError(msg)
+    if separator == quote_char:
+        msg = f"the {name} format's separator {separator!r} is its _quote_char too, which tells no cell's end"
+        raise LayoutError(msg)
+
+
 class CsvFile[RowT: msgspec.Struct](File[RowT]):
     """A clean delimited file, read by ``pl.read_csv`` with a schema its row struct's ``Label`` fields lay out."""
 
@@ -156,6 +173,7 @@ class CsvFile[RowT: msgspec.Struct](File[RowT]):
         reads, a piece listed after this reader (its ``_read`` would never run), or a piece that cleans cells
         (:class:`~flatread.core.Thousands`) composed with a reader that reads them typed, not as text.
         """
+        _check_separator(self, separator, self._quote_char)
         mro = [cls for cls in type(self).__mro__ if cls is not File]
         if after := [cls.__name__ for cls in mro[mro.index(CsvFile) + 1 :] if "_read" in vars(cls)]:
             msg = (
@@ -892,6 +910,7 @@ class CsvText[RowT: msgspec.Struct](GridFile[RowT]):
         self, row: type[RowT], *, header_row: int = 1, separator: str = ",", null_values: Sequence[str] = ()
     ) -> None:
         """Lay out a table of *row* under its header in the file's row *header_row*, *separator* between cells."""
+        _check_separator(self, separator, '"', byte=False)
         super().__init__(row, header_row=header_row, null_values=null_values)
         self._separator = separator
 

@@ -14,13 +14,21 @@ Both are text tables (:class:`~flatread.core.TextFile`):
 import types
 import typing
 from collections.abc import Collection, Mapping
+from typing import Final
 
 import msgspec
 import polars as pl
 from lxml import etree
 
 from flatread.core import TextFile
-from flatread.errors import EmptyBodyError, LayoutError, ReadError, UnknownLayoutError
+from flatread.errors import (
+    EmptyBodyError,
+    EncodingError,
+    LayoutError,
+    ReadError,
+    TruncatedFileError,
+    UnknownLayoutError,
+)
 
 __all__ = ["NestedXml", "XmlFile", "parse_xml"]
 
@@ -47,8 +55,41 @@ def parse_xml(body: bytes) -> etree._Element:
     try:
         return etree.XML(body, parser)
     except etree.XMLSyntaxError as exc:
-        msg = f"the body is not well-formed XML: {exc}"
-        raise ReadError(msg) from exc
+        # libxml2 before 2.14 reads a NUL as the input's end, and so a body holding one as cut short: it is not.
+        error = _malformed("the body", exc, None if b"\0" in body else _end(body), cut=b"\0" not in body)
+        raise error from exc
+
+
+#: libxml2's codes for a document that ends inside an element (``XML_ERR_TAG_NOT_FINISHED``), and for bytes no codec of
+#: its encoding reads or an encoding no codec reads (``XML_ERR_INVALID_ENCODING``, ``XML_ERR_UNSUPPORTED_ENCODING``).
+_CUT: Final = frozenset({77})
+_UNDECODED: Final = frozenset({32, 81})
+#: libxml2 before 2.14 (lxml's Windows wheels bundle 2.11) gives bytes that are not UTF-8 the code of any character it
+#: refuses (``XML_ERR_INVALID_CHAR``, 9), which a NUL takes too; its message alone tells them apart.
+_NOT_UTF8: Final = (9, "Input is not proper UTF-8")
+
+
+def _malformed(what: str, exc: etree.XMLSyntaxError, end: tuple[int, int] | None, *, cut: bool = True) -> ReadError:
+    """Return the error for *what* (``the body``, a member) lxml refused as *exc*, of the kind its fault is.
+
+    A body cut inside an element is :class:`~flatread.errors.TruncatedFileError`, as is one whose fault stands at its
+    text's *end*, the line and column of its last byte that is no whitespace (``<a><b>1</``: :func:`_end`); bytes its
+    encoding does not read are :class:`~flatread.errors.EncodingError`; any other fault a plain
+    :class:`~flatread.errors.ReadError`. Where *cut* is false, no fault is taken for a cut.
+    """
+    msg = f"{what} is not well-formed XML: {exc}"
+    code = getattr(exc, "code", None)  # libxml2's error code, which lxml-stubs leaves off XMLSyntaxError
+    if code in _UNDECODED or (code == _NOT_UTF8[0] and str(exc).startswith(_NOT_UTF8[1])):
+        return EncodingError(msg)
+    if cut and (code in _CUT or (end is not None and exc.position >= end)):
+        return TruncatedFileError(msg)
+    return ReadError(msg)
+
+
+def _end(body: bytes) -> tuple[int, int]:
+    """Return the line (from 1) and column (from 1, in bytes) of *body*'s last byte that is no whitespace."""
+    text = body.rstrip()
+    return text.count(b"\n") + 1, len(text.rpartition(b"\n")[2])
 
 
 class XmlFile[RowT: msgspec.Struct](TextFile[RowT]):

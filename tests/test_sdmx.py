@@ -12,7 +12,7 @@ import msgspec
 import pytest
 
 from flatread import sdmx
-from flatread.errors import LayoutError, ReadError
+from flatread.errors import LayoutError, ReadError, TruncatedFileError
 from flatread.fields import Label
 from flatread.sdmx import SdmxCsv, SdmxData, SdmxObservations, SdmxSeries, SdmxStructure
 
@@ -333,6 +333,11 @@ def test_a_message_that_is_not_its_format_s_raises(body: bytes, message: str) ->
         _SeriesOf(_Series, "D").frame(body)
 
 
+def test_a_message_cut_short_is_truncated() -> None:
+    with pytest.raises(TruncatedFileError, match=r"^the body is not well-formed XML: expected '>'"):
+        _SeriesOf(_Series, "D").frame(_message(_GOOD)[:-20])
+
+
 @pytest.mark.parametrize(
     ("obs", "message"),
     [
@@ -358,3 +363,14 @@ def test_a_member_that_will_not_inflate_raises() -> None:
     body[60] ^= 0xFF
     with pytest.raises(ReadError, match=r"^the zip's 'T.xml' will not inflate"):
         _Zipped(_Obs, "D").frame(bytes(body))
+
+
+def test_a_streamed_message_s_end_is_its_last_byte_that_is_no_whitespace() -> None:
+    stream = sdmx._Metered("the body", io.BytesIO(b"<a>\n<b>1</b"))
+    while stream.read(4):
+        pass
+    assert stream.end == (2, 7)
+    blank = sdmx._Metered("the body", io.BytesIO(b"<a>1\n" + b" " * 8))
+    while blank.read(4):
+        pass
+    assert blank.end == (1, 4)

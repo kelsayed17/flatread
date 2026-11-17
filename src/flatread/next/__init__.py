@@ -1,0 +1,73 @@
+"""flatread 8.0's reader, a prototype: a row struct and a pipeline of stage values, not a class hierarchy.
+
+``Reader(Row, Csv(separator="|"), table=Trailer(...), shape=Long(...), cells=[Padded()], source=Zip(...))``: each
+stage is one frozen value with one job, configured by keyword, and a stage of a format's own is a class implementing
+its protocol (:class:`Source`, :class:`Format`, :class:`TableFinder`, :class:`Shape`, :class:`Cleaner`,
+:class:`Records`), handed the read's :class:`ReadContext`. One :class:`Engine` types every format's table. Not yet
+stable: this module's names may change in any release until 8.0.
+"""
+
+from flatread.next._engine import AsWritten, Engine
+from flatread.next._model import (
+    Cells,
+    Cleaner,
+    Format,
+    Grid,
+    Kind,
+    Lines,
+    ReadContext,
+    Records,
+    Shape,
+    Source,
+    Stream,
+    Table,
+    TableFinder,
+)
+from flatread.next._reader import Reader
+from flatread.next._stages import (
+    Csv,
+    Derived,
+    Header,
+    Layout,
+    Long,
+    Observations,
+    Padded,
+    Pdf,
+    Sdmx,
+    Sheet,
+    Titled,
+    Trailer,
+    Zip,
+)
+
+__all__ = [
+    "AsWritten",
+    "Cells",
+    "Cleaner",
+    "Csv",
+    "Derived",
+    "Engine",
+    "Format",
+    "Grid",
+    "Header",
+    "Kind",
+    "Layout",
+    "Lines",
+    "Long",
+    "Observations",
+    "Padded",
+    "Pdf",
+    "ReadContext",
+    "Reader",
+    "Records",
+    "Sdmx",
+    "Shape",
+    "Sheet",
+    "Source",
+    "Stream",
+    "Table",
+    "TableFinder",
+    "Titled",
+    "Trailer",
+    "Zip",
+]
