@@ -81,6 +81,9 @@ def records_of(text: pl.DataFrame) -> Cells:
 #: lone CR, is not split fast.
 _OTHER_BREAKS = "\x00\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
 
+#: The text fastexcel gives a moment cell (a date, a time, both): what makes a cell's column loaded as times too.
+_MOMENT_TEXT = r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$"
+
 # --- Sources ---
 
 
@@ -240,51 +243,79 @@ class Sheet:
     sheet: str | None = None
 
     def grid(self, stream: Stream, read: ReadContext) -> Cells:
-        """Return the sheet's cells and their kinds."""
+        """Return the sheet's cells and their kinds, the sheet loaded three times, a column holding a moment four."""
         del read
-        from flatread.sheets import _loading, _sheet_named, _text_grid, _workbook  # noqa: PLC0415 (the excel extra)
+        from flatread.sheets import _loading, _sheet_named, _workbook  # noqa: PLC0415 (the excel extra)
 
         workbook = _workbook(stream.read())
         name = _sheet_named(workbook, self.sheet)
-        _, text = _text_grid(workbook, name, ())
-        if not text.width:
-            return Cells(text=text, raw=_unraw(text.height), numbers=_numbered(text.height))
         with _loading(f"the workbook's {name!r} sheet will not load"):
-            loads = {
-                kind: workbook.load_sheet(name, header_row=None, skip_rows=0, dtypes=kind).to_polars()
-                for kind in ("float", "boolean", "datetime")
-            }
-        for kind, frame in loads.items():
-            if frame.shape != text.shape:
-                msg = f"the {name!r} sheet's {kind} load is {frame.shape}, not its text's {text.shape}"
+            sheet = workbook.load_sheet(name, header_row=None, skip_rows=0, dtypes="string")
+            places = [column.absolute_index for column in sheet.available_columns()]
+            text = sheet.to_polars()
+            if not text.width:
+                return Cells(text=text, raw=_unraw(text.height), numbers=_numbered(text.height))
+            floats, bools = (
+                workbook.load_sheet(name, header_row=None, skip_rows=0, dtypes=dict.fromkeys(places, kind)).to_polars()
+                for kind in ("float", "boolean")
+            )
+        names = [str(at) for at in range(text.width)]
+        for kind, frame in (("text", text), ("float", floats), ("boolean", bools)):
+            if frame.shape != (text.height, len(places)):
+                msg = f"the {name!r} sheet's {kind} load is {frame.shape}, not {(text.height, len(places))}"
                 raise ReadError(msg)
-            frame.columns = text.columns
-        floats = loads["float"].cast(pl.Float64, strict=False)
-        moments = loads["datetime"].cast(pl.Datetime("us"), strict=False)
-        bools = loads["boolean"]
-        # fastexcel's loads tell a cell's kind apart: a number or a boolean loads as a boolean, a text never, and only
-        # a boolean's text is ``true`` or ``false``; a moment loads as a time and never as a float.
-        kinds = pl.concat(
-            [
-                text,
-                floats.rename(lambda c: f"{c}:f"),
-                bools.rename(lambda c: f"{c}:b"),
-                moments.rename(lambda c: f"{c}:d"),
-            ],
-            how="horizontal",
-        ).select(
+            frame.columns = names
+        floats = floats.cast(pl.Float64, strict=False)
+        # A number's text with every digit it holds (fastexcel's text rounds it), and a cell of spaces none.
+        text = pl.concat([text, floats.rename(lambda c: f"{c}:f")], how="horizontal").select(
+            pl.when(pl.col(f"{c}:f").is_not_null() & (pl.col(c).cast(pl.Float64, strict=False) != pl.col(f"{c}:f")))
+            .then(pl.col(f"{c}:f").cast(pl.String))
+            .otherwise(pl.col(c))
+            .alias(c)
+            for c in names
+        )
+        text = text.with_columns(pl.when(pl.all().str.strip_chars() != "").then(pl.all()).name.keep())
+        # A cell's kind, from its loads: a number loads as a float and a boolean, a boolean as both too but its text
+        # is ``true`` or ``false``, a text loads as neither (a numeral as a float alone). A moment loads as neither
+        # and its text is a time: only a column holding such a cell is loaded a fourth time, as times, to tell a
+        # moment from a text written like one (and so a column of numbers alone is never loaded as times, which
+        # panics on a number such as -1e300, far outside the years a time holds).
+        both = pl.concat([text, floats.rename(lambda c: f"{c}:f"), bools.rename(lambda c: f"{c}:b")], how="horizontal")
+        kinds = both.select(
             pl.when(pl.col(c).is_null())
             .then(None)
             .when(pl.col(f"{c}:b").is_not_null() & pl.col(c).is_in(["true", "false"]))
             .then(pl.lit("bool"))
             .when(pl.col(f"{c}:b").is_not_null() & pl.col(f"{c}:f").is_not_null())
             .then(pl.lit("number"))
-            .when(pl.col(f"{c}:d").is_not_null() & pl.col(f"{c}:f").is_null())
-            .then(pl.lit("moment"))
+            .when(pl.col(f"{c}:b").is_null() & pl.col(f"{c}:f").is_null() & pl.col(c).str.contains(_MOMENT_TEXT))
+            .then(pl.lit("maybe"))
             .otherwise(pl.lit("text"))
             .alias(c)
-            for c in text.columns
+            for c in names
         )
+        moments = pl.DataFrame({c: pl.Series(c, [None] * text.height, pl.Datetime("us")) for c in names})
+        if timed := [c for c in names if (kinds[c] == "maybe").any()]:
+            with _loading(f"the workbook's {name!r} sheet will not load its times"):
+                loaded = workbook.load_sheet(
+                    name,
+                    header_row=None,
+                    skip_rows=0,
+                    use_columns=[places[int(c)] for c in timed],
+                    dtypes={places[int(c)]: "datetime" for c in timed},
+                ).to_polars()
+            if loaded.shape != (text.height, len(timed)):
+                msg = f"the {name!r} sheet's datetime load is {loaded.shape}, not {(text.height, len(timed))}"
+                raise ReadError(msg)
+            loaded.columns = timed
+            moments = moments.with_columns(loaded.cast(pl.Datetime("us"), strict=False))
+            kinds = kinds.with_columns(
+                pl.when(pl.col(c) == "maybe")
+                .then(pl.when(moments[c].is_not_null()).then(pl.lit("moment")).otherwise(pl.lit("text")))
+                .otherwise(pl.col(c))
+                .alias(c)
+                for c in timed
+            )
         raw = text.select(pl.concat_str(pl.all().fill_null(""), separator="\t").str.strip_chars_end("\t")).to_series()
         return Cells(
             text=text,

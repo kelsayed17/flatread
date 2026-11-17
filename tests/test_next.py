@@ -593,14 +593,16 @@ def test_a_rust_panic_is_a_read_error_and_any_other_base_exception_passes() -> N
         fr.Reader(_Price, Raising(KeyboardInterrupt())).frame(b"")
 
 
-def test_a_sheet_s_loads_that_disagree_on_its_shape_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("kind", ["float", "datetime"])
+def test_a_sheet_s_loads_that_disagree_on_its_shape_raise(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
     import fastexcel  # noqa: PLC0415 (the excel extra)
 
     load = fastexcel.ExcelReader.load_sheet
 
     def short(self: fastexcel.ExcelReader, *args: typing.Any, **kwargs: typing.Any) -> object:  # noqa: ANN401
         sheet = load(self, *args, **kwargs)
-        return _Short(sheet) if kwargs.get("dtypes") == "float" else sheet
+        dtypes = kwargs.get("dtypes")
+        return _Short(sheet) if isinstance(dtypes, dict) and kind in dtypes.values() else sheet
 
     class _Short:
         def __init__(self, sheet: typing.Any) -> None:  # noqa: ANN401
@@ -612,8 +614,8 @@ def test_a_sheet_s_loads_that_disagree_on_its_shape_raise(monkeypatch: pytest.Mo
             return frame.head(0)
 
     monkeypatch.setattr(fastexcel.ExcelReader, "load_sheet", short)
-    with pytest.raises(ReadError, match="float load"):
-        _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"], ["a", 7, True, None]]}))
+    with pytest.raises(ReadError, match=f"{kind} load"):
+        _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"], ["a", 7, True, dt.date(2026, 1, 2)]]}))
 
 
 def test_titled_states_its_titles_groups_and_a_long_sheet_s_keys_are_text() -> None:
@@ -665,3 +667,18 @@ def test_a_csv_s_dates_alone_booleans_and_as_written_text_under_a_cleaner() -> N
     assert reader.rows(b"name,open\n a ,true\nb, false\n") == [Open(" a ", open=True), Open("b", open=False)]
     with pytest.raises(ReadError, match="'yes' is not a true or false: row 2"):
         fr.Reader(Open, fr.Csv()).frame(b"name,open\na,yes\n")
+
+
+def test_a_sheet_reads_a_huge_number_and_a_text_written_like_a_moment() -> None:
+    class Mark(msgspec.Struct, frozen=True):
+        size: float
+        note: str
+        at: dt.date | None
+
+    body = workbook(
+        {"S": [["size", "note", "at"], [-1e300, "2026-01-02 03:04:05", dt.date(2026, 1, 2)], [2, "x", None]]}
+    )
+    assert fr.Reader(Mark, fr.Sheet()).rows(body) == [
+        Mark(-1e300, "2026-01-02 03:04:05", dt.date(2026, 1, 2)),
+        Mark(2.0, "x", None),
+    ]
