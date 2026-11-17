@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Annotated
 import msgspec
 import pytest
 
+from flatread import next as fr
 from flatread.delimited import CsvFile
 from flatread.fields import Format, Label, Span
 from flatread.fixed import FixedWidthFile
@@ -102,6 +103,12 @@ _FIXED = b"".join(
     f"USC{i % 10_000:08}{1900 + i % 120}{'' if i % 11 == 0 else f'{i / 10:.1f}':>8}\n".encode() for i in range(50_000)
 )
 
+# flatread.next, the 8.0 prototype, reading the same bodies into the same structs: its cost beside 7.x's.
+NEXT_HPI = fr.Reader(Hpi, fr.Csv(), null_values=["."])
+NEXT_TENORS = fr.Reader(Tenor, fr.Csv(), shape=fr.Long(keys=re.compile(r"Y\d{2}")))
+NEXT_RATES = fr.Reader(Rate, fr.Sheet(sheet="S"))
+NEXT_RATES_WITH_TOKENS = fr.Reader(Rate, fr.Sheet(sheet="S"), null_values=["."])
+
 CASES: dict[str, tuple[Callable[[bytes], object], bytes]] = {
     "csv": (HPI.frame, _CSV),
     "csv_quoted": (HPI.frame, _QUOTED),
@@ -110,6 +117,12 @@ CASES: dict[str, tuple[Callable[[bytes], object], bytes]] = {
     "sheet_tokens": (RATES_WITH_TOKENS.frame, _SHEET_TOKENS),
     "fixed_width": (STATIONS.frame, _FIXED),
     "csv_rows": (HPI.rows, _CSV),
+    "next_csv": (NEXT_HPI.frame, _CSV),
+    "next_csv_quoted": (NEXT_HPI.frame, _QUOTED),
+    "next_csv_long": (NEXT_TENORS.frame, _WIDE),
+    "next_sheet": (NEXT_RATES.frame, _SHEET),
+    "next_sheet_tokens": (NEXT_RATES_WITH_TOKENS.frame, _SHEET_TOKENS),
+    "next_csv_rows": (NEXT_HPI.rows, _CSV),
 }
 
 
