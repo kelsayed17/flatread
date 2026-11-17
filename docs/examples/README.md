@@ -1,8 +1,7 @@
 # Reader examples
 
 Each section below is one reader, or one of its switches, shown on a short excerpt of a real file that needs it: the
-excerpt's file and where it was recorded (a cassette in prism-clients, where every excerpt was taken), the reader that
-reads it (linked to its module) and the prism-clients class that uses it, then the excerpt itself. Near-twins link
+excerpt's file and its publisher, the reader that reads it (linked to its module), then the excerpt itself. Near-twins link
 each other and say the difference in one line. [`README.md`](../../README.md) introduces the row struct, the markers
 and how the readers compose.
 
@@ -16,7 +15,7 @@ one flatread has.
 
 ### `CsvFile`
 
-[`csv_file.csv`](csv_file.csv), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[VX_2014-01-22].yaml`, interaction 0. Read by [`CsvFile`](../../src/flatread/delimited.py), in cboe `_FuturesContractCsv`.
+[`csv_file.csv`](csv_file.csv), an excerpt of a file Cboe publishes. Read by [`CsvFile`](../../src/flatread/delimited.py).
 
 A clean CSV: one header line, then a row per line, CRLF.
 
@@ -29,7 +28,7 @@ Trade Date,Futures,Open,High,Low,Close,Settle,Change,Total Volume,EFP,Open Inter
 
 ### `CsvFile._quote_char` (`None`)
 
-[`csv_file-quotechar.txt`](csv_file-quotechar.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[iba_199703].yaml`, interaction 0. Read by [`CsvFile._quote_char`](../../src/flatread/delimited.py), in federal_reserve `_IbaOfficesTsv`.
+[`csv_file-quotechar.txt`](csv_file-quotechar.txt), an excerpt of a file the Federal Reserve Board publishes. Read by [`CsvFile._quote_char`](../../src/flatread/delimited.py).
 
 A TSV whose 1997 FBO name holds an unpaired quote (`B.A., "RABOB`); read with `"` as the quote character, polars fails ("expected 102 rows, actual 103").
 
@@ -43,7 +42,7 @@ REP	REPRESENTATIVE OFFICE	RABOBANK NEDERLAND CHICAGO REP	CHICAGO, IL	IL	7	0	 	 	
 
 ### `CsvFile._header` (`False`)
 
-[`csv_file-header.txt`](csv_file-header.txt), recorded in prism-clients' `tests/occ/cassettes/test_recorded/test_endpoint[daily_delo_download].yaml`, interaction 0. Read by [`CsvFile._header`](../../src/flatread/delimited.py), in occ `_DailyDelo`.
+[`csv_file-header.txt`](csv_file-header.txt), an excerpt of a file the OCC publishes. Read by [`CsvFile._header`](../../src/flatread/delimited.py).
 
 OCC's daily listed-products directory: TAB-separated rows with no header line, read by position.
 
@@ -56,7 +55,7 @@ OCC's daily listed-products directory: TAB-separated rows with no header line, r
 
 ### `CsvFile._closing_separator` (`"always"`)
 
-[`csv_file-closingseparator.csv`](csv_file-closingseparator.csv), recorded in prism-clients' `tests/occ/cassettes/test_recorded/test_endpoint[stock_loan_bal_by_security].yaml`, interaction 0. Read by [`CsvFile._closing_separator`](../../src/flatread/delimited.py), in occ `_EndedCsv`.
+[`csv_file-closingseparator.csv`](csv_file-closingseparator.csv), an excerpt of a file the OCC publishes. Read by [`CsvFile._closing_separator`](../../src/flatread/delimited.py).
 
 Every line, the header too, ends with one comma more: read as a last column with an empty label that never holds a value. Unlike [`File._blank_columns`](#file_blank_columns), the closing cell has no label of its own.
 
@@ -69,7 +68,7 @@ AAAU  ,0.00,8692000.00,
 
 ### `CsvFile._closing_separator` (`"sometimes"`)
 
-[`csv_file-closingseparator-sometimes.csv`](csv_file-closingseparator-sometimes.csv), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[CFE_M05_VX].yaml`, interaction 0. Read by [`CsvFile._closing_separator`](../../src/flatread/delimited.py), in cboe `_FuturesArchiveCsv`.
+[`csv_file-closingseparator-sometimes.csv`](csv_file-closingseparator-sometimes.csv), an excerpt of a file Cboe publishes. Read by [`CsvFile._closing_separator`](../../src/flatread/delimited.py).
 
 From 2005-04-14 the rows end in an empty cell past the header's last: the comma closing a line is dropped where written. With `"always"`, the header's line ends with it too.
 
@@ -83,7 +82,7 @@ Trade Date,Futures,Open,High,Low,Close,Settle,Change,Total Volume,EFP,Open Inter
 
 ### `File._blank_columns`
 
-[`file-blankcolumns.csv`](file-blankcolumns.csv), recorded in prism-clients' `tests/nasdaqtrader/cassettes/test_recorded/test_dated[get_regsho_nasdaqth-20050113].yaml`, interaction 0. Read by [`File._blank_columns`](../../src/flatread/core.py), in nasdaqtrader `_ThresholdCsv` (`("Filler", "Filler")`).
+[`file-blankcolumns.csv`](file-blankcolumns.csv), an excerpt of a file Nasdaq Trader publishes. Read by [`File._blank_columns`](../../src/flatread/core.py).
 
 Two `Filler` columns no field reads, empty on every row: each is checked empty, then dropped. A column [`File._unread`](#file_unread) drops may hold anything.
 
@@ -96,7 +95,7 @@ ABSSF|AIRBOSS OF AMERICA CP NEW(F)|u|Y||
 
 ### `HeadersCsv`
 
-[`headers_csv.txt`](headers_csv.txt), recorded in prism-clients' `tests/finra/cassettes/test_recorded/test_file[FNYX-20090803].yaml`, interaction 0. Read by [`HeadersCsv`](../../src/flatread/delimited.py), in finra `_ShortVolumeCsv`.
+[`headers_csv.txt`](headers_csv.txt), an excerpt of a file FINRA publishes. Read by [`HeadersCsv`](../../src/flatread/delimited.py).
 
 The pre-2011 header, without `ShortExemptVolume` (that field reads as null), then rows and the trailer count `3108`, which has no line ending. The count is the whole file's, so a read of the excerpt alone fails it.
 
@@ -110,7 +109,7 @@ Date|Symbol|ShortVolume|TotalVolume|Market
 
 ### `NamedCsv`
 
-[`named_csv.csv`](named_csv.csv), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[vixpc].yaml`, interaction 0. Read by [`NamedCsv`](../../src/flatread/delimited.py), in cboe `_VixPutCall` (`_PutCallCsv`).
+[`named_csv.csv`](named_csv.csv), an excerpt of a file Cboe publishes. Read by [`NamedCsv`](../../src/flatread/delimited.py).
 
 The header writes the ratio second (`Date,VIX Put/Call Ratio,VIX Put Volume,VIX Call Volume,...`), so columns are matched by name, not by place.
 
@@ -123,7 +122,7 @@ Date,VIX Put/Call Ratio,VIX Put Volume,VIX Call Volume,Total VIX Options Volume
 
 ### `NamedCsv._required_fields`
 
-[`named_csv-carried.csv`](named_csv-carried.csv), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[sfos_202601].yaml`, interaction 0. Read by [`NamedCsv._required_fields`](../../src/flatread/delimited.py), in federal_reserve `_Sfos`.
+[`named_csv-carried.csv`](named_csv-carried.csv), an excerpt of a file the Federal Reserve Board publishes. Read by [`NamedCsv._required_fields`](../../src/flatread/delimited.py).
 
 The January 2026 survey's header is only the seven columns every header names; `agg_desc_2`, `agg_desc_3`, `dom` and `fore` are missing, so they read as null.
 
@@ -136,7 +135,7 @@ survey_date,question_no,question_desc,response_option,agg_type,agg_desc_1,all
 
 ### `TrailerCsv`
 
-[`trailer_csv.txt`](trailer_csv.txt), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[reg_sho_threshold_20261106].yaml`, interaction 0. Read by [`TrailerCsv`](../../src/flatread/delimited.py), in cboe `_ThresholdCsv`.
+[`trailer_csv.txt`](trailer_csv.txt), an excerpt of a file Cboe publishes. Read by [`TrailerCsv`](../../src/flatread/delimited.py).
 
 A `\ | ` table whose last line is the 14-digit generated-at stamp (`20261106030225`), read onto every row.
 
@@ -150,7 +149,7 @@ APLX|Tradr 2X Long APLD Daily ETF
 
 ### `SectionedCsv`
 
-[`sectioned_csv.csv`](sectioned_csv.csv), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[wpsr-table1.csv].yaml`, interaction 1. Read by [`SectionedCsv`](../../src/flatread/delimited.py), in eia `_Table`.
+[`sectioned_csv.csv`](sectioned_csv.csv), an excerpt of a file the U.S. Energy Information Administration publishes. Read by [`SectionedCsv`](../../src/flatread/delimited.py).
 
 Two tables back to back, each opening with its own `"STUB_1",...` header of a different width (stocks, then supply).
 
@@ -167,7 +166,7 @@ Two tables back to back, each opening with its own `"STUB_1",...` header of a di
 
 ### `TitledCsv`
 
-[`titled_csv.csv`](titled_csv.csv), recorded in prism-clients' `tests/nasdaqtrader/cassettes/test_recorded/test_file[get_bxo_lmm].yaml`, interaction 0. Read by [`TitledCsv`](../../src/flatread/delimited.py), in nasdaqtrader `_BxoLmmCsv`.
+[`titled_csv.csv`](titled_csv.csv), an excerpt of a file Nasdaq Trader publishes. Read by [`TitledCsv`](../../src/flatread/delimited.py).
 
 Three known title lines (an as-of date, `Number of Issues - 3448` as the `count` group, a blank line), each matched by its regex, then the header. The count is the whole file's, so a read of the excerpt alone fails it.
 
@@ -185,7 +184,7 @@ AAAU,"Goldman Sachs Physical Gold ETF Shares","IMC-CHICAGO, LLC"
 
 ### `PreambleCsv`
 
-[`preamble_csv.csv`](preamble_csv.csv), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[feds_note_FED_Note_Term_SOFR].yaml`, interaction 0. Read by [`PreambleCsv`](../../src/flatread/delimited.py), in federal_reserve `_Long` (`_Wide`, `FED_Note_Term_SOFR`).
+[`preamble_csv.csv`](preamble_csv.csv), an excerpt of a file the Federal Reserve Board publishes. Read by [`PreambleCsv`](../../src/flatread/delimited.py).
 
 A preamble of free-form lines (a disclaimer, empty `,,,,,,` lines, notes) above the line that opens with `DATE`, the first label. Source lines 2-4 are dropped: three quoted disclaimer paragraphs of 350-767 characters.
 
@@ -207,7 +206,7 @@ DATE,FORWARD_1M,FORWARD_3M,FORWARD_6M,REALIZED_1M,REALIZED_3M,REALIZED_6M
 
 ### `PaddedCsv`
 
-[`padded_csv.csv`](padded_csv.csv), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[spxpc].yaml`, interaction 0. Read by [`PaddedCsv`](../../src/flatread/delimited.py), in cboe `_SpxPutCall` (`_CboeCsv`).
+[`padded_csv.csv`](padded_csv.csv), an excerpt of a file Cboe publishes. Read by [`PaddedCsv`](../../src/flatread/delimited.py).
 
 From 2011-06-09 the rows pad each cell with a space (`06/09/2011, 1.43, 392746`), while the earlier rows above them do not.
 
@@ -222,7 +221,7 @@ Date,SPX Put/Call Ratio,SPX Put Volume,SPX Call Volume,Total SPX Options Volume
 
 ### `Thousands`, `ThousandsCsv`
 
-[`thousands_csv.txt`](thousands_csv.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[iba_fboshr].yaml`, interaction 0. Read by [`Thousands`](../../src/flatread/core.py) and [`ThousandsCsv`](../../src/flatread/delimited.py), in federal_reserve `_IBA_SHARES` (a plain `ThousandsCsv`).
+[`thousands_csv.txt`](thousands_csv.txt), an excerpt of a file the Federal Reserve Board publishes. Read by [`Thousands`](../../src/flatread/core.py) and [`ThousandsCsv`](../../src/flatread/delimited.py).
 
 Amounts with thousands separators (`1,782,319`), each read as its number. The same excerpt: a TSV whose amounts are grouped in thousands.
 
@@ -235,7 +234,7 @@ QTREND	TYPE	ASSETS	ASSETS_PCT	C&I_LOANS	C&I_LOANS_PCT	TOTAL_LOANS	TOTAL_LOANS_PC
 
 ### `Carried`
 
-[`carried.txt`](carried.txt), recorded in prism-clients' `tests/occ/cassettes/test_recorded/test_endpoint[onn_volume_download].yaml`, interaction 0. Read by [`Carried`](../../src/flatread/core.py), in occ `_OnnVolume`.
+[`carried.txt`](carried.txt), an excerpt of a file the OCC publishes. Read by [`Carried`](../../src/flatread/core.py).
 
 A group (`VIX`, `VX`) and its class are printed on the first line only; the lines below leave the first cell empty, and the value is carried down.
 
@@ -253,7 +252,7 @@ VX    	UX1E  	F	2	9.09	0	0.00	2	9.09	0	0.00	2	9.09
 
 ### `CsvText`
 
-[`csv_text.csv`](csv_text.csv), recorded in prism-clients' `tests/treasury/cassettes/test_tic_s_tables/test_recorded[oilexp_sdata_hist_2003-2014.csv].yaml`, interaction 0. Read by [`CsvText`](../../src/flatread/delimited.py), in treasury `_TicCsv` (`_TIC_GROSS_TRANSACTIONS_CSV`).
+[`csv_text.csv`](csv_text.csv), an excerpt of a file the U.S. Treasury publishes. Read by [`CsvText`](../../src/flatread/delimited.py).
 
 A title, a units line, a band row (`<---Gross Purchases--->`) and four stacked header rows above `Country Name,Code,Month,...`, then a dashes line and monthly rows. It is a grid for `_above`.
 
@@ -273,7 +272,7 @@ Bahrain,40703,2013-03,51,0,4,63,77,1,51,5,3,84,87,17
 
 ### `CsvText._misquoted`
 
-[`csv_text-misquoted.csv`](csv_text-misquoted.csv), recorded in prism-clients' `tests/treasury/cassettes/test_tic_securities/test_recorded[slt3d_globl].yaml`, lines 15-16 and 17247-17254. Read by [`CsvText._misquoted`](../../src/flatread/delimited.py), in treasury `_TicCsv` (`_SLT3D_GLOBL_CSV`).
+[`csv_text-misquoted.csv`](csv_text-misquoted.csv), an excerpt of a file the U.S. Treasury publishes. Read by [`CsvText._misquoted`](../../src/flatread/delimited.py).
 
 Monthly rows quoted cleanly, then prose notes cut at fixed widths that misquote (`"ts." Holdings o"`): with `csv`'s `strict` on, the file fails (`',' expected after '"'`). Unlike [`CsvFile._quote_char`](#csvfile_quote_char-none), a clean quoted cell still holds its commas (`"5,367"`).
 
@@ -292,7 +291,7 @@ Monthly rows quoted cleanly, then prose notes cut at fixed widths that misquote 
 
 ### `BlankEnded`
 
-[`blank_ended.csv`](blank_ended.csv), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[g17_mv_sales_sf].yaml`, interaction 0. Read by [`BlankEnded`](../../src/flatread/grids.py), in federal_reserve `_SeasonalFactors` (`mv_sales_sf`).
+[`blank_ended.csv`](blank_ended.csv), an excerpt of a file the Federal Reserve Board publishes. Read by [`BlankEnded`](../../src/flatread/grids.py).
 
 The months stop at a blank row; a `Last Updated:` note stands below it. The excerpt keeps the first two and last three months.
 
@@ -315,7 +314,7 @@ Last Updated:  9-30-2026,,,,,,
 
 ### `TitledGrid`
 
-[`titled_grid.csv`](titled_grid.csv), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[g17_seasadj_spec].yaml`, interaction 0. Read by [`TitledGrid`](../../src/flatread/grids.py), in federal_reserve `_SeasonalSpecs` and `_Holidays` (each with `BlankEnded`).
+[`titled_grid.csv`](titled_grid.csv), an excerpt of a file the Federal Reserve Board publishes. Read by [`TitledGrid`](../../src/flatread/grids.py).
 
 Prose, then two tables, each under a row that is its title alone (`I. Specifications for individual IP indexes`, `II. User-defined holiday variables`). The excerpt keeps two rows of the first table and one of the second.
 
@@ -340,7 +339,7 @@ Jan1972,-1.7000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,-0.4182,
 
 ### `BesideGrid`
 
-[`beside_grid.csv`](beside_grid.csv), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[payments_NACHA_Same_Day_Entry_Fee].yaml`, interaction 0. Read by [`BesideGrid`](../../src/flatread/grids.py), in federal_reserve `_SameDayAch` (columns B to D) and `_SameDayAchAdjustments` (F on).
+[`beside_grid.csv`](beside_grid.csv), an excerpt of a file the Federal Reserve Board publishes. Read by [`BesideGrid`](../../src/flatread/grids.py).
 
 Two fee reviews side by side, with an empty column between, their header cells holding line breaks. The excerpt keeps the first ten columns, written out again as CSV.
 
@@ -370,7 +369,7 @@ Projection ",0%,25%,30%,35%
 
 ### `SheetFile`
 
-[`sheet_file.txt`](sheet_file.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_hoam_county_data].yaml`, interaction 0. Read by [`SheetFile`](../../src/flatread/sheets.py), in atlanta_fed `_CountySheet`.
+[`sheet_file.txt`](sheet_file.txt), an excerpt of a file the Federal Reserve Bank of Atlanta publishes. Read by [`SheetFile`](../../src/flatread/sheets.py).
 
 A clean table: the header in row 1, then typed rows to the sheet's end (rows 2 to 392481).
 
@@ -390,7 +389,7 @@ Its twin: [`SheetText`](#sheettext) reads the whole sheet as a grid of text cell
 
 ### `SheetFile._header` (`False`)
 
-[`sheet_file-header.txt`](sheet_file-header.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_gdpnow_gdp_tracking_model_data_and_forecasts].yaml`, interaction 0, sheet `Sheet1`. Read by [`SheetFile._header`](../../src/flatread/sheets.py), in atlanta_fed `_HeaderlessSheet`.
+[`sheet_file-header.txt`](sheet_file-header.txt), an excerpt of a file the Federal Reserve Bank of Atlanta publishes (sheet `Sheet1`). Read by [`SheetFile._header`](../../src/flatread/sheets.py).
 
 No header: row 1 is empty and rows 2 to 20 are read by position (GDPNow's ticker map).
 
@@ -409,7 +408,7 @@ No header: row 1 is empty and rows 2 to 20 are read by position (GDPNow's ticker
 
 ### `File._unread`
 
-[`sheet_file-unread.txt`](sheet_file-unread.txt), recorded in prism-clients' `tests/frbsf/cassettes/test_recorded/test_file[get_cpi_contributors_data].yaml`, interaction 0, sheet `chart5_coreCPI_granularCont_MoM`. Read by [`SheetFile._unread`](../../src/flatread/sheets.py), in frbsf `_CategorySheet` (`_unread = ("", "notes")`).
+[`sheet_file-unread.txt`](sheet_file-unread.txt), an excerpt of a file the Federal Reserve Bank of San Francisco publishes (sheet `chart5_coreCPI_granularCont_MoM`). Read by [`SheetFile._unread`](../../src/flatread/sheets.py).
 
 Column A holds the sheet's own row numbers under an empty header cell, and BS holds the prose notes; neither is read.
 
@@ -426,7 +425,7 @@ Column A holds the sheet's own row numbers under an empty header cell, and BS ho
 
 ### `SheetFile._blank_rows` (`"drop"`)
 
-[`sheet_file-blankrows-drop.txt`](sheet_file-blankrows-drop.txt), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[vxoarchive].yaml`, interaction 0. Read by [`SheetFile._blank_rows`](../../src/flatread/sheets.py), in cboe `_VxoArchiveSheet`.
+[`sheet_file-blankrows-drop.txt`](sheet_file-blankrows-drop.txt), an excerpt of a file Cboe publishes. Read by [`SheetFile._blank_rows`](../../src/flatread/sheets.py).
 
 Row 3536, between 1999-12-31 and 2000-01-03, is empty and gets dropped. Unlike [`"keep"`](#sheetfile_blank_rows-keep), no row stands for it: the dates around it are all the table holds.
 
@@ -446,7 +445,7 @@ Row 3536, between 1999-12-31 and 2000-01-03, is empty and gets dropped. Unlike [
 
 ### `SheetFile._blank_rows` (`"keep"`)
 
-[`sheet_file-blankrows-keep.txt`](sheet_file-blankrows-keep.txt), recorded in prism-clients' `tests/cftc/cassettes/test_recorded/test_swaps_report[2013-08-07].yaml`, interaction 0, sheet `9a`. Read by [`SheetFile._blank_rows`](../../src/flatread/sheets.py), in cftc `_SwapsSheet`.
+[`sheet_file-blankrows-keep.txt`](sheet_file-blankrows-keep.txt), an excerpt of a file the CFTC publishes (sheet `9a`). Read by [`SheetFile._blank_rows`](../../src/flatread/sheets.py).
 
 Rows 10, 16 and 19 between the product groups are empty and stay rows with no values. Unlike [`"drop"`](#sheetfile_blank_rows-drop), each is a row, since the table numbers its rows by place.
 
@@ -472,7 +471,7 @@ Rows 10, 16 and 19 between the product groups are empty and stay rows with no va
 
 ### `SheetFile._strip`
 
-[`sheet_file-strip.txt`](sheet_file-strip.txt), recorded in prism-clients' `tests/cftc/cassettes/test_recorded/test_swaps_report[2015-01-07].yaml`, interaction 0, sheet `1`. Read by [`SheetFile._strip`](../../src/flatread/sheets.py), in cftc `_SwapsSheet`.
+[`sheet_file-strip.txt`](sheet_file-strip.txt), an excerpt of a file the CFTC publishes (sheet `1`). Read by [`SheetFile._strip`](../../src/flatread/sheets.py).
 
 Header row 1 is date cells (A1 empty). `_strip` makes them read from the sheet's own row as text. No recorded header cell is padded.
 
@@ -492,7 +491,7 @@ Header row 1 is date cells (A1 empty). `_strip` makes them read from the sheet's
 
 ### `SheetFile._above`
 
-[`sheet_file-above.txt`](sheet_file-above.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[wpsr-psw01.xls].yaml`, interaction 1, sheet `Data 1`. Read by [`SheetFile._above`](../../src/flatread/sheets.py), in eia `_Described`.
+[`sheet_file-above.txt`](sheet_file-above.txt), an excerpt of a file the U.S. Energy Information Administration publishes (sheet `Data 1`). Read by [`SheetFile._above`](../../src/flatread/sheets.py).
 
 The `Sourcekey` row 2 sits over the description row 3: each column's header is its series id over its description.
 
@@ -510,7 +509,7 @@ The `Sourcekey` row 2 sits over the description row 3: each column's header is i
 
 ### `PaddedSheet`
 
-[`padded_sheet.txt`](padded_sheet.txt), recorded in prism-clients' `tests/frbsf/cassettes/test_recorded/test_file[get_cyclical_acyclical_core_pce_data].yaml`, interaction 0, sheet `Data`. Read by [`PaddedSheet`](../../src/flatread/sheets.py), in frbsf `_CORE_PCE_CYCLICAL` (plain `PaddedSheet`).
+[`padded_sheet.txt`](padded_sheet.txt), an excerpt of a file the Federal Reserve Bank of San Francisco publishes (sheet `Data`). Read by [`PaddedSheet`](../../src/flatread/sheets.py).
 
 The Stata months are text cells padded with a space (`' 1988m1'`); the figures are number cells.
 
@@ -527,7 +526,7 @@ The Stata months are text cells padded with a space (`' 1988m1'`); the figures a
 
 ### `BesideSheet`
 
-[`beside_sheet.txt`](beside_sheet.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_labor_force_participation_dynamics_build_your_own_decomposition].yaml`, interaction 0, sheet `Data_raw_forinteractive`. Read by [`BesideSheet`](../../src/flatread/sheets.py), in atlanta_fed `_BesideNoted`.
+[`beside_sheet.txt`](beside_sheet.txt), an excerpt of a file the Federal Reserve Bank of Atlanta publishes (sheet `Data_raw_forinteractive`). Read by [`BesideSheet`](../../src/flatread/sheets.py).
 
 The table is A:P (its first 16 columns, one per field). R:S are work columns beside it (`year.qtr`) that run on past its last row.
 
@@ -546,7 +545,7 @@ The table is A:P (its first 16 columns, one per field). R:S are work columns bes
 
 ### `BesideSheet._columns_at`
 
-[`beside_sheet-columnsat.txt`](beside_sheet-columnsat.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_gdpnow_gdp_tracking_model_data_and_forecasts].yaml`, interaction 0, sheet `FactorCNFAIData`. Read by [`BesideSheet._columns_at`](../../src/flatread/sheets.py), in atlanta_fed `_FactorCfnaiSheet`.
+[`beside_sheet-columnsat.txt`](beside_sheet-columnsat.txt), an excerpt of a file the Federal Reserve Bank of Atlanta publishes (sheet `FactorCNFAIData`). Read by [`BesideSheet._columns_at`](../../src/flatread/sheets.py).
 
 The table is E:H (header row 5), right of a Haver download in A:D.
 
@@ -570,7 +569,7 @@ Its twin: [`BesideGrid`](#besidegrid) cuts a band of a grid's columns, its end `
 
 ### `TypedHeaderSheet`
 
-[`typed_header_sheet.txt`](typed_header_sheet.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_gdpnow_gdp_tracking_model_data_and_forecasts].yaml`, interaction 0, sheet `Factor`. Read by [`TypedHeaderSheet`](../../src/flatread/sheets.py), in atlanta_fed `_DatedSheet`.
+[`typed_header_sheet.txt`](typed_header_sheet.txt), an excerpt of a file the Federal Reserve Bank of Atlanta publishes (sheet `Factor`). Read by [`TypedHeaderSheet`](../../src/flatread/sheets.py).
 
 Header row 1 is date cells, one month per column, read as their text.
 
@@ -585,7 +584,7 @@ Header row 1 is date cells, one month per column, read as their text.
 
 ### `TextNumbersSheet`
 
-[`text_numbers_sheet.txt`](text_numbers_sheet.txt), recorded in prism-clients' `tests/frbsf/cassettes/test_recorded/test_file[get_cpi_contributors_data].yaml`, interaction 0, sheet `chart2_headlineCPI_contr_YoY`. Read by [`TextNumbersSheet`](../../src/flatread/sheets.py), in frbsf `_ChartSheet`.
+[`text_numbers_sheet.txt`](text_numbers_sheet.txt), an excerpt of a file the Federal Reserve Bank of San Francisco publishes (sheet `chart2_headlineCPI_contr_YoY`). Read by [`TextNumbersSheet`](../../src/flatread/sheets.py).
 
 Every figure is a text cell, either padded (`' 1.67'`, `'   NA'`) or not (`'0.60'`); the notes column I is not read.
 
@@ -602,7 +601,7 @@ Every figure is a text cell, either padded (`' 1.67'`, `'   NA'`) or not (`'0.60
 
 ### `NotedSheet`
 
-[`noted_sheet.txt`](noted_sheet.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_web_file[WPSR_ErrataSheet.xlsx].yaml`, interaction 0, sheet `Appendix E`. Read by [`NotedSheet`](../../src/flatread/sheets.py), in eia `_ERRATA` (plain `NotedSheet`).
+[`noted_sheet.txt`](noted_sheet.txt), an excerpt of a file the U.S. Energy Information Administration publishes (sheet `Appendix E`). Read by [`NotedSheet`](../../src/flatread/sheets.py).
 
 The table ends at row 24, the first row with nothing past column A; the `Source:` line and the note below it are dropped.
 
@@ -622,7 +621,7 @@ Its twins: [`DatedSheet`](#datedsheet) runs while the first column holds dates, 
 
 ### `DatedSheet`
 
-[`dated_sheet.txt`](dated_sheet.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[ngs-ngshistory.xls].yaml`, interaction 1, sheet `weekly_net_changes`. Read by [`DatedSheet`](../../src/flatread/sheets.py), in eia `_NetChanges` (an `_Dated`).
+[`dated_sheet.txt`](dated_sheet.txt), an excerpt of a file the U.S. Energy Information Administration publishes (sheet `weekly_net_changes`). Read by [`DatedSheet`](../../src/flatread/sheets.py).
 
 Row 8 is dated and every value in it is empty; it still counts as a row, and the dated rows run to the sheet's end.
 
@@ -642,7 +641,7 @@ Its twin: [`NotedSheet`](#notedsheet) ends at the first row with nothing past th
 
 ### `EverySheet`
 
-[`every_sheet.txt`](every_sheet.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[ngs-ngsstats.xls].yaml`, interaction 0. Read by [`EverySheet`](../../src/flatread/sheets.py), in eia `_Years`.
+[`every_sheet.txt`](every_sheet.txt), an excerpt of a file the U.S. Energy Information Administration publishes. Read by [`EverySheet`](../../src/flatread/sheets.py).
 
 One sheet per year, each named `ngsstats YYYY (YYYY-YYYY)` (the last with a trailing space). Each is read as one table, and its year comes from the sheet name.
 
@@ -663,7 +662,7 @@ One sheet per year, each named `ngsstats YYYY (YYYY-YYYY)` (the last with a trai
 
 ### `TitledSheet`
 
-[`titled_sheet.txt`](titled_sheet.txt), recorded in prism-clients' `tests/freddie_mac/cassettes/test_recorded/test_file[cofi_repl_consumer].yaml`, interaction 0, sheet `Monthly Index`. Read by [`TitledSheet`](../../src/flatread/sheets.py), in freddie_mac `_CofiReplacementSheet`.
+[`titled_sheet.txt`](titled_sheet.txt), an excerpt of a file Freddie Mac publishes (sheet `Monthly Index`). Read by [`TitledSheet`](../../src/flatread/sheets.py).
 
 One title row (B1, plus the link in L1) sits over the header in row 2; the table opens in column B.
 
@@ -682,7 +681,7 @@ Its twin: [`PreambleSheet`](#preamblesheet) skips any number of rows unread and 
 
 ### `PreambleSheet`
 
-[`preamble_sheet.txt`](preamble_sheet.txt), recorded in prism-clients' `tests/new_york_fed/cassettes/test_recorded/test_web_file[nowcast_data_2002_2021].yaml`, interaction 0, sheet `Forecasts By Quarter`. Read by [`PreambleSheet`](../../src/flatread/sheets.py), in new_york_fed `_ByQuarterSheet`.
+[`preamble_sheet.txt`](preamble_sheet.txt), an excerpt of a file the Federal Reserve Bank of New York publishes (sheet `Forecasts By Quarter`). Read by [`PreambleSheet`](../../src/flatread/sheets.py).
 
 Rows 1 to 13 are a banner, a link and prose, and are not read. The header is row 14, the first row whose first cell is `Forecast Date`.
 
@@ -713,7 +712,7 @@ Its twins: [`TitledSheet`](#titledsheet) holds the header at a fixed row and che
 
 ### `OneSheet`
 
-[`one_sheet.txt`](one_sheet.txt), recorded in prism-clients' `tests/philadelphia_fed/cassettes/test_recorded/test_file[rtdsm_yngsub_qvqd].yaml`, interaction 0, sheet `YNGSUB`. Read by [`OneSheet`](../../src/flatread/sheets.py), in philadelphia_fed `_RtdsmVintages`.
+[`one_sheet.txt`](one_sheet.txt), an excerpt of a file the Federal Reserve Bank of Philadelphia publishes (sheet `YNGSUB`). Read by [`OneSheet`](../../src/flatread/sheets.py).
 
 The workbook's one sheet is named after its variable: `DATE`, then one column per vintage.
 
@@ -729,7 +728,7 @@ The workbook's one sheet is named after its variable: `DATE`, then one column pe
 
 ### `SheetText`
 
-[`sheet_text.txt`](sheet_text.txt), recorded in prism-clients' `tests/philadelphia_fed/cassettes/test_recorded/test_file[gdpplus_chart].yaml`, interaction 0, sheet `Sheet1`. Read by [`SheetText`](../../src/flatread/sheets.py), in philadelphia_fed `_GdpplusChartSheet`.
+[`sheet_text.txt`](sheet_text.txt), an excerpt of a file the Federal Reserve Bank of Philadelphia publishes (sheet `Sheet1`). Read by [`SheetText`](../../src/flatread/sheets.py).
 
 The grid `SheetText` cuts: every cell as text, a number to its every digit (`8.900755344981803`, where fastexcel's text is `8.900755345`); `OBS_QUARTER2` is not read.
 
@@ -750,7 +749,7 @@ Its twin: [`SheetFile`](#sheetfile) has fastexcel load one typed table under the
 
 ### `FilledHeader`
 
-[`filled_header.txt`](filled_header.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[disclosures_talf-transaction-specific-disclosures-01-11-24].yaml`, interaction 0, sheet `TALF Material Investors`. Read by [`FilledHeader`](../../src/flatread/grids.py), in federal_reserve `_DisclosureSheet` (each sheet of `_Disclosures`, a `EverySheet`).
+[`filled_header.txt`](filled_header.txt), an excerpt of a file the Federal Reserve Board publishes (sheet `TALF Material Investors`). Read by [`FilledHeader`](../../src/flatread/grids.py).
 
 The header is row 2, under a one-cell title: the first row filling at least two cells and at most three fewer than the fullest. Each release words its titles and labels its own way, so no label finds it. The one-cell note at the end is no record.
 
@@ -771,7 +770,7 @@ Its twins: [`TitledGrid`](#titledgrid) finds its header under a known title, and
 
 ### `BiffSheet`
 
-[`biff_sheet.txt`](biff_sheet.txt), recorded in prism-clients' `tests/philadelphia_fed/cassettes/test_recorded/test_file[spf_error_statistics_cpi].yaml`, interaction 0, sheet `Sheet 1`. Read by [`BiffSheet`](../../src/flatread/sheets.py), in philadelphia_fed `_SpfErrorForecasts` (`_SpfErrorStatistics`).
+[`biff_sheet.txt`](biff_sheet.txt), an excerpt of a file the Federal Reserve Bank of Philadelphia publishes (sheet `Sheet 1`). Read by [`BiffSheet`](../../src/flatread/sheets.py).
 
 A BIFF3 workbook that calamine cannot open: the grid xlrd reads, numbers to every digit, error cells as `#N/A`.
 
@@ -793,7 +792,7 @@ A BIFF3 workbook that calamine cannot open: the grid xlrd reads, numbers to ever
 
 ### `GroupedSheet` (and `_groups_row`)
 
-[`grouped_sheet.txt`](grouped_sheet.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_business_inflation_expectations_bie_data].yaml`, interaction 0, sheet `Quarterly- Price Change`. Read by [`GroupedSheet`](../../src/flatread/sheets.py), in atlanta_fed `_Grouped3`.
+[`grouped_sheet.txt`](grouped_sheet.txt), an excerpt of a file the Federal Reserve Bank of Atlanta publishes (sheet `Quarterly- Price Change`). Read by [`GroupedSheet`](../../src/flatread/sheets.py).
 
 The group headings in row 3 each head their own column and those to the right; the labels are in row 4, and G is a spacer with no label.
 
@@ -815,7 +814,7 @@ The group headings in row 3 each head their own column and those to the right; t
 
 ### `TextFile`
 
-[`text_file.txt`](text_file.txt), recorded in prism-clients' `tests/philadelphia_fed/cassettes/test_recorded/test_file[spf_release_dates].yaml` interaction 0. Read by [`TextFile`](../../src/flatread/core.py), in philadelphia_fed `_SpfReleaseDates`.
+[`text_file.txt`](text_file.txt), an excerpt of a file the Federal Reserve Bank of Philadelphia publishes. Read by [`TextFile`](../../src/flatread/core.py).
 
 a text file no shared piece reads: title, note, header, a survey per line (a year's first names it, a later row TAB-laid), the `*`/`**` marks and their notes, which the format gathers into cells itself (lines 1-9, 141-144, 185-188, 191-196)
 
@@ -847,7 +846,7 @@ Survey         True Deadline Date       News Release Date
 
 ### `XmlFile`
 
-[`xml_file.txt`](xml_file.txt), recorded in prism-clients' `tests/congress/cassettes/test_recorded/test_post_employment_notifications.yaml` interaction 0. Read by [`XmlFile`](../../src/flatread/markup.py), in congress `_HouseZip`.
+[`xml_file.txt`](xml_file.txt), an excerpt of a file the Clerk of the U.S. House publishes. Read by [`XmlFile`](../../src/flatread/markup.py).
 
 the zip's XML member: root `<PostEmployment>`, each child an `<Employee>` of four leaf elements in field order; two records and the closing tag (CRLF, BOM dropped)
 
@@ -872,7 +871,7 @@ the zip's XML member: root `<PostEmployment>`, each child an `<Employee>` of fou
 
 ### `NestedXml`
 
-[`nested_xml.xml`](nested_xml.xml), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[xbrlrss_2005_04].yaml` interaction 0. Read by [`NestedXml`](../../src/flatread/markup.py), in sec `_XbrlRss`.
+[`nested_xml.xml`](nested_xml.xml), an excerpt of a file the SEC publishes. Read by [`NestedXml`](../../src/flatread/markup.py).
 
 records nested at `channel/item/edgar:xbrlFiling` (and its `edgar:xbrlFile`s, read from attributes), the `edgar:` prefix bound on the filing; one item, two of its seven files, closing tags kept
 
@@ -911,7 +910,7 @@ records nested at `channel/item/edgar:xbrlFiling` (and its `edgar:xbrlFile`s, re
 
 ### `FixedWidthFile`
 
-[`fixed_width_file.txt`](fixed_width_file.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[lbr_current].yaml` interaction 0. Read by [`FixedWidthFile`](../../src/flatread/fixed.py), in federal_reserve `_LbrLines`.
+[`fixed_width_file.txt`](fixed_width_file.txt), an excerpt of a file the Federal Reserve Board publishes. Read by [`FixedWidthFile`](../../src/flatread/fixed.py).
 
 the large bank list: titles, a three-line header over a rule of dashes per column, banks at fixed places (a name wrapping onto the next line), the closing rule and summary (lines 1-14, 10256-10264)
 
@@ -943,7 +942,7 @@ Total assets (millions): Consolidated: $25,182,894 | Domestic: $22,528,407
 
 ### `FixedWidthFile._outside_fields`
 
-[`fixed_width_file-outside_fields.txt`](fixed_width_file-outside_fields.txt), recorded in prism-clients' `tests/occ/cassettes/test_recorded/test_endpoint[cont_volume_download].yaml` interaction 0. Read by [`FixedWidthFile._outside_fields`](../../src/flatread/fixed.py), in occ `_VolumeFile`.
+[`fixed_width_file-outside_fields.txt`](fixed_width_file-outside_fields.txt), an excerpt of a file the OCC publishes. Read by [`FixedWidthFile._outside_fields`](../../src/flatread/fixed.py).
 
 the title line writing the report date twice (`H11062026      11062026`), stated on every row, over packed fixed-width rows
 
@@ -957,7 +956,7 @@ A     A     P000000013000000000000000013OSTK20261120
 
 ### `FixedWidthFile._header` (`False`)
 
-[`fixed_width_file-header.txt`](fixed_width_file-header.txt), recorded in prism-clients' `tests/occ/cassettes/test_recorded/test_endpoint[trade_volume_download].yaml` interaction 0. Read by [`FixedWidthFile._header`](../../src/flatread/fixed.py), in occ `_VolumeFile` (also federal_reserve `_LbrLines`).
+[`fixed_width_file-header.txt`](fixed_width_file-header.txt), an excerpt of a file the OCC publishes. Read by [`FixedWidthFile._header`](../../src/flatread/fixed.py).
 
 no header line at all: rows straight under the title, cells run together, to the last line
 
@@ -972,7 +971,7 @@ ZYME  ZYME  L000000029000000000000000029OSTK
 
 ### `ReportFile`
 
-[`report_file.txt`](report_file.txt), recorded in prism-clients' `tests/noaa/cassettes/test_recorded/test_file[archives_heating_weekly_city].yaml` interaction 0. Read by [`ReportFile`](../../src/flatread/reports.py), in noaa `_SummaryReport`.
+[`report_file.txt`](report_file.txt), an excerpt of a file NOAA publishes. Read by [`ReportFile`](../../src/flatread/reports.py).
 
 a page-laid report: titles stating the period and season start, a legend, a five-line column header, then row lines (first four and the last)
 
@@ -1002,7 +1001,7 @@ Its twin: [`KeyedReport`](#keyedreport) reads a row's last cells as a run of val
 
 ### `ReportFile._preamble`
 
-[`report_file-preamble.txt`](report_file-preamble.txt), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[full_index_master_1993q1].yaml` interaction 0. Read by [`ReportFile._preamble`](../../src/flatread/reports.py), in sec `_EdgarIndex`.
+[`report_file-preamble.txt`](report_file-preamble.txt), an excerpt of a file the SEC publishes. Read by [`ReportFile._preamble`](../../src/flatread/reports.py).
 
 the whole 1993Q1 master index: free-form `Description:`... preamble and blank lines above the `CIK\ | ...` column line and its rule, then four filings (no final newline)
 
@@ -1026,7 +1025,7 @@ CIK|Company Name|Form Type|Date Filed|Filename
 
 ### `ReportFile._last_line`
 
-[`report_file-end.txt`](report_file-end.txt), recorded in prism-clients' `tests/occ/cassettes/test_recorded/test_endpoint[flex_reports_open_interest_equity].yaml` interaction 0. Read by [`ReportFile._last_line`](../../src/flatread/reports.py), in occ `_FlexOpenInterest` (via `_PrintReport`).
+[`report_file-end.txt`](report_file-end.txt), an excerpt of a file the OCC publishes. Read by [`ReportFile._last_line`](../../src/flatread/reports.py).
 
 the report's last non-blank line `***** END OF REPORT *****` after class and grand totals (a cut file would lack it); its head kept too (lines 1-14, 26553-26563)
 
@@ -1060,7 +1059,7 @@ the report's last non-blank line `***** END OF REPORT *****` after class and gra
 
 ### `KeyedReport`
 
-[`keyed_report.txt`](keyed_report.txt), recorded in prism-clients' `tests/treasury/cassettes/test_tic_securities/test_recorded[major_foreign_holders].yaml` interaction 0. Read by [`KeyedReport`](../../src/flatread/reports.py), in treasury `_MajorForeignHolders`.
+[`keyed_report.txt`](keyed_report.txt), an excerpt of a file the U.S. Treasury publishes. Read by [`KeyedReport`](../../src/flatread/reports.py).
 
 TIC table 5: titles, a `Country` header naming 13 months (the keys), each row a country then a run of 13 TAB-separated values read one row per month; notes below
 
@@ -1085,7 +1084,7 @@ The data in this table are collected primarily from U.S.-based custodians and br
 
 ### `Transcoded`
 
-[`transcoded.csv`](transcoded.csv), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[wpsr-table8.csv].yaml` interaction 1. Read by [`Transcoded`](../../src/flatread/archives.py), in eia `_Table`.
+[`transcoded.csv`](transcoded.csv), an excerpt of a file the U.S. Energy Information Administration publishes. Read by [`Transcoded`](../../src/flatread/archives.py).
 
 a Windows-1252 WPSR table: Guyana's row holds raw `0x96` en-dash bytes (no value), not UTF-8
 
@@ -1099,7 +1098,7 @@ a Windows-1252 WPSR table: Guyana's row holds raw `0x96` en-dash bytes (no value
 
 ### `Transcoded._eof`
 
-[`transcoded-eof.csv`](transcoded-eof.csv), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[wpsr-table1.csv].yaml` interaction 1. Read by [`Transcoded._eof`](../../src/flatread/archives.py), in eia `_Table`.
+[`transcoded-eof.csv`](transcoded-eof.csv), an excerpt of a file the U.S. Energy Information Administration publishes. Read by [`Transcoded._eof`](../../src/flatread/archives.py).
 
 table1.csv's second section (header, two rows), its last rows, and the DOS end-of-file byte `0x1A` after the last CRLF
 
@@ -1113,7 +1112,7 @@ table1.csv's second section (header, two rows), its last rows, and the DOS end-o
 
 ### `Transcoded._encodings`
 
-[`transcoded-encodings.csv`](transcoded-encodings.csv), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[fails_deliver_202001a].yaml`, interaction 0. Read by [`Transcoded._encodings`](../../src/flatread/archives.py), in sec `_FailsFile` (`("utf-8", "latin-1")`).
+[`transcoded-encodings.csv`](transcoded-encodings.csv), an excerpt of a file the SEC publishes. Read by [`Transcoded._encodings`](../../src/flatread/archives.py).
 
 January 2020's fails file is UTF-8 but for one latin-1 byte (`0xBB`, in `AM»RICAS`): the first encoding that decodes the body reads it. The zip's one member, cut to two rows; its trailers restated for them.
 
@@ -1127,7 +1126,7 @@ Trailer total quantity of shares 18752
 
 ### `FoundTable`
 
-[`found_table.csv`](found_table.csv), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_foia_log_2020_05_b7a].yaml` interaction 0. Read by [`FoundTable`](../../src/flatread/found.py), in sec `_FoiaLog` (`_Export`).
+[`found_table.csv`](found_table.csv), an excerpt of a file the SEC publishes. Read by [`FoundTable`](../../src/flatread/found.py).
 
 a free-text title line (`B7A FOIA log ending 5-31-2020,,,`) above the header the reader finds by its key's words (`Request ID`), then rows
 
@@ -1143,7 +1142,7 @@ Request ID,Requester Name,Organization,Request Description,Requested Date,Receiv
 
 ### `FoundTable._open`
 
-[`found_table-open.txt`](found_table-open.txt), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_advisers_2012_02_exempt].yaml` interaction 0. Read by [`FoundTable._open`](../../src/flatread/found.py), in sec `_Roster` (`_RosterSheet`).
+[`found_table-open.txt`](found_table-open.txt), an excerpt of a file the SEC publishes. Read by [`FoundTable._open`](../../src/flatread/found.py).
 
 an adviser roster (zipped xlsx): every header cell (SEC Region, Firm Type, ...) a column of its own, as written, none declared by the struct; columns M to BD dropped
 
@@ -1159,7 +1158,7 @@ an adviser roster (zipped xlsx): every header cell (SEC Region, Firm Type, ...) 
 
 ### `FoundTable(null_values=...)`
 
-[`found_table-nulls.csv`](found_table-nulls.csv), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_bdc_report_2020].yaml` interaction 0. Read by [`FoundTable(null_values=...)`](../../src/flatread/found.py), in sec `_Export` (`_CsvExport`).
+[`found_table-nulls.csv`](found_table-nulls.csv), an excerpt of a file the SEC publishes. Read by [`FoundTable(null_values=...)`](../../src/flatread/found.py).
 
 SEC's `[NULL]` in Address_2, read as no value only with `null_values`
 
@@ -1172,7 +1171,7 @@ File_No,CIK,Registrant_Name,Address_1,Address_2,City,State,Zip_Code,Filing Date,
 
 ### `FoundTable._numbered_rows`
 
-[`found_table-numbered_rows.csv`](found_table-numbered_rows.csv), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_bdc_report_2013].yaml` interaction 0. Read by [`FoundTable._row_count`](../../src/flatread/found.py), in sec `_Export` (`_CsvExport`).
+[`found_table-numbered_rows.csv`](found_table-numbered_rows.csv), an excerpt of a file the SEC publishes. Read by [`FoundTable._row_count`](../../src/flatread/found.py).
 
 2013's BDC export: an unlabelled first column of row numbers (`, File_No,...` then `1, 814-00637 ...`), padded cells and ` NULL ` too
 
@@ -1185,7 +1184,7 @@ File_No,CIK,Registrant_Name,Address_1,Address_2,City,State,Zip_Code,Filing Date,
 
 ### `FoundTable._section_prefix`
 
-[`found_table-section.csv`](found_table-section.csv), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_foia_log_2023_12].yaml` interaction 0. Read by [`FoundTable._section_prefix`](../../src/flatread/found.py), in sec `_FoiaLog`.
+[`found_table-section.csv`](found_table-section.csv), an excerpt of a file the SEC publishes. Read by [`FoundTable._section_prefix`](../../src/flatread/found.py).
 
 `Request Type: Consultation,,,` section lines stating `request_type` for the rows under them, and a section's `Total No of Requests ...` line
 
@@ -1200,7 +1199,7 @@ Request Type: Exhibit,,,,,,,,,,
 
 ### `FoundCsv`
 
-[`found_csv.csv`](found_csv.csv), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_filings_by_form_type].yaml` interaction 0. Read by [`FoundCsv`](../../src/flatread/found.py), in sec `_CsvExport`.
+[`found_csv.csv`](found_csv.csv), an excerpt of a file the SEC publishes. Read by [`FoundCsv`](../../src/flatread/found.py).
 
 a CSV export opening with a UTF-8 byte-order mark before its header (`Year,Type,Count`), dropped by FoundCsv
 
@@ -1214,7 +1213,7 @@ Year,Type,Count
 
 ### `FoundSheet`
 
-[`found_sheet.txt`](found_sheet.txt), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_municipal_advisors_2026_11].yaml` interaction 0. Read by [`FoundSheet`](../../src/flatread/sheets.py), in sec `_SheetExport`.
+[`found_sheet.txt`](found_sheet.txt), an excerpt of a file the SEC publishes. Read by [`FoundSheet`](../../src/flatread/sheets.py).
 
 a workbook's first sheet: two title rows, the header found in row 3, merged cells leaving blank columns between labels
 
@@ -1232,7 +1231,7 @@ a workbook's first sheet: two title rows, the header found in row 3, merged cell
 
 ### `HtmlFile`
 
-[`html_file.html`](html_file.html), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_listing_form_type].yaml` interaction 0. Read by [`HtmlFile`](../../src/flatread/pages.py), in sec `_FilePage`.
+[`html_file.html`](html_file.html), an excerpt of a file the SEC publishes. Read by [`HtmlFile`](../../src/flatread/pages.py).
 
 a clean `File / Format / Size` table: header row, one row, the link's href a field (page lines 1079-1098)
 
@@ -1261,7 +1260,7 @@ a clean `File / Format / Size` table: header row, one row, the link's href a fie
 
 ### `HtmlFile._table_selector`
 
-[`html_file-table.html`](html_file-table.html), recorded in prism-clients' fixture `tests/farside/pages/zec.html`. Read by [`HtmlFile._table_selector`](../../src/flatread/pages.py), in farside `_FlowTable`.
+[`html_file-table.html`](html_file-table.html), an excerpt of a file Farside Investors publishes. Read by [`HtmlFile._table_selector`](../../src/flatread/pages.py).
 
 the page's `table.etf` (three header rows, a day's row) among other tables (`table.tfooter`), which `_table_selector` leaves out
 
@@ -1299,7 +1298,7 @@ the page's `table.etf` (three header rows, a day's row) among other tables (`tab
 
 ### `HtmlRecords`
 
-[`html_records.html`](html_records.html), recorded in prism-clients' `tests/congress/cassettes/test_recorded/test_foreign_travel_reports[2024-q1].yaml` interaction 0. Read by [`HtmlRecords`](../../src/flatread/pages.py), in congress `_ForeignTravelReports`.
+[`html_records.html`](html_records.html), an excerpt of a file the Clerk of the U.S. House publishes. Read by [`HtmlRecords`](../../src/flatread/pages.py).
 
 records found by selector (`tbody tr`), each field by a selector inside its record (`a[href$='.txt']`); two records
 
@@ -1334,7 +1333,7 @@ records found by selector (`tbody tr`), each field by a selector inside its reco
 
 ### `HtmlRecords._heading_selector` / `_heading_pattern`
 
-[`html_records-heading.html`](html_records-heading.html), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_fomc_calendar.yaml` interaction 0. Read by [`HtmlRecords._heading_selector`](../../src/flatread/pages.py), in federal_reserve `_FomcCalendar` (also cftc `_SwapsReportsArchive`).
+[`html_records-heading.html`](html_records-heading.html), an excerpt of a file the Federal Reserve Board publishes. Read by [`HtmlRecords._heading_selector`](../../src/flatread/pages.py).
 
 `div.panel-heading` `2026 FOMC Meetings` / `2025 FOMC Meetings` heading the `div.fomc-meeting` records below, `year` stated from each; one meeting per year, blank lines and one meeting's link columns dropped
 
@@ -1364,7 +1363,7 @@ records found by selector (`tbody tr`), each field by a selector inside its reco
 
 ### `PdfFile`
 
-[`pdf_file.txt`](pdf_file.txt), recorded in prism-clients' `tests/congress/cassettes/test_recorded/test_periodic_transaction_report[20035492].yaml`, interaction 0. Read by [`PdfFile`](../../src/flatread/pdf.py), under [`LaidOutPdf`](../../src/flatread/pdf.py) in congress `_PeriodicTransactions`.
+[`pdf_file.txt`](pdf_file.txt), an excerpt of a file the Clerk of the U.S. House publishes. Read by [`PdfFile`](../../src/flatread/pdf.py), under [`LaidOutPdf`](../../src/flatread/pdf.py).
 
 the text layer in drawn order: label and value as separate segments, the header's labels out of order (`Type` before `Date`), the `Filing ID` line drawn last
 
@@ -1397,7 +1396,7 @@ p1 top 718.8: 'Filing ID #20035492'
 
 ### `LaidOutPdf`
 
-[`laid_out_pdf.txt`](laid_out_pdf.txt), recorded in prism-clients' `tests/congress/cassettes/test_recorded/test_periodic_transaction_report[20035492].yaml` interaction 0. Read by [`LaidOutPdf`](../../src/flatread/pdf.py), in congress `_PeriodicTransactions` (also `_Disclosure`).
+[`laid_out_pdf.txt`](laid_out_pdf.txt), an excerpt of a file the Clerk of the U.S. House publishes. Read by [`LaidOutPdf`](../../src/flatread/pdf.py).
 
 the same PTR laid out: top to bottom, one baseline one line, words at x; header edges, two rows, one wrapping its amount
 
@@ -1419,7 +1418,7 @@ p1 top 388.8: [ST]@103.9 $50,000@445.9
 
 ### `LaidOutPdf._slack`
 
-[`laid_out_pdf-slack.txt`](laid_out_pdf-slack.txt), recorded in prism-clients' `tests/congress/cassettes/test_recorded/test_periodic_transaction_report[20035492].yaml` interaction 0. Read by [`LaidOutPdf._slack`](../../src/flatread/pdf.py), in congress `_PeriodicTransactions` (also `_Disclosure`).
+[`laid_out_pdf-slack.txt`](laid_out_pdf-slack.txt), an excerpt of a file the Clerk of the U.S. House publishes. Read by [`LaidOutPdf._slack`](../../src/flatread/pdf.py).
 
 header and first row at two decimals: each cell 0.1-0.2 pt left of its label (Asset 104.07, cell 103.95)
 
@@ -1430,7 +1429,7 @@ p1 top 466.0: SP@64.95 Broadcom@103.95 Inc.@147.11 -@164.62 Common@170.15 Stock@
 
 ### `SdmxCsv`
 
-[`sdmx_csv.csv`](sdmx_csv.csv), recorded in prism-clients' `tests/ecb/cassettes/test_recorded/test_flow[AME].yaml` interaction 0. Read by [`SdmxCsv`](../../src/flatread/sdmx.py), in ecb `_SdmxCsv`.
+[`sdmx_csv.csv`](sdmx_csv.csv), an excerpt of a file the European Central Bank publishes. Read by [`SdmxCsv`](../../src/flatread/sdmx.py).
 
 a whole SDMX-CSV message: KEY, dimensions, TIME_PERIOD, OBS_VALUE, attributes upper-cased, two observations
 
@@ -1442,7 +1441,7 @@ AME.A.AUT.1.0.0.0.OVGD,A,AUT,1,0,0,0,OVGD,2027,422.839,A,,,P1Y,,,,,Gross domesti
 
 ### `SdmxStructure`
 
-[`sdmx_structure.txt`](sdmx_structure.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[dsr].yaml` interaction 0. Read by [`SdmxStructure`](../../src/flatread/sdmx.py), in federal_reserve `_Structure`.
+[`sdmx_structure.txt`](sdmx_structure.txt), an excerpt of a file the Federal Reserve Board publishes. Read by [`SdmxStructure`](../../src/flatread/sdmx.py).
 
 the zip's `DSR_struct.xml` cut to one code list (`CL_OBS_STATUS`, two codes), closing tags kept
 
@@ -1466,7 +1465,7 @@ the zip's `DSR_struct.xml` cut to one code list (`CL_OBS_STATUS`, two codes), cl
 
 ### `SdmxSeries`
 
-[`sdmx_series.txt`](sdmx_series.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[dsr].yaml` interaction 0. Read by [`SdmxSeries`](../../src/flatread/sdmx.py), in federal_reserve `_DdpSeries`.
+[`sdmx_series.txt`](sdmx_series.txt), an excerpt of a file the Federal Reserve Board publishes. Read by [`SdmxSeries`](../../src/flatread/sdmx.py).
 
 the zip's `DSR_data.xml` cut to one series: attributes and Short/Long Description annotations, two observations, closing tags kept
 
@@ -1495,7 +1494,7 @@ the zip's `DSR_data.xml` cut to one series: attributes and Short/Long Descriptio
 
 ### `SdmxObservations`
 
-[`sdmx_observations.txt`](sdmx_observations.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[g20].yaml` interaction 0. Read by [`SdmxObservations`](../../src/flatread/sdmx.py), in federal_reserve `_DdpObservations`.
+[`sdmx_observations.txt`](sdmx_observations.txt), an excerpt of a file the Federal Reserve Board publishes. Read by [`SdmxObservations`](../../src/flatread/sdmx.py).
 
 the zip's `G20_data.xml` cut to one TERMS series: five `frb:Obs`, three `ND` with the `-9999` sentinel, closing tags kept
 
@@ -1529,7 +1528,7 @@ the zip's `G20_data.xml` cut to one TERMS series: five `frb:Obs`, three `ND` wit
 
 ### `ZippedFile`
 
-[`zipped_file.txt`](zipped_file.txt), recorded in prism-clients' `tests/congress/cassettes/test_recorded/test_gift_travel_reports[2018].yaml` interaction 0. Read by [`ZippedFile`](../../src/flatread/archives.py), in congress `_HouseZip`.
+[`zipped_file.txt`](zipped_file.txt), an excerpt of a file the Clerk of the U.S. House publishes. Read by [`ZippedFile`](../../src/flatread/archives.py).
 
 a zip of `2018Travel.txt` and `2018Travel.xml`; only the member matching `[^/]*\.xml` is read (its first record shown)
 
@@ -1558,7 +1557,7 @@ Its twins: [`ZippedFiles`](#zippedfiles) reads every member the regex matches, i
 
 ### `ZippedFile._members`
 
-[`zipped_file-members.txt`](zipped_file-members.txt), recorded in prism-clients' `tests/cftc/cassettes/test_recorded/test_year_file[get_supplemental_cit].yaml` interaction 0. Read by [`ZippedFile._members`](../../src/flatread/archives.py), in cftc `_YearFile`.
+[`zipped_file-members.txt`](zipped_file-members.txt), an excerpt of a file the CFTC publishes. Read by [`ZippedFile._members`](../../src/flatread/archives.py).
 
 a zip of exactly one member whose name changes by year (`annualci2006.txt`, `Annual.TXT`); `_member` is `.*`, so `_members = 1` is the only thing pinning it
 
@@ -1571,7 +1570,7 @@ a zip of exactly one member whose name changes by year (`annualci2006.txt`, `Ann
 
 ### `ZippedFiles`
 
-[`zipped_files.txt`](zipped_files.txt), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[fails_deliver_2008q4].yaml` interaction 0. Read by [`ZippedFiles`](../../src/flatread/archives.py), in sec `_FailsQuarter`.
+[`zipped_files.txt`](zipped_files.txt), an excerpt of a file the SEC publishes. Read by [`ZippedFiles`](../../src/flatread/archives.py).
 
 three monthly members, each with its own header, all matching `cnsp_sec_fails_\d{6}\.txt`, read in name order (stored 11, 10, 12) as one table
 
@@ -1592,7 +1591,7 @@ SETTLEMENT DATE|CUSIP|SYMBOL|QUANTITY (FAILS)|DESCRIPTION|PRICE
 
 ### `ZippedOrBare`
 
-[`zipped_or_bare.txt`](zipped_or_bare.txt), recorded in prism-clients' `tests/sec/cassettes/test_recorded/test_body[file_municipal_advisors_2026_11].yaml` interaction 0 (and `..._2021_03].yaml` interaction 0). Read by [`ZippedOrBare`](../../src/flatread/archives.py), in sec `_Published` (`_WorkbookExport`).
+[`zipped_or_bare.txt`](zipped_or_bare.txt), an excerpt of a file the SEC publishes. Read by [`ZippedOrBare`](../../src/flatread/archives.py).
 
 the same file bare (an xlsx, a zip of parts none matching `.+\.(csv\ | xlsx?)`, read whole) and zipped (`ma 030121.xlsx` its one member)
 
@@ -1620,7 +1619,7 @@ Its twins: [`ZippedFile`](#zippedfile) refuses a body with no matching member; [
 
 ### `StreamedZip`
 
-[`streamed_zip.txt`](streamed_zip.txt), recorded in prism-clients' `tests/finra/cassettes/test_recorded/test_month[FNQC-201904].yaml` interaction 0. Read by [`StreamedZip`](../../src/flatread/archives.py), in finra `_MonthlyZip`; sec's `_ByExchange` sets `_nested`.
+[`streamed_zip.txt`](streamed_zip.txt), an excerpt of a file FINRA publishes. Read by [`StreamedZip`](../../src/flatread/archives.py).
 
 one 2 MB member written with a data descriptor, read forward as the body arrives: its text yielded in steps, then its CRC-32 and size checked against the descriptor; `_alone` makes a second member raise
 
@@ -1662,7 +1661,7 @@ offset 494,623, the central directory (84 bytes: one header, then the end record
 
 ### `LongFile`
 
-[`long_file.csv`](long_file.csv), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[settlement_window].yaml` interaction 0. Read by [`LongFile`](../../src/flatread/layout.py), in cboe `_SettlementWindowCsv`.
+[`long_file.csv`](long_file.csv), an excerpt of a file Cboe publishes. Read by [`LongFile`](../../src/flatread/layout.py).
 
 `date`, then a column per contract (`VX1`, `VX2`): each cell becomes a row (date, contract, volume)
 
@@ -1677,7 +1676,7 @@ date,VX1,VX2
 
 ### `LongFile._empty_cells` (`"drop"`)
 
-[`long_file-emptycells.csv`](long_file-emptycells.csv), recorded in prism-clients' `tests/cboe/cassettes/test_recorded/test_body[settlement_window].yaml` interaction 0. Read by [`LongFile._empty_cells`](../../src/flatread/layout.py), in cboe `_SettlementWindowCsv`.
+[`long_file-emptycells.csv`](long_file-emptycells.csv), an excerpt of a file Cboe publishes. Read by [`LongFile._empty_cells`](../../src/flatread/layout.py).
 
 `2025-01-09,,` (the national day of mourning): empty cells that are no rows, not rows with no volume
 
@@ -1692,7 +1691,7 @@ date,VX1,VX2
 
 ### `LongFile._spacer_columns`
 
-[`long_file-spacercolumns.txt`](long_file-spacercolumns.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[ngs-ngshistory.xls].yaml` interaction 1. Read by [`LongFile._spacer_columns`](../../src/flatread/layout.py), in eia `_Dated` (`_NetChanges`, sheet `weekly_net_changes`).
+[`long_file-spacercolumns.txt`](long_file-spacercolumns.txt), an excerpt of a file the U.S. Energy Information Administration publishes. Read by [`LongFile._spacer_columns`](../../src/flatread/layout.py).
 
 header row 7 leaves column B unlabelled and B holds nothing: a spacer, not a key
 
@@ -1710,7 +1709,7 @@ header row 7 leaves column B unlabelled and B holds nothing: a spacer, not a key
 
 ### `LongFile._scattered`
 
-[`long_file-scattered.txt`](long_file-scattered.txt), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[ngs-revisions.xls].yaml` interaction 1. Read by [`LongFile._scattered`](../../src/flatread/layout.py), in eia `_Revisions`.
+[`long_file-scattered.txt`](long_file-scattered.txt), an excerpt of a file the U.S. Energy Information Administration publishes. Read by [`LongFile._scattered`](../../src/flatread/layout.py).
 
 the record's `Explanation` column stands after the region keys, found by its label
 
@@ -1726,7 +1725,7 @@ the record's `Explanation` column stands after the region keys, found by its lab
 
 ### `LongFile._beside`
 
-[`long_file-beside.txt`](long_file-beside.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_gdpnow_gdp_tracking_model_data_and_forecasts].yaml` interaction 0. Read by [`LongFile._beside`](../../src/flatread/layout.py), in atlanta_fed `_ArchiveSheet` (`TrackingArchives`).
+[`long_file-beside.txt`](long_file-beside.txt), an excerpt of a file the Federal Reserve Bank of Atlanta publishes. Read by [`LongFile._beside`](../../src/flatread/layout.py).
 
 `Publication Date of Advance Estimate`, `Days until advance estimate`, `Data releases` are record fields standing among the component keys (`Forecast Error` between them)
 
@@ -1741,7 +1740,7 @@ the record's `Explanation` column stands after the region keys, found by its lab
 
 ### `LongFile._key_count`
 
-[`long_file-keycount.txt`](long_file-keycount.txt), recorded in prism-clients' `tests/federal_reserve/cassettes/test_recorded/test_file[feds_note_portfolio_holdings].yaml` interaction 0. Read by [`LongFile._key_count`](../../src/flatread/layout.py), in federal_reserve `_PortfolioHoldings` (same layout: treasury `_FedsNote`).
+[`long_file-keycount.txt`](long_file-keycount.txt), an excerpt of a file the Federal Reserve Board publishes. Read by [`LongFile._key_count`](../../src/flatread/layout.py).
 
 one header cell names two keys, measure and year (`market_value_residence_2003`)
 
@@ -1755,7 +1754,7 @@ cntry_code,cntry_name,market_value_residence_2003,market_value_nationality_2003,
 
 ### `Reshaped`
 
-[`reshaped.csv`](reshaped.csv), recorded in prism-clients' `tests/chicago_fed/cassettes/test_recorded/test_file[get_carts_recent_monthly_values].yaml`, interaction 0. Read by [`Reshaped`](../../src/flatread/core.py), in chicago_fed `_CartsRecentValues`.
+[`reshaped.csv`](reshaped.csv), an excerpt of a file the Federal Reserve Bank of Chicago publishes. Read by [`Reshaped`](../../src/flatread/core.py).
 
 An inner reader reads it long (a row per series and month heading); `_shape` names each heading's month, the one before the one left of it. Unlike [`LongFile`](#longfile), which reads a wide table long itself, it reshapes a frame another reader made.
 
@@ -1767,7 +1766,7 @@ Inflation-adjusted,+0.6*,-0.3*,+0.9*,-0.1*,+0.7*,+0.2*
 
 ### `File._repeats`
 
-[`file-repeats.csv`](file-repeats.csv), recorded in prism-clients' `tests/eia/cassettes/test_recorded/test_file[wpsr-table1.csv].yaml` interaction 1. Read by [`File._repeats`](../../src/flatread/core.py), in eia `_Table`.
+[`file-repeats.csv`](file-repeats.csv), an excerpt of a file the U.S. Energy Information Administration publishes. Read by [`File._repeats`](../../src/flatread/core.py).
 
 `Difference` and `Percent Change` each head two columns (one per compared week), so a column is keyed by its place too
 
@@ -1780,7 +1779,7 @@ Inflation-adjusted,+0.6*,-0.3*,+0.9*,-0.1*,+0.7*,+0.2*
 
 ### `File._numbered`
 
-[`file-numbered.txt`](file-numbered.txt), recorded in prism-clients' `tests/atlanta_fed/cassettes/test_recorded/test_file[get_gdpnow_gdp_tracking_model_data_and_forecasts].yaml` interaction 0. Read by [`File._numbered`](../../src/flatread/core.py), in atlanta_fed `_NumberedSheet` (`MonthlyPriceLevels`).
+[`file-numbered.txt`](file-numbered.txt), an excerpt of a file the Federal Reserve Bank of Atlanta publishes. Read by [`File._numbered`](../../src/flatread/core.py).
 
 rows 33 and 34 both write ticker `SA_HN1PA_USECON_fr` with different values; only the sheet row tells them apart
 
@@ -1798,12 +1797,12 @@ rows 33 and 34 both write ticker `SA_HN1PA_USECON_fr` with different values; onl
 ## No recorded file needs these
 
 Only the synthetic bodies in the tests reach these, so they have no excerpt:
-- `SpilledCsv` (sec `_FailsMonth`): the 2004 Q3 to 2005 Q1 files whose descriptions hold a bar are not recorded.
-- `SheetFile._trim` (eia `_Dated`, `_DateText`, `_Lines`): no recorded workbook has a cell of only spaces.
-- `TextFile._as_written` (sec `_EdgarIndex`, `_FoiaLog`, `_Roster`): every recorded index, log and roster reads the
+- `SpilledCsv` (SEC files): the 2004 Q3 to 2005 Q1 files whose descriptions hold a bar are not recorded.
+- `SheetFile._trim` (EIA files): no recorded workbook has a cell of only spaces.
+- `TextFile._as_written` (SEC files): every recorded index, log and roster reads the
   same with it off.
-- `ReportFile._skip_blank = False` (sec `_EdgarIndex`): no recorded index has a blank line below its rule.
-- `ReportFile._text_lines` (sec `_EdgarIndex`): no recorded index is latin-1 or holds a form feed or vertical tab.
-- `LongFile._header_needs_rows` (eia `_Dated`, `_Table`): it refuses a cut file, which no recording is.
+- `ReportFile._skip_blank = False` (SEC files): no recorded index has a blank line below its rule.
+- `ReportFile._text_lines` (SEC files): no recorded index is latin-1 or holds a form feed or vertical tab.
+- `LongFile._header_needs_rows` (EIA files): it refuses a cut file, which no recording is.
 
 `GridFile` has no reader of its own; `sheet_text.txt` and `csv_text.csv` show the grids its two sources cut.

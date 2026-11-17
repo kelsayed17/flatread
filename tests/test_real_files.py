@@ -1,6 +1,6 @@
 """Each reader on a real file its publisher wrote, as recorded: what a file built in a test does not have.
 
-The files in ``tests/fixtures`` are whole response bodies from prism-clients' cassettes (``tests/fixtures/README.md``
+The files in ``tests/fixtures`` are whole response bodies as their publishers served them (``tests/fixtures/README.md``
 names each one's source). Every value asserted here was checked against the file's raw cells read without flatread
 (xlrd, ``zipfile`` and ``ElementTree``) when the file was added. Each file's SHA-256 is pinned, so a file stays as its
 publisher wrote it: a newer copy is a new fixture, not an edit.
