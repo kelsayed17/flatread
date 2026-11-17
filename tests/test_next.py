@@ -1,8 +1,12 @@
 """flatread.next, the 8.0 prototype: a reader is a row struct and a pipeline of stage values."""
 
+import dataclasses
 import datetime as dt
+import io
 import re
-from typing import TYPE_CHECKING, Annotated
+import typing
+import zipfile
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import msgspec
 import polars as pl
@@ -11,6 +15,7 @@ import pytest
 from flatread import next as fr
 from flatread.errors import (
     ControlTotalError,
+    CorruptArchiveError,
     EmptyBodyError,
     EncodingError,
     LayoutError,
@@ -19,10 +24,13 @@ from flatread.errors import (
     TruncatedFileError,
     UnknownLayoutError,
 )
-from flatread.fields import Format, Label
+from flatread.fields import Cell as At
+from flatread.fields import Flag, Format, Joined, Label, Span
+from flatread.fields import Shape as Shaped
 from flatread.pdf import PdfLine
 from tests.support.pdf import pdf
-from tests.support.xlsx import workbook
+from tests.support.xlsx import Cell, workbook
+from tests.test_hardening_archives import _HOSTILE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -146,7 +154,7 @@ class _Bounded(msgspec.Struct, frozen=True):
 def test_a_msgspec_meta_is_honored_naming_the_row_by_its_line(row: str, words: str) -> None:
     reader = fr.Reader(_Bounded, fr.Csv())
     assert reader.rows(b"symbol,close\nACME,0\n") == [_Bounded("ACME", 0.0)]
-    with pytest.raises(ReadError, match=f"row 3: .*{words}"):
+    with pytest.raises(ReadError, match=f"{words}.*: row 3"):
         reader.frame(f"symbol,close\nACME,1\n{row}\n".encode())
 
 
@@ -257,7 +265,7 @@ def test_a_layout_s_cells_and_rows() -> None:
     assert layout.edges(header, ["As", "Cz"]) is None
     row = PdfLine(0, 690.0, ((5.0, "x"), (29.5, "y"), (40.0, " ")))
     below, next_page = PdfLine(0, 600.0, ((10.0, "z"),)), PdfLine(1, 690.0, ((10.0, "w"),))
-    assert layout.cells([row], [10.0, 30.0]) == ["x", "y"]
+    assert layout.cells([row, PdfLine(0, 689.0, ())], [10.0, 30.0]) == ["x", "y"]
     assert layout.runs([header, row, below, next_page]) == [[header, row], [below], [next_page]]
 
 
@@ -347,3 +355,268 @@ def test_a_derived_format_reads_another_reader_s_frame_and_its_context() -> None
 
     reader = fr.Reader(Count, fr.Derived(inner, shape))
     assert reader.rows(b"symbol\nACME\nBETA\n20261116\n") == [Count(2, "20261116")]
+
+
+class _Security(msgspec.Struct, frozen=True):
+    cusip: str
+    shares: int
+    held: bool
+    since: dt.date | None
+
+
+_SECURITIES = fr.Reader(_Security, fr.Sheet())
+
+
+def test_a_sheet_s_cells_are_read_as_the_kind_the_workbook_stored() -> None:
+    body = workbook({"S": [["cusip", "shares", "held", "since"], ["037833100", 7, True, dt.date(2026, 1, 2)]]})
+    assert _SECURITIES.rows(body) == [_Security("037833100", 7, held=True, since=dt.date(2026, 1, 2))]
+    text = workbook({"S": [["cusip", "shares", "held", "since"], ["037833100", 7, "false", "2026-01-02"]]})
+    assert _SECURITIES.rows(text) == [_Security("037833100", 7, held=False, since=dt.date(2026, 1, 2))]
+
+
+@pytest.mark.parametrize(
+    ("cells", "words"),
+    [
+        ([37833100, 7, True, None], "not a text cell: mark the field AsWritten"),
+        (["037833100", "7", True, None], "not a number cell"),
+        (["037833100", 7.5, True, None], "not a whole number"),
+        (["037833100", 7, 1, None], "not a boolean or text cell"),
+        (["037833100", 7, True, 46000], "not a date cell or text"),
+    ],
+)
+def test_a_sheet_s_cell_of_another_kind_than_its_field_reads_is_refused(cells: list[Cell], words: str) -> None:
+    body = workbook({"S": [["cusip", "shares", "held", "since"], cells]})
+    with pytest.raises(ReadError, match=f"{words}.*: row 2"):
+        _SECURITIES.frame(body)
+
+
+def test_a_number_cell_reads_as_text_where_the_field_is_as_written() -> None:
+    class Code(msgspec.Struct, frozen=True):
+        code: Annotated[str, fr.AsWritten()]
+
+    assert fr.Reader(Code, fr.Sheet()).rows(workbook({"S": [["code"], [12345], ["A1"]]})) == [Code("12345"), Code("A1")]
+
+
+def test_a_sheet_s_moment_cell_is_its_value_and_its_text_is_read_by_its_format() -> None:
+    class Stamp(msgspec.Struct, frozen=True):
+        at: Annotated[dt.datetime, Format("%Y-%m-%d %H:%M")]
+        flag: Annotated[bool, Flag("Y", "N")]
+
+    body = workbook({"S": [["at", "flag"], [dt.date(2026, 1, 2), "Y"], ["2026-01-03 09:30", True]]})
+    assert fr.Reader(Stamp, fr.Sheet()).rows(body) == [
+        Stamp(dt.datetime(2026, 1, 2), flag=True),
+        Stamp(dt.datetime(2026, 1, 3, 9, 30), flag=True),
+    ]
+
+
+def test_a_sheet_s_header_runs_to_its_last_filled_cell() -> None:
+    with pytest.raises(EmptyBodyError):
+        _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"]]}))
+    assert fr.Reader(_Release, fr.Sheet()).rows(workbook({"S": [["Date", "First", None], ["2026:Q1", 1.5]]})) == [
+        _Release(dt.date(2026, 1, 1), 1.5)
+    ]
+
+
+def _zipped(members: dict[str, bytes]) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return out.getvalue()
+
+
+def test_a_zip_source_streams_its_member_to_the_format_and_notes_its_name() -> None:
+    reader = fr.Reader(_Price, fr.Csv(), source=fr.Zip(re.compile(r"prices_\d+\.csv")))
+    body = _zipped({"readme.txt": b"x", "prices_1.csv": b"symbol,close,day\nACME,1.5,2026-11-16\n"})
+    frame, read = reader.read(body)
+    assert frame.height == 1
+    assert read.member == "prices_1.csv"
+    with pytest.raises(UnknownLayoutError, match="0 members"):
+        reader.frame(_zipped({"readme.txt": b"x"}))
+    with pytest.raises(CorruptArchiveError):
+        reader.frame(b"not a zip")
+
+
+def test_an_sdmx_message_streams_from_a_zip_and_its_faults_are_named() -> None:
+    reader = fr.Reader(
+        _Observation,
+        _SDMX.format,
+        shape=_SDMX.shape,
+        source=fr.Zip(re.compile(r".*\.xml")),
+    )
+    assert reader.rows(_zipped({"D.xml": _message(_obs())})) == [_Observation("S1", dt.date(2026, 1, 1), 1.5, "A")]
+    with pytest.raises(TruncatedFileError):
+        reader.frame(_zipped({"D.xml": _message(_obs())[:-40]}))
+    with pytest.raises(UnknownLayoutError, match="holds no D data set"):
+        reader.frame(_zipped({"D.xml": _message(_obs()).replace(b'id="D"', b'id="E"')}))
+    with pytest.raises(LayoutError, match="prefix"):
+        fr.Sdmx(
+            data_set="D",
+            root="message:MessageGroup",
+            data_set_element="y:DataSet",
+            observation="x:Obs",
+            annotations="x:A",
+        )
+
+
+def test_a_zip_member_too_large_or_that_will_not_inflate_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    reader = fr.Reader(_Price, fr.Csv(), source=fr.Zip(re.compile(r"x\.csv")))
+    for body in _HOSTILE.values():
+        with pytest.raises(ReadError):
+            reader.frame(body)
+    monkeypatch.setattr("flatread.next._stages._INFLATED_MAX", 4)
+    with pytest.raises(ReadError, match="inflates to"):
+        reader.frame(_zipped({"x.csv": b"symbol,close,day\n"}))
+
+
+_ROOT = b"<message:MessageGroup " + _M + b" " + _X + b">"
+_SERIES = b'<k:Series SERIES_NAME="S1">' + _obs() + b"</k:Series>"
+
+
+def _sets(inside: bytes) -> bytes:
+    return _ROOT + inside + b"</message:MessageGroup>"
+
+
+def _set(name: bytes, inside: bytes) -> bytes:
+    return b'<x:DataSet id="' + name + b'" xmlns:k="urn:k">' + inside + b"</x:DataSet>"
+
+
+def test_an_sdmx_message_reads_its_data_set_among_others() -> None:
+    body = _sets(_set(b"E", _SERIES) + _set(b"D", _SERIES))
+    assert _SDMX.rows(body) == [_Observation("S1", dt.date(2026, 1, 1), 1.5, "A")]
+
+
+@pytest.mark.parametrize(
+    ("body", "error", "words"),
+    [
+        (_message(_obs()).replace(b"message:MessageGroup", b"message:Other"), UnknownLayoutError, "the root of"),
+        (_sets(b'<k:Series xmlns:k="urn:k"/>' + _set(b"D", _SERIES)), UnknownLayoutError, "outside any"),
+        (_sets(_set(b"D", _SERIES.replace(b"</k:Series>", b"<x:Junk/></k:Series>"))), UnknownLayoutError, "other"),
+        (_sets(_set(b"D", _SERIES) + b"<x:Junk/>"), UnknownLayoutError, "after its last"),
+        (_sets(_set(b"D", b"")), ReadError, "holds no series"),
+    ],
+)
+def test_an_sdmx_message_out_of_its_layout_raises(body: bytes, error: type[ReadError], words: str) -> None:
+    with pytest.raises(error, match=words):
+        _SDMX.frame(body)
+
+
+def test_a_field_s_marker_the_prototype_lacks_or_a_format_it_needs_is_refused_when_built() -> None:
+    class Keyworded(msgspec.Struct, frozen=True, kw_only=True):
+        a: str
+
+    class Spanned(msgspec.Struct, frozen=True):
+        a: Annotated[str, Span(0, 2)]
+
+    class Joins(msgspec.Struct, frozen=True):
+        a: Annotated[str, Joined("a")]
+
+    class Addressed(msgspec.Struct, frozen=True):
+        a: Annotated[str, At("A1")]
+
+    class Aliased(msgspec.Struct, frozen=True):
+        a: Annotated[str, Label("a", alternatives=("b",))]
+
+    class Mixed(msgspec.Struct, frozen=True):
+        a: Literal[1, "b"]
+
+    class Timed(msgspec.Struct, frozen=True):
+        a: dt.datetime
+
+    for row, words in [
+        (Keyworded, "keyword-only"),
+        (Spanned, "Span"),
+        (Joins, "Joined"),
+        (Addressed, "Cell"),
+        (Aliased, "alternatives"),
+        (Mixed, "the field 'a'"),
+        (Timed, "needs the Format"),
+    ]:
+        with pytest.raises(LayoutError, match=words):
+            fr.Reader(row, fr.Csv())
+    with pytest.raises(LayoutError, match="no fields"):
+        fr.Reader(_Price, fr.Csv(), as_written=["nope"])
+
+
+class _Checked(msgspec.Struct, frozen=True):
+    code: Annotated[str, Shaped(r"[A-Z]+")]
+    side: Literal["buy", "sell"]
+    size: float
+    lots: int = 5
+
+
+_CHECKED = fr.Reader(_Checked, fr.Csv())
+
+
+@pytest.mark.parametrize(
+    ("row", "words"),
+    [
+        ("ab,buy,1,", "shape"),
+        ("AB,hold,1,", "one of its values"),
+        ("AB,buy,nan,", "NaN or an infinity"),
+        ("AB,buy,,", "an empty cell"),
+    ],
+)
+def test_a_cell_out_of_its_field_s_bounds_raises_naming_its_row(row: str, words: str) -> None:
+    with pytest.raises(ReadError, match=f"{words}.*row 2"):
+        _CHECKED.frame(f"code,side,size,lots\n{row}\n".encode())
+
+
+def test_a_field_s_default_fills_its_empty_cell_and_as_written_keeps_its_text() -> None:
+    assert _CHECKED.rows(b"code,side,size,lots\nAB,buy,1,\n") == [_Checked("AB", "buy", 1.0)]
+    reader = fr.Reader(_Price, fr.Csv(), as_written=["symbol"])
+    assert reader.rows(b"symbol,close,day\n ACME ,1,2026-11-16\n")[0].symbol == " ACME "
+
+
+def test_the_engine_refuses_a_frame_it_typed_otherwise_than_its_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    reader = fr.Reader(_Price, fr.Csv())
+    monkeypatch.setitem(reader.engine.dtypes, "close", pl.Int64)
+    with pytest.raises(LayoutError, match="the engine typed"):
+        reader.frame(b"symbol,close,day\nACME,1,2026-11-16\n")
+
+
+def test_a_rust_panic_is_a_read_error_and_any_other_base_exception_passes() -> None:
+    class PanicException(BaseException):
+        """A stand-in for pyo3's, matched by its name."""
+
+    @dataclasses.dataclass(frozen=True)
+    class Raising:
+        raised: BaseException
+
+        def grid(self, stream: fr.Stream, read: fr.ReadContext) -> fr.Grid:
+            del stream, read
+            raise self.raised
+
+    with pytest.raises(ReadError, match="panic"):
+        fr.Reader(_Price, Raising(PanicException("index out of bounds"))).frame(b"")
+    with pytest.raises(KeyboardInterrupt):
+        fr.Reader(_Price, Raising(KeyboardInterrupt())).frame(b"")
+
+
+def test_a_sheet_s_loads_that_disagree_on_its_shape_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    import fastexcel  # noqa: PLC0415 (the excel extra)
+
+    load = fastexcel.ExcelReader.load_sheet
+
+    def short(self: fastexcel.ExcelReader, *args: typing.Any, **kwargs: typing.Any) -> object:  # noqa: ANN401
+        sheet = load(self, *args, **kwargs)
+        return _Short(sheet) if kwargs.get("dtypes") == "float" else sheet
+
+    class _Short:
+        def __init__(self, sheet: typing.Any) -> None:  # noqa: ANN401
+            self.sheet = sheet
+
+        def to_polars(self) -> pl.DataFrame:
+            frame = self.sheet.to_polars()
+            assert isinstance(frame, pl.DataFrame)
+            return frame.head(0)
+
+    monkeypatch.setattr(fastexcel.ExcelReader, "load_sheet", short)
+    with pytest.raises(ReadError, match="float load"):
+        _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"], ["a", 7, True, None]]}))
+
+
+def test_titled_states_its_titles_groups_and_a_long_sheet_s_keys_are_text() -> None:
+    assert fr.Titled([re.compile(r"(?P<count>\d+) rows of (?P<day>.+)")]).stated == frozenset({"day"})
+    reader = fr.Reader(_Reading, fr.Sheet(), shape=fr.Long(keys=re.compile(r"[A-Z][a-z]{2}"), empty_cells="drop"))
+    assert reader.rows(workbook({"S": [[None, "Jan"], ["A", 1.5]]})) == [_Reading("A", "Jan", 1.5)]

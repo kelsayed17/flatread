@@ -1,19 +1,20 @@
-"""The built-in stages: formats, table finders, shapes and cleaners, each one frozen value with one job."""
+"""The built-in stages: sources, formats, table finders, shapes and cleaners, each one frozen value with one job."""
 
+import contextlib
 import csv
 import dataclasses
-import functools
 import re
 import typing
-from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 
-import msgspec
 import polars as pl
 
+from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzipped
 from flatread.core import _NUL, Column, _check_ending
 from flatread.delimited import _BOM
 from flatread.errors import (
     ControlTotalError,
+    CorruptArchiveError,
     EmptyBodyError,
     EncodingError,
     LayoutError,
@@ -22,12 +23,13 @@ from flatread.errors import (
     TruncatedFileError,
     UnknownLayoutError,
 )
-from flatread.next._model import Grid, ReadContext, Records, Table
+from flatread.next._model import Cells, Grid, Lines, ReadContext, Records, Stream, Table
 
 if typing.TYPE_CHECKING:
+    from lxml import etree
+
     from flatread.next._reader import Reader
     from flatread.pdf import PdfLine
-    from flatread.sdmx import SdmxData
 
 __all__ = [
     "Csv",
@@ -42,23 +44,73 @@ __all__ = [
     "Sheet",
     "Titled",
     "Trailer",
+    "Zip",
 ]
 
 
-def grid_of(rows: Sequence[Sequence[str | None]], raw: Sequence[str], numbers: Sequence[int]) -> Grid:
-    """Return the grid of *rows* of cells, each row's *raw* text and its *numbers* in the file."""
+def _numbered(height: int) -> pl.Series:
+    return pl.int_range(1, height + 1, dtype=pl.Int64, eager=True).alias("number")
+
+
+def _unraw(height: int) -> pl.Series:
+    return pl.repeat("", height, dtype=pl.String, eager=True).alias("raw")
+
+
+def lines_of(rows: Sequence[Sequence[str | None]], raw: Sequence[str], numbers: Sequence[int]) -> Lines:
+    """Return the lines grid of *rows* of cells, each row's *raw* text and its *numbers* in the file."""
     width = max((len(row) for row in rows), default=0)
     cells = pl.DataFrame(
         [[*row, *[None] * (width - len(row))] for row in rows],
         schema={str(at): pl.String for at in range(width)},
         orient="row",
     )
-    return Grid(
+    return Lines(
         cells=cells,
         widths=pl.Series("width", [len(row) for row in rows], pl.Int64),
         raw=pl.Series("raw", list(raw), pl.String),
         numbers=pl.Series("number", list(numbers), pl.Int64),
     )
+
+
+def records_of(text: pl.DataFrame) -> Cells:
+    """Return the cells grid of a format that knows its labels: *text*'s columns, every row a row, all of it text."""
+    return Cells(text=text, raw=_unraw(text.height), numbers=_numbered(text.height), header=text.columns)
+
+
+# --- Sources ---
+
+
+@dataclasses.dataclass(frozen=True)
+class Zip:
+    """The body is a zip; the file is its one member whose whole name fullmatches *member*, read as it inflates.
+
+    A zip :mod:`flatread.archives` refuses (a name listed twice, a member that will not inflate or that inflates past
+    its cap) raises ``ReadError`` naming the member; a zip holding no such member, or several, ``UnknownLayoutError``.
+    The member's name is noted on the read (``read.member``).
+    """
+
+    member: re.Pattern[str]
+
+    @contextlib.contextmanager
+    def open(self, body: bytes, read: ReadContext) -> Generator[Stream]:
+        """Open the member, streaming."""
+        with _unzipped(body, None) as archive:
+            names = archive.namelist()
+            found = [name for name in names if self.member.fullmatch(name)]
+            if len(found) != 1:
+                msg = f"the zip holds {len(found)} members matching {self.member.pattern}, not one: {names[:5]!r}"
+                raise UnknownLayoutError(msg)
+            if (size := archive.getinfo(found[0]).file_size) > _INFLATED_MAX:
+                msg = f"the zip's {found[0]!r} inflates to {size} bytes, over {_INFLATED_MAX}"
+                raise ReadError(msg)
+            try:
+                member = archive.open(found[0])
+            except _UNZIP_ERRORS as e:  # a damaged header, an encrypted member, a method zipfile lacks
+                msg = f"the zip's {found[0]!r} will not inflate: {e}"
+                raise CorruptArchiveError(msg) from e
+            read.member = found[0]
+            with member:  # its reads raise ReadError as it inflates, a cut stream or a CRC that fails
+                yield _Inflating(found[0], member)
 
 
 # --- Formats ---
@@ -70,8 +122,7 @@ class Csv:
 
     *final_line_ending* is whether the file always ends its last line with a line ending, so a body that ends otherwise
     was cut; ``None`` leaves it unchecked. A blank line is a row of one empty cell. Raises ``LayoutError`` when built
-    for a separator or
-    quote that is not one character, ends a line, or is the other.
+    for a separator or quote that is not one character, ends a line, or is the other.
     """
 
     separator: str = ","
@@ -87,9 +138,10 @@ class Csv:
             msg = f"the Csv separator {self.separator!r} is its quote too, which tells no cell's end"
             raise LayoutError(msg)
 
-    def grid(self, body: bytes, read: ReadContext) -> Grid:
-        """Return *body*'s rows of cells: each line's (a quoted cell may span lines), its raw text and line number."""
+    def grid(self, stream: Stream, read: ReadContext) -> Lines:
+        """Return the file's rows of cells: each line's (a quoted cell may span lines), its raw text and line number."""
         del read
+        body = stream.read()
         if not body or body.isspace():
             msg = "the body is empty"
             raise EmptyBodyError(msg)
@@ -129,49 +181,75 @@ class Csv:
             # A quoted cell open at the body's end was cut; any other quote out of place is a malformed row.
             msg = f"row {len(rows) + 1}: {e}"
             raise (TruncatedFileError if "unexpected end of data" in str(e) else ReadError)(msg) from e
-        return grid_of(rows, raw, numbers)
+        return lines_of(rows, raw, numbers)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Sheet:
-    """A workbook's sheet (``None``: its one sheet), its every cell as text: a number with every digit it holds.
+    """A workbook's sheet (``None``: its one sheet), each cell of the kind the workbook stored, beside its text.
 
-    Its grid is rectangular: each row of the sheet from row 1, numbered as Excel numbers it, each row's raw text its
-    cells joined by tabs up to its last filled one (what a :class:`Titled` title matches), and its width the column of
-    that last filled cell. An empty cell, or one of only spaces, is no value.
+    Its grid is a rectangle of the sheet's cells from row 1, each row numbered as Excel numbers it: a cell is text, a
+    number (its text every digit it holds), a boolean, or a moment (a date or time cell), and an empty cell, or one of
+    only spaces, is none. Each row's raw text is its cells joined by tabs up to its last filled one, what a
+    :class:`Titled` title matches.
     """
 
     sheet: str | None = None
 
-    def grid(self, body: bytes, read: ReadContext) -> Grid:
-        """Return the sheet's rows of text cells."""
+    def grid(self, stream: Stream, read: ReadContext) -> Cells:
+        """Return the sheet's cells and their kinds."""
         del read
-        from flatread.sheets import sheet_grid  # noqa: PLC0415 (the sheets extra loads only when a sheet is read)
+        from flatread.sheets import _loading, _sheet_named, _text_grid, _workbook  # noqa: PLC0415 (the excel extra)
 
-        cells = sheet_grid(body, self.sheet)
-        filled = (
-            cells.select(
-                pl.max_horizontal(
-                    pl.when(pl.col(name).is_not_null()).then(pl.lit(at + 1)).otherwise(0)
-                    for at, name in enumerate(cells.columns)
-                ).alias("width")
-            )
-            if cells.width
-            else pl.DataFrame({"width": pl.Series([], dtype=pl.Int64)})
+        workbook = _workbook(stream.read())
+        name = _sheet_named(workbook, self.sheet)
+        _, text = _text_grid(workbook, name, ())
+        if not text.width:
+            return Cells(text=text, raw=_unraw(text.height), numbers=_numbered(text.height))
+        with _loading(f"the workbook's {name!r} sheet will not load"):
+            loads = {
+                kind: workbook.load_sheet(name, header_row=None, skip_rows=0, dtypes=kind).to_polars()
+                for kind in ("float", "boolean", "datetime")
+            }
+        for kind, frame in loads.items():
+            if frame.shape != text.shape:
+                msg = f"the {name!r} sheet's {kind} load is {frame.shape}, not its text's {text.shape}"
+                raise ReadError(msg)
+            frame.columns = text.columns
+        floats = loads["float"].cast(pl.Float64, strict=False)
+        moments = loads["datetime"].cast(pl.Datetime("us"), strict=False)
+        bools = loads["boolean"]
+        # fastexcel's loads tell a cell's kind apart: a number or a boolean loads as a boolean, a text never, and only
+        # a boolean's text is ``true`` or ``false``; a moment loads as a time and never as a float.
+        kinds = pl.concat(
+            [
+                text,
+                floats.rename(lambda c: f"{c}:f"),
+                bools.rename(lambda c: f"{c}:b"),
+                moments.rename(lambda c: f"{c}:d"),
+            ],
+            how="horizontal",
+        ).select(
+            pl.when(pl.col(c).is_null())
+            .then(None)
+            .when(pl.col(f"{c}:b").is_not_null() & pl.col(c).is_in(["true", "false"]))
+            .then(pl.lit("bool"))
+            .when(pl.col(f"{c}:b").is_not_null() & pl.col(f"{c}:f").is_not_null())
+            .then(pl.lit("number"))
+            .when(pl.col(f"{c}:d").is_not_null() & pl.col(f"{c}:f").is_null())
+            .then(pl.lit("moment"))
+            .otherwise(pl.lit("text"))
+            .alias(c)
+            for c in text.columns
         )
-        raw = (
-            cells.select(pl.concat_str(pl.all().fill_null(""), separator="\t").str.strip_chars_end("\t"))
-            if cells.width
-            else None
-        )
-        return Grid(
-            cells=cells,
-            widths=filled.to_series().cast(pl.Int64).alias("width"),
-            raw=(pl.repeat("", cells.height, dtype=pl.String, eager=True) if raw is None else raw.to_series()).alias(
-                "raw"
-            ),
-            numbers=pl.int_range(1, cells.height + 1, dtype=pl.Int64, eager=True).alias("number"),
-            rectangular=True,
+        raw = text.select(pl.concat_str(pl.all().fill_null(""), separator="\t").str.strip_chars_end("\t")).to_series()
+        return Cells(
+            text=text,
+            raw=raw.alias("raw"),
+            numbers=_numbered(text.height),
+            kinds=kinds,
+            floats=floats,
+            moments=moments,
         )
 
 
@@ -249,11 +327,11 @@ class Pdf:
     records: Records
     layout: Layout | None = None
 
-    def grid(self, body: bytes, read: ReadContext) -> Grid:
+    def grid(self, stream: Stream, read: ReadContext) -> Cells:
         """Return the records as a grid under the struct's labels."""
         from flatread.pdf import text_layer  # noqa: PLC0415 (the pdf extra loads only when a PDF is read)
 
-        lines = text_layer(body)
+        lines = text_layer(stream.read())
         if self.layout is not None:
             lines = self.layout.lines(lines)
         records = self.records.records(lines, self.layout, read)
@@ -262,29 +340,26 @@ class Pdf:
             if unknown := record.keys() - read.columns.keys():
                 msg = f"record {n} names fields the row has none of: {sorted(unknown)!r}"
                 raise LayoutError(msg)
-        cells = pl.DataFrame(
-            [[record.get(field) for field in fields] for record in records],
-            schema={read.columns[field].label: pl.String for field in fields},
-            orient="row",
-        )
-        return Grid(
-            cells=cells,
-            widths=pl.repeat(cells.width, cells.height, dtype=pl.Int64, eager=True),
-            raw=pl.repeat("", cells.height, dtype=pl.String, eager=True),
-            numbers=pl.int_range(1, cells.height + 1, dtype=pl.Int64, eager=True).alias("number"),
-            header=cells.columns,
+        return records_of(
+            pl.DataFrame(
+                [[record.get(field) for field in fields] for record in records],
+                schema={read.columns[field].label: pl.String for field in fields},
+                orient="row",
+            )
         )
 
 
-@dataclasses.dataclass(frozen=True, kw_only=True, eq=False)  # by identity: its parse is cached per value
+@dataclasses.dataclass(frozen=True, kw_only=True)
 class Sdmx:
-    """An SDMX-ML 1.0 compact data message's data set *data_set*, streamed: each observation a row of its series.
+    """An SDMX-ML 1.0 compact data message's data set *data_set*, parsed as it streams: a row per observation.
 
     The row's first field is the attribute naming each series (its key); the others are each observation's attributes.
     A field's attribute is its label as *names* writes it (upper-cased by default: ``series_name`` is ``SERIES_NAME``).
     *root*, *data_set_element*, *observation* and *annotations* are the message's prefixed element names, *prefixes*
-    the format's own beside SDMX-ML 1.0's. With *member*, the body is a zip and the message its one member whose whole
-    name matches it, read as it inflates. Every part of the message is checked, as 7.x's ``SdmxData`` checks it.
+    the format's own beside SDMX-ML 1.0's. The message is read a series at a time, each cleared once read, so a zip's
+    member streams through (``source=Zip(...)``). Every part of the message is checked: its root, each data set after
+    the last, a series holding only its annotations and observations, each observation only its attributes, nothing
+    else between them, and the data set read holding a series. A prefix none binds raises ``LayoutError`` when built.
     """
 
     data_set: str
@@ -293,34 +368,50 @@ class Sdmx:
     observation: str
     annotations: str
     prefixes: Mapping[str, str] = dataclasses.field(default_factory=dict)
-    member: re.Pattern[str] | None = None
     names: Callable[[str], str] = str.upper
+    series: str = "Series"
+    data_set_id: str = "id"
 
-    def grid(self, body: bytes, read: ReadContext) -> Grid:
+    def __post_init__(self) -> None:
+        for name in (self.root, self.data_set_element, self.observation, self.annotations):
+            self._tag(name)
+
+    def _namespaces(self) -> dict[str, str]:
+        from flatread.sdmx import _NAMESPACES  # noqa: PLC0415 (the xml extra loads only when SDMX is read)
+
+        return {**_NAMESPACES["1.0"], **self.prefixes}
+
+    def _tag(self, name: str) -> str:
+        prefix, _, local = name.partition(":")
+        namespaces = self._namespaces()
+        if prefix not in namespaces:
+            msg = f"the element {name!r} writes a prefix the format's namespaces do not bind"
+            raise LayoutError(msg)
+        return f"{{{namespaces[prefix]}}}{local}"
+
+    def grid(self, stream: Stream, read: ReadContext) -> Cells:
         """Return the data set's observations: each its series' key and its attributes, under the row's labels."""
         from lxml import etree  # noqa: PLC0415 (the xml extra loads only when SDMX is read)
 
-        assert read.row is not None  # noqa: S101 (a Reader always names it)
-        parser = _sdmx_parser(self, read.row)
-        columns = list(read.columns.values())
-        labels = [column.label for column in columns]
+        namespaces = self._namespaces()
+        labels = [column.label for column in read.columns.values()]
         key, *attributes = [self.names(label) for label in labels]
         paths = [
-            etree.XPath(f"{self.observation}/@{name}", namespaces=parser._namespaces, smart_strings=False)  # noqa: SLF001
-            for name in attributes
+            etree.XPath(f"{self.observation}/@{a}", namespaces=namespaces, smart_strings=False) for a in attributes
         ]
-        count = etree.XPath(f"count({self.observation}/@*)", namespaces=parser._namespaces)  # noqa: SLF001
+        count = etree.XPath(f"count({self.observation}/@*)", namespaces=namespaces)
+        notes = self._tag(self.annotations)
         held: list[list[object]] = [[] for _ in labels]
-        for name, series in parser._each(body):  # noqa: SLF001 (shortcut: 7.x's streaming, checked parse)
-            read.member = name
+        name = read.member or "the body"
+        for series in self._each(stream, name):
             if (series_key := series.get(key)) is None:
                 msg = f"a series of the {self.data_set} data set of {name} carries no {key}"
                 raise UnknownLayoutError(msg)
             found = [cells for path in paths if isinstance(cells := path(series), list)]
-            observations = len(series) - (series.find(parser._notes) is not None)  # noqa: SLF001
-            if count(series) != len(attributes) * observations or [len(cells) for cells in found] != [
-                observations
-            ] * len(attributes):
+            observations = len(series) - (series.find(notes) is not None)
+            if count(series) != len(attributes) * observations or [len(c) for c in found] != [observations] * len(
+                attributes
+            ):
                 msg = (
                     f"an observation of the series {series_key!r} of the {self.data_set} data set of {name}"
                     f" carries other than {attributes}"
@@ -329,39 +420,89 @@ class Sdmx:
             held[0].extend([series_key] * observations)
             for column, cells in zip(held[1:], found, strict=True):
                 column.extend(cells)
-        cells = pl.DataFrame(dict(zip(labels, held, strict=True)), schema=dict.fromkeys(labels, pl.String))
-        return Grid(
-            cells=cells,
-            widths=pl.repeat(cells.width, cells.height, dtype=pl.Int64, eager=True),
-            raw=pl.repeat("", cells.height, dtype=pl.String, eager=True),
-            numbers=pl.int_range(1, cells.height + 1, dtype=pl.Int64, eager=True).alias("number"),
-            header=cells.columns,
+        return records_of(pl.DataFrame(dict(zip(labels, held, strict=True)), schema=dict.fromkeys(labels, pl.String)))
+
+    def _each(self, stream: Stream, name: str) -> Iterator[etree._Element]:  # noqa: PLR0912, PLR0915 (one pass checks every part)
+        """Yield each series of the data set read, every part of the message checked; each is cleared after."""
+        from lxml import etree  # noqa: PLC0415
+
+        from flatread.markup import _malformed  # noqa: PLC0415
+        from flatread.sdmx import _between_sets, _blank, _drop_read, _Metered, _only_series  # noqa: PLC0415
+
+        namespaces = self._namespaces()
+        data_set, root_tag = self._tag(self.data_set_element), self._tag(self.root)
+        notes = self._tag(self.annotations)
+        junk = etree.XPath(
+            f"count({self.observation}/node()) + count(text()[normalize-space()])", namespaces=namespaces
         )
-
-
-@functools.cache
-def _sdmx_parser(sdmx: Sdmx, row: type[msgspec.Struct]) -> SdmxData[msgspec.Struct]:
-    """Return 7.x's streaming parse of *sdmx*'s message, for rows of *row* (shortcut: 8.0 proper owns it)."""
-    from flatread.sdmx import SdmxData  # noqa: PLC0415
-
-    parser = type(
-        "_Parse",
-        (SdmxData,),
-        {
-            "_prefixes": dict(sdmx.prefixes),
-            "_root": sdmx.root,
-            "_data_set": sdmx.data_set_element,
-            "_observation": sdmx.observation,
-            "_annotations": sdmx.annotations,
-            "_zipped_member": sdmx.member,
-            "_read": lambda _self, _body: None,
-        },
-    )
-    return parser(row, sdmx.data_set)  # ty: ignore[unsound-return-statement] (type() builds an SdmxData)
+        metered = _Metered(name, stream)  # ty: ignore[invalid-argument-type] (any stream with read())
+        sets: list[str] = []
+        found = 0
+        last: etree._Element | None = None
+        parsed = etree.iterparse(
+            metered,
+            events=("start", "end"),
+            tag=(data_set, f"{{*}}{self.series}"),
+            resolve_entities=False,
+            no_network=True,
+            load_dtd=False,
+            huge_tree=False,
+        )
+        try:
+            for event, element in ((e, el) for e, el in parsed if etree.iselement(el)):
+                if not sets and (root := element.getroottree().getroot().tag) != root_tag:
+                    msg = f"the root of {name} is <{root}>, not <{root_tag}>"
+                    raise UnknownLayoutError(msg)
+                if element.tag == data_set:
+                    if event == "start":
+                        _between_sets(element, data_set, name, first=not sets)
+                        sets.append(element.get(self.data_set_id, ""))
+                    else:
+                        _only_series(element, self.series, sets[-1], name)
+                        if last is not None and (parent := last.getparent()) is not None:
+                            parent.remove(last)
+                        last = element
+                    continue
+                metered.series(started=event == "start")
+                if event == "start":
+                    continue
+                parent = element.getparent()
+                if parent is None or parent.tag != data_set:
+                    msg = f"a <{element.tag}> of {name} sits outside any <{data_set}>"
+                    raise UnknownLayoutError(msg)
+                if sets[-1] == self.data_set:
+                    note = element.find(notes)
+                    if (
+                        junk(element)
+                        or len(element) != len(element.findall(self.observation, namespaces)) + (note is not None)
+                        or (note is not None and note.getprevious() is not None)
+                    ):
+                        msg = (
+                            f"a series of the {self.data_set} data set of {name}"
+                            " holds other than its annotations and observations"
+                        )
+                        raise UnknownLayoutError(msg)
+                    found += 1
+                    yield element
+                tail = element.tail
+                element.clear()
+                element.tail = tail
+                _drop_read(element, parent, self.series, sets[-1], name)
+        except etree.XMLSyntaxError as e:
+            raise _malformed(name, e, metered.end) from e
+        if last is not None and (last.getnext() is not None or not _blank(last.tail)):
+            msg = f"{name} holds other than data sets after its last"
+            raise UnknownLayoutError(msg)
+        if self.data_set not in sets:
+            msg = f"{name} holds no {self.data_set} data set; it holds {sets!r}"
+            raise UnknownLayoutError(msg)
+        if not found:
+            msg = f"the {self.data_set} data set of {name} holds no series"
+            raise ReadError(msg)
 
 
 @dataclasses.dataclass(frozen=True)
-class Derived[RowT]:
+class Derived:
     """A file another reader reads first, its frame then made the row's text cells by *shape*.
 
     *shape* takes the inner reader's frame and that read's context (its trailer's match) and returns a String frame of
@@ -371,19 +512,11 @@ class Derived[RowT]:
     inner: Reader[typing.Any]
     shape: Callable[[pl.DataFrame, ReadContext], pl.DataFrame]
 
-    def grid(self, body: bytes, read: ReadContext) -> Grid:
+    def grid(self, stream: Stream, read: ReadContext) -> Cells:
         """Return the shaped frame as a grid whose header is its columns."""
-        frame, inner = self.inner.read(body)
+        frame, inner = self.inner.read(stream.read())
         read.matches.update(inner.matches)
-        cells = self.shape(frame, inner)
-        numbers = pl.int_range(1, cells.height + 1, dtype=pl.Int64, eager=True).alias("number")
-        return Grid(
-            cells=cells,
-            widths=pl.repeat(cells.width, cells.height, dtype=pl.Int64, eager=True),
-            raw=pl.repeat("", cells.height, dtype=pl.String, eager=True),
-            numbers=numbers,
-            header=cells.columns,
-        )
+        return records_of(self.shape(frame, inner))
 
 
 # --- Table finders ---
@@ -391,29 +524,61 @@ class Derived[RowT]:
 
 def _header_table(grid: Grid) -> Table:
     """Return *grid*'s table: its first row the header (or the header its format states), every other row a row."""
-    if grid.header is not None:
-        return Table(grid.cells.rename(dict(zip(grid.cells.columns, grid.header, strict=True))), grid.numbers)
+    if isinstance(grid, Cells) and grid.header is not None:
+        return _named(grid, grid.text.columns, list(grid.header))
     if not grid.height:
         msg = "the body is empty"
         raise EmptyBodyError(msg)
-    width = int(grid.widths[0])
-    header = [cell or "" for cell in grid.cells.row(0)[:width]]
+    if isinstance(grid, Lines):
+        width = int(grid.widths[0])
+        header = [cell or "" for cell in grid.cells.row(0)[:width]]
+        rows = grid.slice(1)
+        if (wrong := (rows.widths != width).arg_true()).len():
+            at = int(wrong[0])
+            msg = f"row {rows.numbers[at]} has {rows.widths[at]} fields, not the header's {width}"
+            raise RaggedRowError(msg)
+        _check_header(header)
+        cells = rows.cells.select(rows.cells.columns[:width])
+        return Table(cells.rename(dict(zip(cells.columns, _unique(header), strict=True))), rows.numbers)
+    # A sheet's header runs to its last filled cell; a row holding a cell right of it, or none at all, is no row.
+    first = grid.text.row(0)
+    width = max((at + 1 for at, cell in enumerate(first) if cell is not None), default=0)
+    header = [cell or "" for cell in first[:width]]
     rows = grid.slice(1)
-    # A line's row is as wide as its fields; a sheet's rows are all the sheet's width, a row past the header's last
-    # column holding nothing there.
-    wrong = (rows.widths > width) if grid.rectangular else (rows.widths != width)
-    if (wrong := wrong.arg_true()).len():
-        at = int(wrong[0])
-        msg = f"row {rows.numbers[at]} has {rows.widths[at]} fields, not the header's {width}"
+    past = rows.text.columns[width:]
+    beyond = rows.text.select(pl.any_horizontal(pl.col(past).is_not_null())).to_series() if past else None
+    if beyond is not None and (wrong := beyond.arg_true()).len():
+        msg = f"row {rows.numbers[int(wrong[0])]} holds a cell right of the header's last, column {width}"
         raise RaggedRowError(msg)
-    cells = rows.cells.select(rows.cells.columns[:width])
-    if grid.rectangular and (empty := cells.select(pl.all_horizontal(pl.all().is_null())).to_series().arg_true()).len():
-        msg = f"row {rows.numbers[int(empty[0])]} is empty, and a table's rows run to its end"
+    kept = rows.text.columns[:width]
+    empty = rows.text.select(pl.all_horizontal(pl.col(kept).is_null())).to_series() if kept else None
+    if empty is not None and (at := empty.arg_true()).len():
+        msg = f"row {rows.numbers[int(at[0])]} is empty, and a table's rows run to its end"
         raise ReadError(msg)
+    _check_header(header)
+    return _named(rows, kept, _unique(header))
+
+
+def _named(grid: Cells, kept: Sequence[str], labels: Sequence[str]) -> Table:
+    """Return *grid*'s columns *kept* as a table, each frame's columns named *labels*."""
+    names = dict(zip(kept, labels, strict=True))
+
+    def named(frame: pl.DataFrame | None) -> pl.DataFrame | None:
+        return None if frame is None else frame.select(kept).rename(names)
+
+    return Table(
+        typing.cast("pl.DataFrame", named(grid.text)),
+        grid.numbers,
+        named(grid.kinds),
+        named(grid.floats),
+        named(grid.moments),
+    )
+
+
+def _check_header(header: Sequence[str]) -> None:
     if any(_NUL in cell for cell in header):
-        msg = f"the header {header!r} holds a NUL, which no heading does"
+        msg = f"the header {list(header)!r} holds a NUL, which no heading does"
         raise UnknownLayoutError(msg)
-    return Table(cells.rename(dict(zip(cells.columns, _unique(header), strict=True))), rows.numbers)
 
 
 def _unique(header: Sequence[str]) -> list[str]:
@@ -428,7 +593,11 @@ def _unique(header: Sequence[str]) -> list[str]:
 
 @dataclasses.dataclass(frozen=True)
 class Header:
-    """The table is the grid: its first row the header, every row below it a row, each as wide as the header."""
+    """The table is the grid: its first row the header, every row below it a row.
+
+    A line's row is as wide as the header; a sheet's header runs to its last filled cell, and a row of the sheet must
+    hold no cell right of it and some cell under it.
+    """
 
     stated: frozenset[str] = frozenset()
     vouches: bool = False
@@ -522,7 +691,8 @@ class Long:
 
     The fields before them are the record's, their columns leading the header; every header after them fullmatches
     *keys*, and *key* gives the key's text from the match (its whole text by default). An empty value cell is a row
-    whose value is ``None`` (*empty_cells* ``"keep"``), or no row (``"drop"``). Rows come record by record.
+    whose value is ``None`` (*empty_cells* ``"keep"``), or no row (``"drop"``). Rows come record by record. A sheet's
+    cells keep their kinds.
     """
 
     keys: re.Pattern[str]
@@ -549,22 +719,28 @@ class Long:
         if len(set(keyed.values())) != len(keyed):
             msg = f"the header names a key twice: {list(keyed.values())!r}"
             raise UnknownLayoutError(msg)
-        cells = table.cells.with_row_index("_row").unpivot(
-            index=["_row", *table.cells.columns[: len(labels)]],
-            on=list(keyed),
-            variable_name=key_column.label,
-            value_name=value_column.label,
-        )
-        cells = cells.with_columns(pl.col(key_column.label).replace_strict(keyed, return_dtype=pl.String))
         order = {name: at for at, name in enumerate(keyed)}
-        cells = cells.sort(
-            "_row",
-            pl.col(key_column.label).replace_strict({v: order[k] for k, v in keyed.items()}, return_dtype=pl.Int64),
-        )
+        record_columns = table.cells.columns[: len(labels)]
+
+        def long(frame: pl.DataFrame | None) -> pl.DataFrame | None:
+            if frame is None:
+                return None
+            cells = frame.with_row_index("_row").unpivot(
+                index=["_row", *record_columns], on=list(keyed), variable_name="_key", value_name=value_column.label
+            )
+            cells = cells.sort("_row", pl.col("_key").replace_strict(order, return_dtype=pl.Int64))
+            key = pl.col("_key").replace_strict(keyed, return_dtype=pl.String).alias(key_column.label)
+            return cells.select("_row", *record_columns, key, value_column.label)
+
+        frames = [long(frame) for frame in table.frames()]
+        cells = typing.cast("pl.DataFrame", frames[0])
+        if frames[1] is not None:  # a key is text, whatever kind its column's cells are
+            frames[1] = frames[1].with_columns(pl.lit("text").alias(key_column.label))
+        keep = pl.Series([True] * cells.height)
         if self.empty_cells == "drop":
-            cells = cells.filter(pl.col(value_column.label).str.strip_chars().fill_null("") != "")
-        numbers = table.numbers.gather(cells["_row"])
-        return Table(cells.drop("_row"), numbers)
+            keep = cells[value_column.label].str.strip_chars().fill_null("") != ""
+        numbers = table.numbers.gather(cells.filter(keep)["_row"])
+        return table.with_frames([None if f is None else f.filter(keep).drop("_row") for f in frames], numbers)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
