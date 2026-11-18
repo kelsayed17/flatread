@@ -210,6 +210,11 @@ class Csv:
     prose notes misquote (``"ts." Holdings o"``); a cell quoted cleanly still holds its separator. Raises
     ``LayoutError`` when built for a separator or quote that is not one character, ends a line, or is the other.
 
+    *closing* is a separator closing a line, past its last cell: ``"always"``, every line's, the header's too (a line
+    without it raises ``RaggedRowError``, naming it, and so does a quoted cell spanning lines, whose first line ends
+    inside it); ``"sometimes"``, a line's that may write one (a separator just before a line ending is dropped,
+    wherever it stands, so a row whose real last cell is empty is one short and raises). 7.x's ``_closing_separator``.
+
     A CSV writes each cell exactly (:attr:`exact`): a number padded with whitespace (`` 5``) is refused and a text
     cell of spaces is that text, unless a :class:`Padded` cleaner strips them. One byte order mark opens the body or
     none; a second raises ``EncodingError``.
@@ -222,6 +227,7 @@ class Csv:
     quote: str | None = '"'
     final_line_ending: bool | None = None
     misquoted: bool = False
+    closing: typing.Literal["always", "sometimes"] | None = None
 
     def __post_init__(self) -> None:
         for what, character in (("separator", self.separator), ("quote", self.quote)):
@@ -235,7 +241,7 @@ class Csv:
     def grid(self, stream: Stream, read: ReadContext) -> Lines:
         """Return the file's rows of cells: each line's (a quoted cell may span lines), its raw text and line number."""
         del read
-        body = stream.read()
+        body = self._closed(stream.read())
         text = self._text(body)
         if self.misquoted:
             return self._whole(text, body, parse=False)
@@ -244,6 +250,20 @@ class Csv:
             return parsed
         split = self._spanning(body, text) if parsed == "spans" else self._split(text)
         return self._whole(text, body) if split is None else split
+
+    def _closed(self, body: bytes) -> bytes:
+        """Return *body* without the separator closing its lines (*closing*), refusing a line without one (always)."""
+        if self.closing is None:
+            return body
+        sep = re.escape(self.separator.encode())
+        if self.closing == "always":
+            unclosed = re.search(rb"(?<!" + sep + rb")(?:\r\n|(?<!\r)\n)", body)
+            last = body.rsplit(b"\n", 1)[-1].removesuffix(b"\r")
+            if unclosed is not None or (last and not last.endswith(self.separator.encode())):
+                line = body.count(b"\n", 0, unclosed.start()) + 1 if unclosed is not None else body.count(b"\n") + 1
+                msg = f"line {line} does not end with its closing separator {self.separator!r}"
+                raise RaggedRowError(msg, row=line)
+        return re.sub(sep + rb"(?=\r?\n|\Z)", b"", body)
 
     def _text(self, body: bytes) -> str:
         """Return *body*'s text, or raise for a body empty, cut (by *final_line_ending*) or not UTF-8.
@@ -281,6 +301,7 @@ class Csv:
         are numbered by place, which only a refusal names, and the engine's refusal of it reads the body again by
         :meth:`grid`.
         """
+        body = self._closed(body)
         text = self._text(body)
         if len(self.separator.encode()) != 1 or not _breaks_as_polars(text):
             return None

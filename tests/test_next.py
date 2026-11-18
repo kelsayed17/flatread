@@ -2340,3 +2340,52 @@ class TestACsvCellIsReadExactly:
     def test_a_second_byte_order_mark_is_refused(self) -> None:
         with pytest.raises(EncodingError, match="two byte order marks"):
             fr.Reader(self.Row, fr.Csv()).rows(b"\xef\xbb\xbf\xef\xbb\xbfn,x,name\n5,1.5,a\n")
+
+
+class _Volume(msgspec.Struct, frozen=True):
+    symbol: Annotated[str, Label("Symbol")]
+    volume: Annotated[int, Label("Volume")]
+
+
+class TestAClosingSeparator:
+    """A separator closing every line or some, as 7.x's ``_closing_separator`` read them."""
+
+    @staticmethod
+    def _old(closing: Literal["always", "sometimes"]) -> object:
+        from flatread.delimited import CsvFile  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Closed(CsvFile[_Volume]):
+            _closing_separator = closing
+
+        return Closed(_Volume, separator="|")
+
+    @pytest.mark.parametrize(
+        ("closing", "body"),
+        [
+            ("always", b"Symbol|Volume|\nA|1|\nB|2|\n"),
+            ("always", b"Symbol|Volume|\r\nA|1|\r\nB|2|\r\n"),
+            ("always", b"Symbol|Volume|\nA|1|\nB|2|"),
+            ("always", b"Symbol|Volume|\nA|1|\nB|2\n"),
+            ("always", b"Symbol|Volume\nA|1|\n"),
+            ("always", b"Symbol|Volume|\nA|1|x\n"),
+            ("always", b"Symbol|Volume|\nA|1|\n\nB|2|\n"),
+            ("always", b"Symbol||Volume|\nA||1|\n"),
+            ("sometimes", b"Symbol|Volume\nA|1|\nB|2\n"),
+            ("sometimes", b"Symbol|Volume|\nA|1\n"),
+            ("sometimes", b"Symbol|Volume\nA|\n"),
+        ],
+    )
+    def test_as_7x_reads_it(self, closing: Literal["always", "sometimes"], body: bytes) -> None:
+        def outcome(read: typing.Callable[[bytes], list[_Volume]]) -> object:
+            try:
+                return read(body)
+            except ReadError:
+                return ReadError
+
+        new = fr.Reader(_Volume, fr.Csv(separator="|", quote=None, closing=closing))
+        assert outcome(new.rows) == outcome(self._old(closing).rows)  # ty: ignore[unresolved-attribute] (a 7.x reader)
+
+    def test_a_line_without_it_is_named(self) -> None:
+        reader = fr.Reader(_Volume, fr.Csv(separator="|", quote=None, closing="always"))
+        with pytest.raises(RaggedRowError, match=r"line 3 does not end with its closing separator '\|'"):
+            reader.rows(b"Symbol|Volume|\nA|1|\nB|2\n")

@@ -15,6 +15,11 @@ in the README, under "Versions".
 - A float cell that underflows (`1e-400`, which polars reads as `0.0`) is refused in every format, where the fast
   path and the grid read `0.0`.
 - A body opening with two byte order marks raises `EncodingError`, where polars dropped the second too.
+- `Csv(closing="always" | "sometimes")` reads a separator closing every line, or some, as 7.x's `_closing_separator`
+  did; a line without it under `"always"` raises `RaggedRowError`, naming the line. `Headers(blank=[""])` stood in for
+  it, and took a blank column anywhere in the header.
+
+In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
 
 ## 0.5.0
 

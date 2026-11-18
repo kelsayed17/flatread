@@ -799,6 +799,10 @@ class TitledCsv[RowT: msgspec.Struct](CsvFile[RowT]):
                 counted, count = True, match["count"]
             stated |= {group: text for group, text in match.groupdict().items() if text is not None}
             at = end + 1
+        # polars skips blank lines before a header: a blank line below the titles is no line the file writes there.
+        if body.startswith((b"\n", b"\r\n"), at):
+            msg = f"line {len(self._titles) + 1} is blank, not the header"
+            raise UnknownLayoutError(msg)
         # shortcut: the table is copied without its titles; polars' skip_lines would skip them in place, but every
         # format's _table would then take the offset, to save one copy of a body of at most 10 MB recorded (IBKR's).
         frame = super()._table(body[at:])
