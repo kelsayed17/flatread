@@ -1606,3 +1606,124 @@ class TestLong:
     ) -> None:
         with pytest.raises(LayoutError, match=words):
             fr.Reader(row, fr.Csv(), shape=long).rows(b"Name,2001\na,1\n")
+
+
+class TestFound:
+    """FoundTable's export as Found: its header found by the key field's words below any titles."""
+
+    class Filer(msgspec.Struct, frozen=True, gc=False):
+        cik: Annotated[str, Label("CIK", alternatives=("Cik",))]
+        name: Annotated[str | None, Label("Name")]
+        n: Annotated[int | None, Label("N")]
+
+    class Requested(msgspec.Struct, frozen=True, gc=False):
+        cik: Annotated[str, Label("CIK")]
+        kind: str | None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"Report\n\nName,CIK,N\na,1,2\n---,---,---\nb,3,\n",
+            b"Title\nCik,N\n1,2\n",
+            b"CIK,N\n",
+            b"Name,N\na,1\n",
+            b"CIK,Bogus\n1,2\n",
+            b"CIK,CIK\n1,2\n",
+            b"CIK,N\n1\n",
+            b"CIK,N,\n1,2,x\n",
+            b"CIK,N\n1,2,3\n",
+        ],
+        ids=["titles, rules", "an alternative", "no rows", "no key", "a stray", "twice", "short", "unlabeled", "past"],
+    )
+    def test_an_export_reads_or_raises_as_found_csv_does(self, body: bytes) -> None:
+        from flatread.found import FoundCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        outcomes = []
+        for read in (
+            fr.Reader(self.Filer, fr.Csv(), table=fr.Found(key="cik")).rows,
+            FoundCsv(self.Filer, key="cik").rows,
+        ):
+            try:
+                outcomes.append(read(body))
+            except ReadError as e:
+                outcomes.append(type(e))
+        assert outcomes[0] == outcomes[1]
+
+    def test_an_error_names_the_row_and_its_cells(self) -> None:
+        reader = fr.Reader(self.Filer, fr.Csv(), table=fr.Found(key="cik"))
+        with pytest.raises(RaggedRowError, match=r"^row 3 has 1 cells, not the header's 2: \['1'\]$"):
+            reader.rows(b"Title\nCIK,N\n1\n")
+        with pytest.raises(ReadError, match=r"^row 2 holds a value under no label: \['1', '2', 'x'\]$"):
+            reader.rows(b"CIK,N,\n1,2,x\n")
+
+    def test_a_section_line_states_its_field_for_the_rows_below_as_found_csv_does(self) -> None:
+        from flatread.found import FoundCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Sectioned(FoundCsv[TestFound.Requested]):
+            _section_prefix = "Request Type: "
+            _section_field = "kind"
+
+        body = b"CIK\n1\nRequest Type: FOIA\n2\n3\nRequest Type: X ,\n4\n"
+        found = fr.Found(key="cik", section="Request Type: ", section_field="kind")
+        rows = fr.Reader(self.Requested, fr.Csv(), table=found).rows(body)
+        assert rows == Sectioned(self.Requested, key="cik").rows(body)
+        assert [row.kind for row in rows] == [None, "FOIA", "FOIA", "X"]
+
+    @pytest.mark.parametrize(("body", "read"), [(b",CIK,N\n1,a,2\n2,b,3\n", True), (b",CIK,N\nx,a,2\n", False)])
+    def test_an_unlabeled_first_column_of_whole_numbers_numbers_the_rows(self, body: bytes, *, read: bool) -> None:
+        reader = fr.Reader(self.Filer, fr.Csv(), table=fr.Found(key="cik", numbered_rows=True))
+        if read:
+            assert reader.rows(body) == [self.Filer("a", None, 2), self.Filer("b", None, 3)]
+        else:
+            with pytest.raises(ReadError, match="under no label"):
+                reader.rows(body)
+
+    def test_a_heading_folds_each_header_cell(self) -> None:
+        reader = fr.Reader(self.Filer, fr.Csv(), table=fr.Found(key="cik", heading=str.upper))
+        assert reader.rows(b"cik,n\n1,2\n") == [self.Filer("1", None, 2)]
+
+    def test_an_open_header_reads_each_cell_as_its_column_for_a_shape(self) -> None:
+        class Field(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name")]
+            field: str
+            value: str | None
+
+        long = fr.Long(keys=re.compile(r"[A-Z]\w*"))
+        reader = fr.Reader(Field, fr.Csv(), table=fr.Found(key="name", open=True), shape=long)
+        assert reader.rows(b"Roster\nName,Phone,,Fax\na,1,,2\n") == [
+            Field("a", "Phone", "1"),
+            Field("a", "Fax", "2"),
+        ]
+
+    def test_a_sheet_export_reads_as_found_sheet_reads_it(self) -> None:
+        from flatread.sheets import FoundSheet  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Named(msgspec.Struct, frozen=True, gc=False):
+            cik: Annotated[str, Label("CIK")]
+            name: Annotated[str | None, Label("Name")]
+
+        body = workbook({"S": [["Title"], [None], ["Name", "CIK"], ["a", "x1"], [None, None], ["b", "x2"]]})
+        rows = fr.Reader(Named, fr.Sheet(), table=fr.Found(key="cik")).rows(body)
+        assert rows == FoundSheet(Named, key="cik").rows(body) == [Named("x1", "a"), Named("x2", "b")]
+
+    @pytest.mark.parametrize(
+        ("found", "words"),
+        [
+            (fr.Found(key="nope"), "is no field read from a column"),
+            (fr.Found(key="cik", section="Type: ", section_field="nope"), "is no field of the row"),
+        ],
+    )
+    def test_a_found_table_its_row_has_not_is_refused(self, found: fr.Found, words: str) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Reader(self.Filer, fr.Csv(), table=found).rows(b"CIK\n1\n")
+
+    def test_a_section_without_its_field_or_a_word_two_fields_share_is_refused(self) -> None:
+        with pytest.raises(LayoutError, match="go together"):
+            fr.Found(key="cik", section="Type: ")
+
+        class Shared(msgspec.Struct, frozen=True):
+            a: Annotated[str, Label("a", alternatives=("b",))]
+            b: str
+
+        with pytest.raises(LayoutError, match="two fields share a label"):
+            fr.Reader(Shared, fr.Csv(), table=fr.Found(key="a")).rows(b"a\nx\n")

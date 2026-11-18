@@ -10,6 +10,7 @@ import csv
 import io
 import math
 import os
+import re
 import zipfile
 from typing import TYPE_CHECKING, Annotated
 
@@ -198,10 +199,22 @@ def test_a_workbook_with_a_damaged_part_reads_or_raises_read_error(
     _reads_or_refuses(_SHEETS[reader], out.getvalue())
 
 
+class _Long(msgspec.Struct, frozen=True, gc=False):
+    name: Annotated[str, Label("Name")]
+    field: str
+    value: str | None
+
+
 _CUTS: dict[str, Callable[[bytes], object]] = {
     "flatread.next Cut": fr.Reader(_Row, fr.Csv(), table=fr.Cut(ends="blank", header=fr.Named())).rows,
     "flatread.next Cut, misquoted and found": fr.Reader(
         _Row, fr.Csv(misquoted=True), table=fr.Cut(filled=(2, 1), full_rows=True), empty=True
+    ).rows,
+    "flatread.next Found": fr.Reader(
+        _Row, fr.Csv(), table=fr.Found(key="name", section="# ", section_field="held")
+    ).rows,
+    "flatread.next Found, open and read long": fr.Reader(
+        _Long, fr.Csv(), table=fr.Found(key="name", open=True), shape=fr.Long(keys=re.compile(".+"))
     ).rows,
     "flatread.next Cut on a sheet": fr.Reader(
         _Row, fr.Sheet(sheet="S"), table=fr.Cut(header=fr.Headers(lacking=[(), ("held",)]))

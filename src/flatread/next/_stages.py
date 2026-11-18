@@ -27,6 +27,7 @@ from flatread.errors import (
     TruncatedFileError,
     UnknownLayoutError,
 )
+from flatread.next._headers import _LACKED, _laid_out
 from flatread.next._model import Cells, Grid, HeaderRule, Lines, ReadContext, Records, Source, Stream, Table
 
 if typing.TYPE_CHECKING:
@@ -39,6 +40,7 @@ __all__ = [
     "Csv",
     "Cut",
     "Derived",
+    "Found",
     "Header",
     "Layout",
     "Long",
@@ -1325,6 +1327,154 @@ class Cut:
         cells = [[None if cell is None else cell.strip() or None for cell in row] for row in rows]
         width = max((place + 1 for row in cells for place, cell in enumerate(row) if cell is not None), default=0)
         return _stacked([row[:width] for row in cells])
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Found:
+    """An export whose header is found below any title lines (FoundTable's), each column read by its label.
+
+    The header is the first row with a cell that is a word of the *key* field's label (its ``Label`` and alternatives,
+    each cell as *heading* folds it). Each cell of it names a column: one word of a field's label, which is that
+    field's column, a field it lacks reading as null. A cell no field's words name, two cells naming one field, a row
+    narrower than the header (cut inside its last row), or a value past the header or under a blank header cell raises,
+    naming the row. A row of nothing but spaces and ``-`` rules is skipped. *open* reads every header cell as a
+    column of its own, as written, for a shape that reads it (an adviser roster's, read long): a blank one names none,
+    and what is under it is not the file's. A row whose first cell opens with *section* and holds nothing past it
+    states *section_field* for the rows below, the text after the prefix; *numbered_rows* reads a first column with no
+    header cell, its cells whole numbers, as the export's own row numbers, no data. A sheet's cells keep their kinds.
+    """
+
+    key: str
+    heading: Callable[[str], str] | None = None
+    open: bool = False
+    section: str = ""
+    section_field: str = ""
+    numbered_rows: bool = False
+    stated: frozenset[str] = frozenset()
+    vouches: bool = True
+    #: A header read by name: a field's Label may name alternatives.
+    by_name: typing.ClassVar[bool] = True
+
+    def __post_init__(self) -> None:
+        if bool(self.section) != bool(self.section_field):
+            msg = (
+                "a section's prefix and the field it states go together: set both section and section_field, or neither"
+            )
+            raise LayoutError(msg)
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table below the row naming the key field, a column per field (or per cell, *open*)."""
+        columns, by_word, key_words = self._words(read)
+        if isinstance(grid, Lines):
+            table, widths = Table(grid.cells, grid.numbers), grid.widths
+        else:
+            table = Table(grid.text, grid.numbers, grid.kinds, grid.floats, grid.moments)
+            widths = pl.repeat(grid.text.width, grid.height, dtype=pl.Int64, eager=True)
+        at, names = self._header(table, widths, by_word, key_words, read)
+        below, widths = _sliced(table, at + 1), widths.slice(at + 1)
+        keep, sections = self._kept(below.cells)
+        self._check_rows(below, widths, keep, names)
+        rows = below.with_frames(
+            [None if f is None else f.filter(keep) for f in below.frames()], below.numbers.filter(keep)
+        )
+        placed = {name: below.cells.columns[place] for place, name in enumerate(names) if name is not None}
+        labels = list(placed) if self.open else [column.label for column in columns]
+        laid = _laid_out(rows, {column: label for label, column in placed.items()}, labels)
+        if not self.section:
+            return laid
+        # The section's text is the stage's, not a cell's: typed as text, whatever a sheet's kinds.
+        label = read.columns[self.section_field].label
+        frames = [
+            None
+            if f is None
+            else f.with_columns(sections.filter(keep).alias(label) if place == 0 else pl.lit(None, dtype).alias(label))
+            for place, (f, dtype) in enumerate(zip(laid.frames(), _LACKED, strict=True))
+        ]
+        return dataclasses.replace(laid.with_frames(frames, laid.numbers), written=laid.written | {label})
+
+    def _words(self, read: ReadContext) -> tuple[list[Column], dict[str, str], set[str]]:
+        """Return the columns a header may name, the label each word names, and the key field's words."""
+        if not (keyed := [column for column in read.columns.values() if column.field == self.key]):
+            msg = f"the key {self.key!r} is no field read from a column"
+            raise LayoutError(msg)
+        if self.section_field and self.section_field not in read.columns:
+            msg = f"the section field {self.section_field!r} is no field of the row"
+            raise LayoutError(msg)
+        columns = [c for c in read.columns.values() if c.field not in read.stated and c.field != self.section_field]
+        words = [(word, column.label) for column in columns for word in (column.label, *column.aliases)]
+        if len(by_word := dict(words)) != len(words):
+            msg = f"two fields share a label: {sorted(word for word, _ in words)}"
+            raise LayoutError(msg)
+        return columns, by_word, {keyed[0].label, *keyed[0].aliases}
+
+    def _header(
+        self, table: Table, widths: pl.Series, by_word: Mapping[str, str], key_words: Collection[str], read: ReadContext
+    ) -> tuple[int, list[str | None]]:
+        """Return the header's place, the first row naming the key field, and the column each of its cells names."""
+        fold = self.heading or (lambda cell: cell)
+        rows = enumerate(table.cells.iter_rows())
+        at = next((n for n, row in rows if set(key_words) & {fold(cell) for cell in row if cell is not None}), None)
+        if at is None:
+            msg = f"the file has no header naming {self.key}: it is not a {getattr(read.row, '__name__', 'row')} file"
+            raise UnknownLayoutError(msg)
+        # The header is as wide as its row: a line's own cells, a sheet's every column.
+        cells: list[str] = [cell or "" for cell in table.cells.row(at)[: int(widths[at])]]
+        names: list[str | None] = [
+            (cell.strip() if self.open else by_word.get(fold(cell))) if cell.strip() else None for cell in cells
+        ]
+        row = int(table.numbers[at])
+        if unknown := [cell for cell, name in zip(cells, names, strict=True) if cell.strip() and name is None]:
+            msg = f"the header names columns the row does not declare: {unknown}"
+            raise UnknownLayoutError(msg, row=row)
+        if len(named := [name for name in names if name is not None]) != len(set(named)):
+            msg = f"the header names one field twice: {cells}"
+            raise UnknownLayoutError(msg, row=row)
+        return at, names
+
+    def _kept(self, cells: pl.DataFrame) -> tuple[pl.Series, pl.Series]:
+        """Return which rows are the table's (no blank or rule, no section's), and each row's section."""
+        # A grid with a header has a column, so a row has cells to join.
+        bare = cells.select(pl.concat_str(pl.all().fill_null(""), separator="").str.strip_chars(" -") == "").to_series()
+        if not self.section:
+            return ~bare, pl.repeat(None, cells.height, dtype=pl.String, eager=True)
+        lead, rest = pl.col(cells.columns[0]), cells.columns[1:]
+        alone = (
+            pl.concat_str(pl.col(rest).fill_null(""), separator="").str.strip_chars() == "" if rest else pl.lit(1) == 1
+        )
+        heads = cells.select(lead.str.starts_with(self.section).fill_null(value=False) & alone).to_series() & ~bare
+        # Each row's section: the text of the last section row above it.
+        text = lead.str.strip_prefix(self.section).str.strip_chars()
+        sections = cells.select(pl.when(heads).then(text)).to_series().fill_null(strategy="forward")
+        return ~(bare | heads), sections
+
+    def _check_rows(self, below: Table, widths: pl.Series, keep: pl.Series, names: Sequence[str | None]) -> None:
+        """Refuse a row narrower than the header, or holding a value past it or under no label of *names*."""
+        cells, numbers, width = below.cells, below.numbers, len(names)
+        if (short := (keep & (widths < width)).arg_true()).len():
+            place = int(short[0])
+            row = int(numbers[place])
+            msg = f"row {row} has {widths[place]} cells, not the header's {width}: {_written(cells, widths, place)}"
+            raise RaggedRowError(msg, row=row)
+        unnamed = [] if self.open else [cells.columns[place] for place, name in enumerate(names) if name is None]
+        under = [pl.col(column) for column in unnamed]
+        # An unnamed first column of whole numbers holds the export's row numbers (2013's BDC file), and is no data.
+        if self.numbered_rows and names and names[0] is None and unnamed and unnamed[0] == cells.columns[0]:
+            first = pl.col(cells.columns[0])
+            under[0] = pl.when(~first.str.strip_chars().str.contains(r"^\d+$").fill_null(value=False)).then(first)
+        checked = [*under, *(pl.col(column) for column in cells.columns[width:])]
+        if not checked:
+            return
+        held = cells.select(pl.any_horizontal(c.str.strip_chars().fill_null("") != "" for c in checked)).to_series()
+        if (wrong := (keep & held).arg_true()).len():
+            place = int(wrong[0])
+            row = int(numbers[place])
+            msg = f"row {row} holds a value under no label: {_written(cells, widths, place)}"
+            raise ReadError(msg, row=row)
+
+
+def _written(cells: pl.DataFrame, widths: pl.Series, place: int) -> list[str]:
+    """Return row *place*'s cells as written, to its width, an empty one ``""``."""
+    return [cell or "" for cell in cells.row(place)[: int(widths[place])]]
 
 
 def _columns(table: Table, names: Sequence[str]) -> Table:

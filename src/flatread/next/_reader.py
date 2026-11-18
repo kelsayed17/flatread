@@ -43,7 +43,6 @@ class Reader[RowT: msgspec.Struct]:
         as_written: Collection[str] = (),
         empty: bool | None = None,
     ) -> None:
-        from flatread.next._headers import Headers  # noqa: PLC0415 (built on this module, as the stages are)
         from flatread.next._stages import Csv, Header, Sheet  # noqa: PLC0415 (the default finder, built on this module)
 
         self.row = row
@@ -63,8 +62,9 @@ class Reader[RowT: msgspec.Struct]:
             if shape is not None:
                 msg = "a header rule reads the struct's columns and a shape the table as written: a reader takes one"
                 raise LayoutError(msg)
+        # A finder or rule that finds a column by its label declares it (by_name), so a Label may name alternatives.
         aliased = [column.field for column in self.engine.columns if column.aliases]
-        if aliased and (header is None or isinstance(header, Headers)):
+        if aliased and not (getattr(header, "by_name", False) or getattr(self.table, "by_name", False)):
             msg = f"the fields {aliased} name Label alternatives, which only a header read by name takes"
             raise LayoutError(msg)
         # A CSV or a sheet that is a header and its rows, read with nothing between, has a typed read of its own

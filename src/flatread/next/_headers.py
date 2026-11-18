@@ -127,6 +127,8 @@ class Named:
     unread: Collection[str] = ()
     blank: Collection[str] = ()
     heading: Callable[[str], str] | None = None
+    #: A header read by name: a field's Label may name alternatives.
+    by_name: typing.ClassVar[bool] = True
 
     def check(self, columns: Sequence[Column], required: Collection[str]) -> None:
         """Refuse a word two fields' labels share and a required field that is no column."""

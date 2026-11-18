@@ -233,7 +233,8 @@ class HeaderRule(typing.Protocol):
 
     A table finder finds the header row and hands its table here, each column under its header cell (a repeated
     cell's later columns apart, by a NUL and their count); the rule returns it under the struct's labels, in the
-    struct's order, a column the header lacks null, or raises ``UnknownLayoutError`` for a header it is not.
+    struct's order, a column the header lacks null, or raises ``UnknownLayoutError`` for a header it is not. A rule
+    (or a finder) that finds a column by its label sets ``by_name`` true, so a ``Label`` may name alternatives.
     """
 
     def check(self, columns: Sequence[Column], required: Collection[str]) -> None:

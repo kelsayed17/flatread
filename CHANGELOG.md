@@ -19,6 +19,9 @@ in the README, under "Versions".
 - `flatread.next`'s `Long` takes `LongFile`'s switches: `key_count` (a header naming several keys, each from its
   group), `spacers`, `scattered` and `beside` record columns, `repeats` and `needs_rows`. A sheet's key is its header
   text typed as the key field, as `LongFile` types it; next refused an `int` key on a sheet before.
+- `flatread.next` finds an export's header by its key field's words, as `FoundTable` (`FoundCsv`, `FoundSheet`) does:
+  `Found(key=..., heading=..., open=..., section=..., section_field=..., numbered_rows=...)`. A finder or header rule
+  that reads by name sets `by_name`, and only then may a `Label` name alternatives.
 
 ## 0.5.0
 
