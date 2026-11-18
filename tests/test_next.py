@@ -417,6 +417,27 @@ def test_a_sheet_s_moment_cell_is_its_value_and_its_text_is_read_by_its_format()
     ]
 
 
+def test_a_sheet_s_moment_field_of_no_format_reads_its_moment_cells_alone() -> None:
+    class Stamp(msgspec.Struct, frozen=True):
+        at: dt.datetime
+        until: dt.time | None
+
+    reader = fr.Reader(Stamp, fr.Sheet())
+    body = workbook({"S": [["at", "until"], [dt.date(2026, 1, 2), dt.time(16)], [dt.date(2026, 1, 3), None]]})
+    assert reader.rows(body) == [Stamp(dt.datetime(2026, 1, 2), dt.time(16)), Stamp(dt.datetime(2026, 1, 3), None)]
+    with pytest.raises(ReadError, match="'at' cell '2026-01-03 09:30' is not a date cell: its field names no Format"):
+        reader.frame(workbook({"S": [["at", "until"], ["2026-01-03 09:30", None]]}))
+
+    class Keyed(msgspec.Struct, frozen=True):
+        until: dt.time
+        at: dt.datetime
+        value: float
+
+    long = fr.Reader(Keyed, fr.Sheet(), shape=fr.Long(keys=re.compile(".+")))
+    with pytest.raises(ReadError, match="no Format"):  # a long table's key is its header's text
+        long.frame(workbook({"S": [["until", "2026-01-02"], [dt.time(16), 1.5]]}))
+
+
 def test_a_sheet_s_header_runs_to_its_last_filled_cell() -> None:
     with pytest.raises(EmptyBodyError):
         _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"]]}))

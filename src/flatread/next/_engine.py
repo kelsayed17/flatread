@@ -69,7 +69,7 @@ class Engine[RowT: msgspec.Struct]:
     are not all zero but which reads as ``0.0`` (``1e-400``, an underflow) is refused.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 (a field's rules each format sets)
         self,
         row: type[RowT],
         *,
@@ -77,6 +77,7 @@ class Engine[RowT: msgspec.Struct]:
         as_written: Collection[str] = (),
         rows_required: bool = True,
         exact: bool = False,
+        moments: bool = False,
     ) -> None:
         if keyword := [p.name for p in inspect.signature(row).parameters.values() if p.kind is p.KEYWORD_ONLY]:
             msg = f"the fields {keyword} of {row.__name__} are keyword-only, and a reader builds its rows by position"
@@ -88,7 +89,7 @@ class Engine[RowT: msgspec.Struct]:
         seen: dict[str, int] = {}
         self.columns = []
         for field in fields:
-            column = _column(row, field)
+            column = _column(row, field, moments=moments)
             seen[column.label] = count = seen.get(column.label, -1) + 1
             self.columns.append(column._replace(label=f"{column.label}{_NUL}{count}") if count else column)
         if stray := set(as_written) - {column.field for column in self.columns}:
@@ -253,6 +254,9 @@ class Engine[RowT: msgspec.Struct]:
 
         In an exact format a number cell padded with whitespace is refused; in any, a float that underflows to 0.0.
         """
+        if column.written is None and column.scalar in _MOMENTS - {dt.date}:  # a sheet's moment field, as text here
+            _refuse(text.is_not_null(), text, column, "date cell: its field names no Format for text", numbers)
+            return pl.repeat(None, text.len(), dtype=_temporal(column.scalar, None), eager=True).alias(column.field)
         number = column.written is None and column.flag is None and column.scalar in (int, float)
         what = "whole number" if column.scalar is int else "number"
         if number and self._exact:
@@ -314,6 +318,10 @@ class Engine[RowT: msgspec.Struct]:
             return native.zip_with(stored, values).alias(column.field)
         # A date or time: a moment cell is its value; a text cell is read by its field's format.
         stored = text.is_not_null() & (kinds == "moment").fill_null(value=False)
+        if column.written is None and column.scalar is not dt.date:  # no Format: a moment cell alone
+            _refuse(
+                text.is_not_null() & ~stored, text, column, "date cell: its field names no Format for text", numbers
+            )
         _refuse(text.is_not_null() & ~stored & ~is_text, text, column, "date cell or text", numbers)
         written = column.written or _ISO_DATE
         dtype = _temporal(column.scalar, written)
@@ -378,8 +386,12 @@ def _shown(label: str) -> str:
     return label.partition(_NUL)[0]
 
 
-def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Column:
-    """Return *field*'s column: its label (its own name, where it names no ``Label``), type and markers."""
+def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo, *, moments: bool = False) -> Column:
+    """Return *field*'s column: its label (its own name, where it names no ``Label``), type and markers.
+
+    A date-and-time or time field names the ``Format`` its text is written in, unless the format stores *moments*
+    (a sheet's date cells): then a field of none reads a moment cell alone, and refuses a text one.
+    """
     metadata = _metadata(field.type)
     for marker in (Span, Joined, Cell):
         if _marker(metadata, marker) is not None:
@@ -394,7 +406,7 @@ def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Colu
     written = _marker(metadata, Format)
     if written is None and scalar is dt.date:
         written = _ISO_DATE  # flatread.next: a bare date is ISO 8601's, exactly
-    if written is None and scalar in _MOMENTS - {dt.date}:
+    if written is None and scalar in _MOMENTS - {dt.date} and not moments:
         msg = f"the field {field.name!r} needs the Format its text is written in"
         raise LayoutError(msg)
     column = Column(

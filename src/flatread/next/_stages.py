@@ -611,6 +611,8 @@ class Sheet:
     :class:`Titled` title matches.
     """
 
+    #: A sheet stores date cells, so a date-and-time or time field may name no ``Format``: it reads them alone.
+    moments: typing.ClassVar[bool] = True
     sheet: str | None = None
 
     def typed(self, body: bytes, dtypes: Mapping[str, type[pl.DataType]], null_values: Sequence[str]) -> Table | None:  # noqa: PLR0911 (a None for each doubt)

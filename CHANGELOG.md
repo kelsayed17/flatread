@@ -21,6 +21,9 @@ in the README, under "Versions".
   did; a line without it under `"always"` raises `RaggedRowError`, naming the line. `Headers(blank=[""])` stood in for
   it, and took a blank column anywhere in the header.
 
+A `flatread.next` sheet's date-and-time or time field may name no `Format`, as a 7.x `SheetFile`'s may: it reads the
+sheet's date cells alone, and refuses a text cell, naming it. A text format's such field still needs its `Format`.
+
 In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
 In both, a body of CRLF lines that ends in a CR alone raises `TruncatedFileError`: it was cut between the CR and the
 LF, and `final_line_ending=True` took the CR for a whole line ending.
