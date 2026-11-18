@@ -222,6 +222,21 @@ class TestATitledCsvsHeader:
                 _Titled(_Volume).rows(body)
 
 
+class TestABodyCutInsideCrlf:
+    def test_a_crlf_body_ending_in_a_cr_alone_was_cut(self) -> None:
+        """A cut between a CRLF's CR and LF left a line ending that looks whole, and the rows after it unread."""
+        from flatread import next as fr  # noqa: PLC0415 (both readers share the check)
+        from flatread.errors import TruncatedFileError  # noqa: PLC0415
+
+        body = b"Symbol,Volume\r\nA,1\r\nB,2\r"
+        for read in (
+            CsvFile(_Volume, final_line_ending=True).rows,
+            fr.Reader(_Volume, fr.Csv(final_line_ending=True)).rows,
+        ):
+            with pytest.raises(TruncatedFileError, match="between the CR and the LF"):
+                read(body)
+
+
 class TestASwitchLeftUnset:
     def test_each_required_switch_unset_is_a_layout_error_when_built(self) -> None:
         class _Trailer(TrailerCsv[_Volume]):

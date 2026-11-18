@@ -22,6 +22,8 @@ in the README, under "Versions".
   it, and took a blank column anywhere in the header.
 
 In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
+In both, a body of CRLF lines that ends in a CR alone raises `TruncatedFileError`: it was cut between the CR and the
+LF, and `final_line_ending=True` took the CR for a whole line ending.
 
 ## 0.5.0
 
