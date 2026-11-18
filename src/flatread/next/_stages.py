@@ -1167,10 +1167,10 @@ class Header:
 class Preamble:
     """A table below a preamble of any length (a title, a source, notes, blank rows): its header found, not placed.
 
-    The header is the first row whose first cell is *label*, by default the struct's first column's; the rows above it
-    are dropped unread, and the table below it read as :class:`Header` reads one. A grid with no such row raises
-    ``UnknownLayoutError``. One stage for a CSV's and a sheet's (``PreambleCsv``, ``PreambleSheet``); a preamble whose
-    every row is known is a :class:`Titled`'s.
+    The header is the first row whose first cell is *label*, by default the first column's no stage states; the rows
+    above it are dropped unread, and the table below it read as :class:`Header` reads one. A grid with no such row
+    raises ``UnknownLayoutError``. One stage for a CSV's and a sheet's (``PreambleCsv``, ``PreambleSheet``); a preamble
+    whose every row is known is a :class:`Titled`'s.
     """
 
     label: str | None = None
@@ -1180,7 +1180,8 @@ class Preamble:
 
     def find(self, grid: Grid, read: ReadContext) -> Table:
         """Return the table under the first row opening with the header's first label."""
-        label = self.label if self.label is not None else next(iter(read.columns.values())).label
+        read_columns = [column for column in read.columns.values() if column.field not in read.stated]
+        label = self.label if self.label is not None else read_columns[0].label
         first = (grid.cells if isinstance(grid, Lines) else grid.text).get_column("0", default=None)
         found = None if first is None else (first == label).fill_null(value=False).arg_true()
         if found is None or not found.len():
@@ -1853,7 +1854,8 @@ class Long:
     with no text heads a spacer, a column holding nothing, where *spacers* is set; no two headings give one key, and
     none is written twice, unless *repeats*: then a key field no group names is its heading's place among the keys,
     from 1. An empty value cell is a row whose value is ``None`` (*empty_cells* ``"keep"``), or no row (``"drop"``).
-    Rows come record by record, a record's keys in header order; a table of a header and no rows is refused where
+    Rows come record by record, a record's keys in header order, or key by key (*by_key*: a series' rows together,
+    in the table's order); a table of a header and no rows is refused where
     *needs_rows* is set, though the reader takes a table of none (one of rows with no value is still an answer). A
     sheet's cells keep their kinds.
     """
@@ -1867,6 +1869,7 @@ class Long:
     beside: Collection[str] = ()
     repeats: bool = False
     needs_rows: bool = False
+    by_key: bool = False
 
     def __post_init__(self) -> None:
         if self.key_count < 1:
@@ -2012,8 +2015,9 @@ class Long:
                     index=["_row", *index], on=list(keyed), variable_name="_key", value_name=value.label
                 )
                 # unpivot writes key by key; row r's key j is at j * height + r, so rows come record by record.
-                height, at = frame.height, pl.int_range(frame.height * len(keyed))
-                cells = cells.select(pl.all().gather((at % len(keyed)) * height + at // len(keyed)))
+                if not self.by_key:
+                    height, at = frame.height, pl.int_range(frame.height * len(keyed))
+                    cells = cells.select(pl.all().gather((at % len(keyed)) * height + at // len(keyed)))
             out = [
                 pl.col(by_label[column.label]).alias(column.label)
                 if column.label in by_label

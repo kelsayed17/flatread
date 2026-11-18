@@ -1718,6 +1718,15 @@ class TestLong:
         rows = fr.Reader(self.Placed, fr.Csv(), shape=long).rows(b"Name,2001,2001\na,1,2\n")
         assert rows == [self.Placed("a", 2001, 1, 1.0), self.Placed("a", 2001, 2, 2.0)]
 
+    def test_a_long_table_read_by_key_holds_a_key_s_rows_together(self) -> None:
+        long = fr.Long(keys=re.compile(r"(?P<year>\d{4})"), key_count=2, repeats=True, by_key=True)
+        rows = fr.Reader(self.Placed, fr.Csv(), shape=long).rows(b"Name,2001,2002\na,1,2\nb,3,4\n")
+        assert [(row.name, row.year) for row in rows] == [("a", 2001), ("b", 2001), ("a", 2002), ("b", 2002)]
+
+    def test_a_preamble_s_header_opens_with_the_first_column_no_stage_states(self) -> None:
+        reader = fr.Reader(_Described, fr.Csv(), table=fr.Given({"table": "F101"}, table=fr.Preamble()))
+        assert reader.rows(b"Title\ncolumn,series,unit\n1,FL1,usd\n") == [_Described("F101", 1, "FL1", "usd")]
+
     @pytest.mark.parametrize(
         ("row", "long", "body", "error", "words"),
         [

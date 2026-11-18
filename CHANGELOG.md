@@ -44,6 +44,9 @@ columns are kept (the first, one a field, or those `at` names), and `table` find
 `Given(values, table=...)` states fields the reader knows for every row of a file (the table it is of); and the
 `Numbered(field)` shape sets each row's place in the table as a field no cell holds.
 
+`Long(by_key=True)` writes a long table key by key, a series' rows together, as 7.x's `_by_key` does; and
+`Preamble()`'s header opens with the first column no stage states, so it composes with `Given`.
+
 In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
 In both, a body of CRLF lines that ends in a CR alone raises `TruncatedFileError`: it was cut between the CR and the
 LF, and `final_line_ending=True` took the CR for a whole line ending.
