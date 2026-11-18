@@ -10,8 +10,13 @@ Each release's changes, newest first, and what a reader declared for the release
 - Importing `flatread.pdf` no longer changes pdfminer for any other caller: outside a flatread read, its stream decoders
   are pdfminer's own again, logging included. The caps and the linear-time `decompress_corrupted` apply only during a
   flatread read.
-- One test of a Rust panic (`flatread.core._panicked`) serves every reader. Before, the core and sheet readers each had
-  their own.
+- A `ReadError` carries `row`, `label` and `member` as attributes beside its message, each `None` where not known. A
+  `flatread.next` reader sets all three wherever its message names them, numbering a row as its file does; the other
+  readers set `row` and `label` on a cell's error, numbering rows as their messages do.
+- A `LayoutError` raised inside a read now stays a `LayoutError` at the five places that turn a `ValueError` into a
+  `ReadError` naming where. No read is known to reach them with one, so no reader is known to read differently.
+- One test of a Rust panic (`flatread.core._panicked`) serves every reader. Before, the core, sheet and
+  `flatread.next` readers each had their own.
 
 ## 0.5.0
 

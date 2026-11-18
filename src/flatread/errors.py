@@ -13,6 +13,12 @@
   overlap, a required switch left unset, a switch naming a field the struct lacks. Most are raised when the reader is
   built; a few only show once a body is read (an inner reader's columns that are not the struct's).
 
+To tell a download to fetch again from a file the publisher changed: a text body cut short (CSV, XML, a trailer missing)
+is :class:`TruncatedFileError`, and a zip cut short or damaged, or a body that is no zip where one was expected (an
+HTML error page), is :class:`CorruptArchiveError`, since a zip's directory sits at its end; both call for a fresh
+download. A body laid out as some other file (a root, sheet, header or member that is not the reader's) is
+:class:`UnknownLayoutError`, which calls for a look at what the publisher changed.
+
 Both are :class:`ValueError`, as :mod:`json` and msgspec raise theirs, so code that catches a decoder's
 ``ValueError`` catches them; catch :class:`ReadError` alone to handle bad data and let a misdeclared reader fail loudly.
 """
@@ -31,7 +37,26 @@ __all__ = [
 
 
 class ReadError(ValueError):
-    """A body that is not the file its reader describes; the message names where it went wrong."""
+    """A body that is not the file its reader describes; the message names where it went wrong.
+
+    Where a reader knows them, the error carries where as values too, each ``None`` where it does not: :attr:`row`,
+    the row its message names; :attr:`label`, the column's label; and :attr:`member`, the zip member read. A
+    :mod:`flatread.next` reader numbers a row as its file does (a text file's line, a sheet's row) and sets all three
+    wherever its message names them; the other readers set ``row`` and ``label`` on a cell's error, numbering rows
+    as their messages do.
+    """
+
+    def __init__(
+        self, *args: object, row: int | None = None, label: str | None = None, member: str | None = None
+    ) -> None:
+        """Raise with the message *args*, and *row*, *label* and *member* where they are known."""
+        super().__init__(*args)
+        #: The row as the file numbers it, where the error is one row's.
+        self.row = row
+        #: The label of the column, where the error is one column's.
+        self.label = label
+        #: The name of the zip member read, where the body was a zip's.
+        self.member = member
 
 
 class EmptyBodyError(ReadError):

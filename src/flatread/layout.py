@@ -305,6 +305,8 @@ class LongFile[RowT: msgspec.Struct](File[RowT]):
         for key, text in zip(keys, series, strict=True):
             try:
                 typed.append(_typed(key, text, "key"))
+            except LayoutError:  # a reader declared wrong stays one: no ValueError below relabels it
+                raise
             except ValueError as e:
                 msg = f"the headers {list(written)!r} name keys {text.to_list()!r}, not each a {key.field}: {e}"
                 raise ReadError(msg) from e

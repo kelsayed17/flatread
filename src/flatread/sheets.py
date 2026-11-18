@@ -899,6 +899,8 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             text = pl.select(pl.when(cells != "").then(cells)).to_series().alias(column.label)
             try:
                 return self._value(column, text, text)
+            except LayoutError:  # a reader declared wrong stays one, as the two loads would raise it
+                raise
             except ValueError:  # a cell its Format or Flag refuses: the two loads name it
                 return None
         dtype = pl.Date() if column.scalar is dt.date else _SHEET_CASTS.get(column.scalar, cells.dtype)
@@ -1192,6 +1194,8 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         text = text.cast(pl.String).replace(["", *self._null_values], None).alias(column.label)
         try:
             value = self._value(column, text, typed)
+        except LayoutError:  # a reader declared wrong stays one: no ValueError below relabels it
+            raise
         except ValueError as e:
             msg = f"the {self._sheet!r} sheet's cell {column.label!r} is not its {column.field}: {e}"
             raise ReadError(msg) from e

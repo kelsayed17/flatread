@@ -7,7 +7,7 @@ from collections.abc import Collection, Generator, Sequence
 import msgspec
 import polars as pl
 
-from flatread.core import Column
+from flatread.core import Column, _panicked
 from flatread.errors import ReadError
 from flatread.next._engine import Engine
 from flatread.next._model import Cleaner, Format, ReadContext, Shape, Source, Stream, TableFinder
@@ -89,12 +89,14 @@ class Reader[RowT: msgspec.Struct]:
             if self.shape is not None:
                 table = self.shape.shape(table, self.engine.columns, read)
             return self.engine.frame(table, read, self.cells), read
+        except ReadError as e:
+            e.member = e.member or read.member  # where in the zip it went wrong
+            raise
         except BaseException as e:
-            # pyo3's PanicException is a BaseException no module of polars' or fastexcel's exports: named alone.
-            if type(e).__name__ != "PanicException":
+            if not _panicked(e):
                 raise
             msg = f"the body made the reader's Rust code panic, as no file of the format does: {e}"
-            raise ReadError(msg) from e
+            raise ReadError(msg, member=read.member) from e
 
     def _direct(self, data: bytes, read: ReadContext) -> pl.DataFrame | None:
         """Return *data* read by the format's typed read, where it reads it and the engine takes its table."""

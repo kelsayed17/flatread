@@ -217,6 +217,8 @@ class ZippedFiles[RowT: msgspec.Struct](File[RowT]):
                 part = super()._read(_inflated(archive, match.string))
                 try:
                     given = [_stated(column, match[column.field], part.height, "cell") for column in stated]
+                except LayoutError:  # a reader declared wrong stays one: no ValueError below relabels it
+                    raise
                 except ValueError as e:
                     msg = f"the member {match[0]!r} states its rows' {e}"
                     raise ReadError(msg) from e

@@ -896,7 +896,7 @@ def _header_table(grid: Grid) -> Table:
         if (wrong := (rows.widths != width).arg_true()).len():
             at = int(wrong[0])
             msg = f"row {rows.numbers[at]} has {rows.widths[at]} fields, not the header's {width}"
-            raise RaggedRowError(msg)
+            raise RaggedRowError(msg, row=int(rows.numbers[at]))
         _check_header(header)
         cells = rows.cells.select(rows.cells.columns[:width])
         return Table(cells.rename(dict(zip(cells.columns, _unique(header), strict=True))), rows.numbers)
@@ -908,13 +908,15 @@ def _header_table(grid: Grid) -> Table:
     past = rows.text.columns[width:]
     beyond = rows.text.select(pl.any_horizontal(pl.col(past).is_not_null())).to_series() if past else None
     if beyond is not None and (wrong := beyond.arg_true()).len():
-        msg = f"row {rows.numbers[int(wrong[0])]} holds a cell right of the header's last, column {width}"
-        raise RaggedRowError(msg)
+        row = int(rows.numbers[int(wrong[0])])
+        msg = f"row {row} holds a cell right of the header's last, column {width}"
+        raise RaggedRowError(msg, row=row)
     kept = rows.text.columns[:width]
     empty = rows.text.select(pl.all_horizontal(pl.col(kept).is_null())).to_series() if kept else None
     if empty is not None and (at := empty.arg_true()).len():
-        msg = f"row {rows.numbers[int(at[0])]} is empty, and a table's rows run to its end"
-        raise ReadError(msg)
+        row = int(rows.numbers[int(at[0])])
+        msg = f"row {row} is empty, and a table's rows run to its end"
+        raise ReadError(msg, row=row)
     _check_header(header)
     return _named(rows, kept, _unique(header))
 
@@ -1031,7 +1033,7 @@ class Titled:
             row = grid.raw[at]
             if (match := title.fullmatch(row)) is None:
                 msg = f"row {grid.numbers[at]} {row[:200]!r} is not its title {title.pattern!r}"
-                raise UnknownLayoutError(msg)
+                raise UnknownLayoutError(msg, row=int(grid.numbers[at]))
             read.stated.update({group: match[group] for group in title.groupindex if group != "count"})
             read.matches[f"title {at}"] = match
         table = _header_table(grid.slice(len(self.titles)))

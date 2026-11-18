@@ -3,6 +3,7 @@
 import dataclasses
 import datetime as dt
 import io
+import pickle
 import re
 import typing
 import zipfile
@@ -900,3 +901,39 @@ def test_a_csv_s_rows_too_wide_for_one_pattern_are_left_to_the_grid() -> None:
     """A width whose row pattern is past the regex engine's size is the grid's to read: no count, and no error."""
     for width, rows in ((1_000, 1), (3_000, None)):
         assert fr.Csv()._rows_of('"x"' + ",x" * (width - 1) + "\n", '"', width) == rows
+
+
+class TestWhereAReadWentWrong:
+    """A flatread.next read's ``ReadError`` carries the row, the label and the member, as values beside its message."""
+
+    def test_a_cell_names_its_row_and_label(self) -> None:
+        with pytest.raises(ReadError) as caught:
+            fr.Reader(_WhereDay, fr.Csv()).rows(b"Day\n01/02/2026\n1/2/2026\n")
+        assert (caught.value.row, caught.value.label, caught.value.member) == (3, "Day", None)
+
+    def test_an_empty_cell_names_its_row_and_label(self) -> None:
+        with pytest.raises(ReadError) as caught:
+            fr.Reader(_WhereDay, fr.Csv()).rows(b"Day\n01/02/2026\n\n")
+        assert (caught.value.row, caught.value.label) == (3, "Day")
+
+    def test_a_ragged_row_names_its_row(self) -> None:
+        with pytest.raises(RaggedRowError) as caught:
+            fr.Reader(_WhereDay, fr.Csv()).rows(b"Day\n01/02/2026,x\n")
+        assert (caught.value.row, caught.value.label) == (2, None)
+
+    def test_a_zip_members_cell_names_the_member(self) -> None:
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as archive:
+            archive.writestr("days.csv", b"Day\n1/2/2026\n")
+        with pytest.raises(ReadError) as caught:
+            fr.Reader(_WhereDay, fr.Csv(), source=fr.Zip(re.compile(r".*\.csv"))).rows(out.getvalue())
+        assert (caught.value.row, caught.value.label, caught.value.member) == (2, "Day", "days.csv")
+
+    def test_the_values_survive_pickling(self) -> None:
+        error = ReadError("x", row=2, label="Day", member="m")
+        copied = pickle.loads(pickle.dumps(error))  # noqa: S301 (an error of its own)
+        assert (str(copied), copied.row, copied.label, copied.member) == ("x", 2, "Day", "m")
+
+
+class _WhereDay(msgspec.Struct, frozen=True, gc=False):
+    day: Annotated[dt.date, Label("Day"), Format("%m/%d/%Y")]
