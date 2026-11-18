@@ -22,6 +22,9 @@ in the README, under "Versions".
 - `flatread.next` finds an export's header by its key field's words, as `FoundTable` (`FoundCsv`, `FoundSheet`) does:
   `Found(key=..., heading=..., open=..., section=..., section_field=..., numbered_rows=...)`. A finder or header rule
   that reads by name sets `by_name`, and only then may a `Label` name alternatives.
+- `flatread.next` reads a report laid out for a page, as `ReportFile` and `KeyedReport` do: the `Text` format reads a
+  file of lines, the `Report` finder its rows among header and framing lines (a format checks more by subclassing it
+  and overriding `check`), and the `Keyed` shape a report's runs of values long, a row per key.
 
 ## 0.5.0
 

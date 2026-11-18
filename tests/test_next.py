@@ -1727,3 +1727,203 @@ class TestFound:
 
         with pytest.raises(LayoutError, match="two fields share a label"):
             fr.Reader(Shared, fr.Csv(), table=fr.Found(key="a")).rows(b"a\nx\n")
+
+
+class TestReport:
+    """ReportFile's report as Text and Report, and KeyedReport's as Keyed: each held to the 7.x reader."""
+
+    @staticmethod
+    def _sales(**report: typing.Any) -> fr.Report:  # noqa: ANN401 (Report's switches)
+        from tests.test_flat import _Sales  # noqa: PLC0415 (the 7.x report it replaces)
+
+        sales = fr.Report(line=_Sales._line, header_lines=_Sales._header_lines, framing=_Sales._framing)
+        return dataclasses.replace(sales, **report)
+
+    def test_rows_are_read_among_their_framing_as_report_file_reads_them(self) -> None:
+        from tests.test_flat import _SALES, _Sale, _Sales  # noqa: PLC0415 (the 7.x report it replaces)
+
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(), null_values=["n.a."])
+        assert reader.rows(_SALES) == _Sales(_Sale, null_values=("n.a.",)).rows(_SALES)
+        assert len(reader.rows(_SALES)) == 3
+
+    def test_a_line_of_no_kind_raises_naming_it(self) -> None:
+        from tests.test_flat import _SALES, _Sale  # noqa: PLC0415 (the 7.x report)
+
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(), null_values=["n.a."])
+        with pytest.raises(
+            ReadError, match=r"^line 8 ' MILL n\.a\.' is neither a row nor a line framing the table$"
+        ) as e:
+            reader.rows(_SALES.replace(b" MILL           3   n.a.", b" MILL n.a."))
+        assert e.value.row == 8
+
+    def test_a_report_cut_short_of_its_last_line_raises(self) -> None:
+        from tests.test_flat import _SALES, _Ended, _Sale  # noqa: PLC0415 (the 7.x report)
+
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(last_line=_Ended._last_line), null_values=["n.a."])
+        ended = _SALES + b"  ***** END OF REPORT *****\n\n"
+        assert reader.rows(ended) == _Ended(_Sale, null_values=("n.a.",)).rows(ended)
+        with pytest.raises(TruncatedFileError, match=r"the report ends with ' PIER .*': it was cut"):
+            reader.rows(_SALES)
+
+    def test_a_report_of_no_rows_is_one_where_the_reader_takes_none(self) -> None:
+        from tests.test_flat import _SALES, _Sale, _Sales  # noqa: PLC0415 (the 7.x report)
+
+        framing = (*_Sales._framing, re.compile(r"NO SALES"))
+        report = fr.Report(line=_Sales._line, header_lines=_Sales._header_lines, framing=framing)
+        empty = _SALES.split(b"REGION NORTH")[0] + b"NO SALES\n"
+        assert fr.Reader(_Sale, fr.Text(), table=report, empty=True).rows(empty) == []
+        with pytest.raises(EmptyBodyError, match=r"^the report holds no rows$"):
+            fr.Reader(_Sale, fr.Text(), table=report).rows(empty)
+        with pytest.raises(UnknownLayoutError, match="no column header"):
+            fr.Reader(_Sale, fr.Text(), table=report, empty=True).rows(
+                b"SALES REPORT   DAY 11/06/2026   PAGE 1\nNO SALES\n"
+            )
+
+    def test_a_format_checks_its_lines_by_subclassing(self) -> None:
+        from tests.test_flat import _SALES, _Sale, _Sales  # noqa: PLC0415 (the 7.x report)
+
+        @dataclasses.dataclass(frozen=True, kw_only=True)
+        class Counted(fr.Report):
+            @typing.override
+            def check(self, read: Sequence[tuple[int, re.Match[str]]]) -> None:
+                super().check(read)
+                if (rows := sum(match.re is self.line for _, match in read)) != int(read[-1][1][1]):
+                    msg = f"the report counts {read[-1][1][1]} stores, and holds {rows}"
+                    raise ReadError(msg)
+
+        report = Counted(
+            line=_Sales._line,
+            header_lines=_Sales._header_lines,
+            framing=_Sales._framing,
+            last_line=re.compile(r"STORES +(\d+)"),
+        )
+        reader = fr.Reader(_Sale, fr.Text(), table=report, null_values=["n.a."])
+        assert len(reader.rows(_SALES + b"STORES 3\n")) == 3
+        with pytest.raises(ReadError, match="the report counts 4 stores, and holds 3"):
+            reader.rows(_SALES + b"STORES 4\n")
+
+    def test_thousands_cleans_a_report_s_numbers_naming_the_line(self) -> None:
+        from tests.test_flat import _SALES, _Sale  # noqa: PLC0415 (the 7.x report)
+
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(), cells=[fr.Thousands()], null_values=["n.a."])
+        assert reader.rows(_SALES.replace(b"MAIN ST       12", b"MAIN ST    1,200"))[0].units == 1200
+        with pytest.raises(ReadError, match=r"the 'units' cell '12,00' is not a whole number: row 7$"):
+            reader.rows(_SALES.replace(b"MAIN ST       12", b"MAIN ST    12,00"))
+
+    def test_a_preamble_is_dropped_to_the_header_s_first_run_as_report_file_drops_it(self) -> None:
+        from tests.test_flat import _Sale, _Sales  # noqa: PLC0415 (the 7.x report)
+
+        class Preambled(_Sales):
+            _preamble = True
+
+        body = (
+            b"anything, ( at all\n STORE      UNITS   UNIT\n             SOLD  PRICE\n"
+            b"SALES REPORT   DAY 11/06/2026   PAGE 1\nREGION NORTH\n MAIN ST       12   1.50\n"
+        )
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(preamble=True))
+        assert reader.rows(body) == Preambled(_Sale).rows(body)
+        assert len(reader.rows(body)) == 1
+        with pytest.raises(UnknownLayoutError, match="holds no run of the header's lines"):
+            reader.rows(b"anything at all\n")
+
+    def test_a_blank_line_read_is_a_line_of_its_kind(self) -> None:
+        class Word(msgspec.Struct, frozen=True, gc=False):
+            word: str
+
+        report = fr.Report(line=re.compile(r"(?P<word>\w+)"), framing=[re.compile("")], blank_lines="read")
+        assert fr.Reader(Word, fr.Text(), table=report).rows(b"a\n\nb\n") == [Word("a"), Word("b")]
+        strict = fr.Report(line=re.compile(r"(?P<word>\w+)"), blank_lines="read")
+        with pytest.raises(ReadError, match=r"^line 2 '' is neither a row"):
+            fr.Reader(Word, fr.Text(), table=strict).rows(b"a\n\nb\n")
+
+    def test_text_lines_split_as_splitlines_splits_them_in_latin_1_too(self) -> None:
+        class Word(msgspec.Struct, frozen=True, gc=False):
+            word: str
+
+        report = fr.Report(line=re.compile(r"(?P<word>\w+)"))
+        reader = fr.Reader(Word, fr.Text(splitlines=True), table=report)
+        assert reader.rows(b"caf\xe9\x0cb\n") == [Word("café"), Word("b")]
+        with pytest.raises(ReadError, match="always ends its last line"):
+            fr.Reader(Word, fr.Text(final_line_ending=True), table=report).rows(b"a")
+        with pytest.raises(EmptyBodyError, match=r"^the body is empty$"):
+            reader.rows(b" \n")
+
+    @pytest.mark.parametrize(
+        ("report", "words"),
+        [
+            ({"line": "nope"}, "compiled from str"),
+            ({"line": re.compile("x"), "blank_lines": "skip"}, "not 'skip'"),
+            ({"line": re.compile("x"), "preamble": True}, "it names none"),
+        ],
+    )
+    def test_a_report_no_file_has_is_refused_when_built(self, report: Mapping[str, typing.Any], words: str) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Report(**report)
+
+    def test_a_report_whose_groups_are_not_its_fields_is_refused(self) -> None:
+        from tests.test_flat import _SALES, _Sale, _Sales  # noqa: PLC0415 (the 7.x report)
+
+        stray = self._sales(framing=(*_Sales._framing, re.compile(r"CLERK (?P<clerk>\w+)")))
+        both = self._sales(framing=(*_Sales._framing, re.compile(r"STORE (?P<store>\w+)")))
+        with pytest.raises(LayoutError, match=r"the report's groups \['clerk'\] name no field of the row"):
+            fr.Reader(_Sale, fr.Text(), table=stray).rows(_SALES)
+        with pytest.raises(LayoutError, match=r"the fields \['store'\] are both a row's cells and stated"):
+            fr.Reader(_Sale, fr.Text(), table=both).rows(_SALES)
+
+    def test_a_keyed_report_reads_long_as_keyed_report_reads_it(self) -> None:
+        from tests.test_flat import _HELD, _Held, _Shares  # noqa: PLC0415 (the 7.x report it replaces)
+
+        reader = fr.Reader(
+            _Shares,
+            fr.Text(),
+            table=fr.Report(line=_Held._line, framing=_Held._framing),
+            shape=fr.Keyed(key_field="month"),
+            null_values=["-"],
+        )
+        assert reader.rows(_HELD) == _Held(_Shares, null_values=("-",)).rows(_HELD)
+        with pytest.raises(RaggedRowError, match=r"^row 3 holds 3 values, not 4: 2 for each key above it$"):
+            reader.rows(_HELD.replace(b"4.5 -", b"4.5"))
+
+    def test_a_keyed_report_finds_its_keys_by_their_own_cell(self) -> None:
+        class Row(msgspec.Struct, frozen=True, gc=False):
+            name: str
+            year: int
+            value: str
+
+        report = fr.Report(
+            line=re.compile(r"(?P<name>[a-z]+)\s+(?P<value>.*)"), framing=[re.compile(r"Name\s+(?P<year>.*)")]
+        )
+        keyed = fr.Keyed(cell=re.compile(r"x\d+", re.IGNORECASE), key_cell=re.compile(r"\d+"))
+        reader = fr.Reader(Row, fr.Text(), table=report, shape=keyed)
+        assert reader.rows(b"Name 2020 2021\nabc X1 x2\n") == [Row("abc", 2020, "X1"), Row("abc", 2021, "x2")]
+
+    @pytest.mark.parametrize(
+        ("keyed", "words"),
+        [
+            ({"cell": re.compile(r"(?<=\s)\d+")}, "none polars' engine reads"),
+            ({"cell": re.compile(r"\d+", re.ASCII)}, "ASCII"),
+            ({"key_cell": re.compile(r"(?<=\s)\d+")}, "none polars' engine reads"),
+        ],
+    )
+    def test_a_keyed_pattern_polars_cannot_read_is_refused_when_built(
+        self, keyed: Mapping[str, typing.Any], words: str
+    ) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Keyed(**keyed)
+
+    def test_a_keyed_report_its_row_does_not_fit_is_refused(self) -> None:
+        class Row(msgspec.Struct, frozen=True, gc=False):
+            name: str
+            value: str
+
+        report = fr.Report(line=re.compile(r"(?P<name>[a-z]+)\s+(?P<value>.*)"))
+        for keyed, words in [
+            (fr.Keyed(key_field="nope"), "no field of the row"),
+            (fr.Keyed(key_field="value"), "a value field after it"),
+        ]:
+            with pytest.raises(LayoutError, match=words):
+                fr.Reader(Row, fr.Text(), table=report, shape=keyed).rows(b"a 1\n")
+        with pytest.raises(LayoutError, match="reads text lines, not a sheet's cells"):
+            fr.Reader(Row, fr.Sheet(sheet="S"), shape=fr.Keyed(key_field="name")).rows(
+                workbook({"S": [["name", "value"], ["a", "1"]]})
+            )

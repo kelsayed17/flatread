@@ -27,6 +27,7 @@ from flatread.next._model import (
     TableFinder,
 )
 from flatread.next._reader import Reader
+from flatread.next._reports import Keyed, Report, Text
 from flatread.next._stages import (
     Csv,
     Cut,
@@ -62,6 +63,7 @@ __all__ = [
     "Header",
     "HeaderRule",
     "Headers",
+    "Keyed",
     "Kind",
     "Layout",
     "Lines",
@@ -74,6 +76,7 @@ __all__ = [
     "ReadContext",
     "Reader",
     "Records",
+    "Report",
     "Sdmx",
     "Shape",
     "Sheet",
@@ -81,6 +84,7 @@ __all__ = [
     "Stream",
     "Table",
     "TableFinder",
+    "Text",
     "Thousands",
     "Titled",
     "Trailer",

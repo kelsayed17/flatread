@@ -239,10 +239,32 @@ class _Record(msgspec.Struct, frozen=True, gc=False):
     count: Annotated[int | None, Label("count")]
 
 
+class _Keyed(msgspec.Struct, frozen=True, gc=False):
+    name: str
+    year: int
+    count: int | None
+
+
 _ANY: dict[str, Callable[[bytes], object]] = {
     **_READERS,
     **_SHEETS,
     **_CUTS,
+    "flatread.next Report": fr.Reader(
+        _Record,
+        fr.Text(),
+        table=fr.Report(
+            line=re.compile(r"(?P<name>\S+) +(?P<count>\S*)"),
+            header_lines=[re.compile("NAME +COUNT")],
+            framing=[re.compile("-+")],
+        ),
+        empty=True,
+    ).rows,
+    "flatread.next Report, keyed": fr.Reader(
+        _Keyed,
+        fr.Text(splitlines=True),
+        table=fr.Report(line=re.compile(r"(?P<name>\S+) +(?P<count>.*)"), framing=[re.compile(r"NAME +(?P<year>.*)")]),
+        shape=fr.Keyed(key_field="year"),
+    ).rows,
     "XmlFile": XmlFile(_Record, root="t", record="r").rows,
     "HtmlFile": HtmlFile(_Record).rows,
 }
