@@ -830,3 +830,21 @@ def test_a_format_names_the_number_fields_its_own_value_reads_from_text() -> Non
     assert _Starred(_Count, sheet="S").rows(body) == [_Count("a", 1), _Count("b", -1249056)]
     with pytest.raises(ReadError, match=r"^the 'Count' cell '-1,249,056\*' is not a whole number: row 3$"):
         SheetFile(_Count, sheet="S").rows(body)
+
+
+def _first_listed_twice(body: bytes) -> bytes:
+    """Return the zip *body* with its central directory listing its first member twice."""
+    start, end = body.find(b"PK\x01\x02"), body.find(b"PK\x05\x06")
+    second = body.find(b"PK\x01\x02", start + 4)
+    entry = body[start : second if second != -1 else end]
+    tail = bytearray(body[end:])
+    entries, _, size, _ = struct.unpack_from("<HHII", tail, 8)
+    struct.pack_into("<HHII", tail, 8, entries + 1, entries + 1, size + len(entry), start)
+    return body[:start] + entry + body[start:end] + bytes(tail)
+
+
+def test_a_workbook_whose_zip_lists_a_name_twice_raises() -> None:
+    body = _first_listed_twice(_sheet(1))
+    first = zipfile.ZipFile(io.BytesIO(body)).namelist()[0]
+    with pytest.raises(ReadError, match=rf"^the zip lists {re.escape(repr(first))} more than once$"):
+        SheetFile(_Count, sheet="S").rows(body)

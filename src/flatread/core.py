@@ -463,6 +463,15 @@ def _check_markers(column: Column) -> None:
             raise LayoutError(msg) from e
 
 
+def _panicked(e: BaseException) -> bool:
+    """Return whether *e* is a panic of a Rust extension's code: pyo3's ``PanicException``, of polars or fastexcel.
+
+    Each extension built on pyo3 has its own ``PanicException`` class, a ``BaseException`` (``except Exception`` misses
+    it), and fastexcel exports its not, so a panic is known by its class's name, whichever extension raised it.
+    """
+    return type(e).__name__ == "PanicException"
+
+
 class File[RowT: msgspec.Struct](abc.ABC):
     """A file's reader, read two ways: :meth:`frame`, a DataFrame of its row struct's fields, and :meth:`rows`.
 
@@ -682,8 +691,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         try:
             return self._checked(self._join(self._read(body)))
         except BaseException as e:
-            # pyo3's PanicException is a BaseException no module of polars' or fastexcel's exports: named alone.
-            if type(e).__name__ != "PanicException":
+            if not _panicked(e):
                 raise
             msg = f"the body made the reader's Rust code panic, as no file of the format does: {e}"
             raise ReadError(msg) from e

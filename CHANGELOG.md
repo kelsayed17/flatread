@@ -3,6 +3,16 @@
 Each release's changes, newest first, and what a reader declared for the release before must change. Releases before
 6.0.0 have no entry here; their tags and commit messages describe them.
 
+## Unreleased
+
+- A workbook whose zip lists a member's name twice raises `CorruptArchiveError`, as every other zip a reader opens
+  does. Before, a sheet reader opened it.
+- Importing `flatread.pdf` no longer changes pdfminer for any other caller: outside a flatread read, its stream decoders
+  are pdfminer's own again, logging included. The caps and the linear-time `decompress_corrupted` apply only during a
+  flatread read.
+- One test of a Rust panic (`flatread.core._panicked`) serves every reader. Before, the core and sheet readers each had
+  their own.
+
 ## 0.5.0
 
 Numbering restarts at 0.5.0. Releases 1.0.0 through 7.2.0 came out within one week while the API was still being

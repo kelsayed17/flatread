@@ -260,17 +260,39 @@ class TestAPdfsCaps:
     def test_a_stream_with_a_damaged_checksum_inflates_in_linear_time(self) -> None:
         stream = zlib.compress(_TEXT + b" " * (16 << 20), 9)
         damaged = stream[:-1] + bytes([stream[-1] ^ 1])
-        started = time.perf_counter()
-        assert pdftypes.decompress_corrupted(damaged) == _TEXT + b" " * (16 << 20)  # pdfminer's own took 6 s
-        assert time.perf_counter() - started < 2
-        with pytest.raises(zlib.error):
-            pdftypes.decompress_corrupted(b"\0" + stream[1:])  # an error before the last three bytes
+        token = flatread.pdf._BUDGET.set(flatread.pdf._Budget())  # as during a read
+        try:
+            started = time.perf_counter()
+            assert pdftypes.decompress_corrupted(damaged) == _TEXT + b" " * (16 << 20)  # pdfminer's own took 6 s
+            assert time.perf_counter() - started < 2
+            with pytest.raises(zlib.error):
+                pdftypes.decompress_corrupted(b"\0" + stream[1:])  # an error before the last three bytes
+        finally:
+            flatread.pdf._BUDGET.reset(token)
 
-    def test_outside_a_read_pdfminers_decoders_have_no_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_during_a_read_the_decoders_decode_as_pdfminers_own(self) -> None:
+        lzw = bytes.fromhex("800b6050220c0c8501")  # the PDF reference's LZW example
+        token = flatread.pdf._BUDGET.set(flatread.pdf._Budget())
+        try:
+            assert pdftypes.lzwdecode(lzw) == flatread.pdf._PDFMINER_LZW(lzw)
+            cut = zlib.compress(b"abc")[:-2]  # a stream cut short, no error in its last bytes
+            assert pdftypes.decompress_corrupted(cut) == flatread.pdf._PDFMINER_DAMAGED(cut) == b"abc"
+            with pytest.raises(zlib.error, match="incomplete or truncated stream"):
+                pdftypes.zlib.decompress(zlib.compress(b"abc")[:-2])
+        finally:
+            flatread.pdf._BUDGET.reset(token)
+
+    def test_outside_a_read_pdfminers_own_decoders_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(flatread.pdf, "_DECODED_MAX", 1)
         assert pdftypes.zlib.decompress(zlib.compress(b"abc")) == b"abc"
         with pytest.raises(zlib.error, match="incomplete or truncated stream"):
             pdftypes.zlib.decompress(zlib.compress(b"abc")[:-2])
+        called: list[str] = []
+        monkeypatch.setattr(flatread.pdf, "_PDFMINER_DAMAGED", lambda data: called.append("damaged") or data)
+        monkeypatch.setattr(flatread.pdf, "_PDFMINER_LZW", lambda data: called.append("lzw") or data)
+        assert pdftypes.decompress_corrupted(b"x") == b"x"
+        assert pdftypes.lzwdecode(b"y") == b"y"
+        assert called == ["damaged", "lzw"]
 
     def test_characters_past_a_pages_cap_or_the_bodys_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(flatread.pdf, "_PAGE_CHARS_MAX", 10)

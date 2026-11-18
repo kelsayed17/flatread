@@ -64,7 +64,7 @@ import polars as pl
 import xlrd
 from xlrd import compdoc
 
-from flatread.archives import _UNZIP_ERRORS, _inflated
+from flatread.archives import _UNZIP_ERRORS, _inflated, _listed_once
 from flatread.core import (
     _UNIT,
     Column,
@@ -75,6 +75,7 @@ from flatread.core import (
     _flagged,
     _moment,
     _none_dtype,
+    _panicked,
     _repeated,
     _stacked,
     _stated,
@@ -208,10 +209,9 @@ _PLACING: Final = ("_sheet_in", "_header_in")
 def _failed(e: BaseException) -> bool:
     """Return whether *e* is fastexcel's failure to read a body: its own error, or a panic of calamine's Rust code.
 
-    A panic is pyo3's ``PanicException``, a ``BaseException`` (``except Exception`` misses it) that no module exports,
-    so it is known by its name.
+    A panic is known as :func:`flatread.core._panicked` knows one, as every reader here knows it.
     """
-    return isinstance(e, fastexcel.FastExcelError) or type(e).__name__ == "PanicException"
+    return isinstance(e, fastexcel.FastExcelError) or _panicked(e)
 
 
 @contextlib.contextmanager
@@ -344,9 +344,13 @@ def _column_number(letters: bytes) -> int:
 
 @contextlib.contextmanager
 def _unzipped(body: bytes) -> Generator[zipfile.ZipFile]:
-    """Open an ``.xlsx`` *body*'s zip, raising ReadError for one that will not open or whose member will not inflate."""
+    """Open an ``.xlsx`` *body*'s zip, raising ReadError for one that won't open, lists a name twice or won't inflate.
+
+    A name listed twice is refused as :mod:`flatread.archives` refuses it: zipfile reads its member once per listing.
+    """
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            _listed_once(archive)
             yield archive
     except ReadError:  # a ValueError, as zipfile's own errors are
         raise

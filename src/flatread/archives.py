@@ -262,17 +262,26 @@ def _unzipped(body: bytes, members: int | None) -> zipfile.ZipFile:
     except _UNZIP_ERRORS as e:
         msg = f"the body is not a zip: {e}"
         raise CorruptArchiveError(msg) from e
-    names = archive.namelist()
-    if len(set(names)) != len(names):
+    try:
+        names = _listed_once(archive)
+    except CorruptArchiveError:
         archive.close()
-        twice = next(name for name, count in collections.Counter(names).items() if count > 1)
-        msg = f"the zip lists {twice!r} more than once"
-        raise CorruptArchiveError(msg)
+        raise
     if members is not None and len(names) != members:
         archive.close()
         msg = f"the zip holds {names!r}, not {members} members"
         raise UnknownLayoutError(msg)
     return archive
+
+
+def _listed_once(archive: zipfile.ZipFile) -> list[str]:
+    """Return the zip's member names, or raise ReadError for a name it lists twice (a zip bomb of directory entries)."""
+    names = archive.namelist()
+    if len(set(names)) != len(names):
+        twice = next(name for name, count in collections.Counter(names).items() if count > 1)
+        msg = f"the zip lists {twice!r} more than once"
+        raise CorruptArchiveError(msg)
+    return names
 
 
 def _inflated(archive: zipfile.ZipFile, name: str) -> bytes:
