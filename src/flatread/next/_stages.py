@@ -53,10 +53,13 @@ __all__ = [
     "Cut",
     "Derived",
     "Found",
+    "Given",
     "Header",
+    "Headerless",
     "Layout",
     "Long",
     "Noted",
+    "Numbered",
     "Observations",
     "Padded",
     "Pdf",
@@ -1279,6 +1282,95 @@ class Noted:
 
 
 @dataclasses.dataclass(frozen=True)
+class Headerless:
+    """A file of rows alone, no header: each row's cells are *fields*' columns, in order, every row as wide.
+
+    *fields* are the row struct's fields the cells hold; ``None`` takes every field no stage states, in the struct's
+    order. A line of another width raises ``RaggedRowError``, naming its row; a sheet's row may hold no cell right of
+    the table's last column, and its columns are the sheet's first.
+    """
+
+    fields: Sequence[str] | None = None
+    stated: frozenset[str] = frozenset()
+    vouches: bool = False
+
+    def __post_init__(self) -> None:
+        if self.fields is not None:
+            if not self.fields or len(set(self.fields)) != len(self.fields):
+                msg = f"a headerless file's cells are distinct fields, not {list(self.fields)!r}"
+                raise LayoutError(msg)
+            object.__setattr__(self, "fields", tuple(self.fields))
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return every row of the grid as a row, its cells under the fields' labels."""
+        fields = self.fields
+        if fields is None:
+            fields = [field for field in read.columns if field not in read.stated]
+        if stray := [field for field in fields if field not in read.columns]:
+            msg = f"the fields {stray} are no fields of the row"
+            raise LayoutError(msg)
+        labels = [read.columns[field].label for field in fields]
+        width = len(labels)
+        if isinstance(grid, Lines):
+            if (wrong := (grid.widths != width).arg_true()).len():
+                at = int(wrong[0])
+                msg = f"row {grid.numbers[at]} has {grid.widths[at]} fields, not the file's {width}"
+                raise RaggedRowError(msg, row=int(grid.numbers[at]))
+            cells = grid.cells.select(grid.cells.columns[:width])
+            return Table(cells.rename(dict(zip(cells.columns, labels, strict=True))), grid.numbers)
+        past = grid.text.columns[width:]
+        if past and (held := grid.text.select(pl.any_horizontal(pl.col(past).is_not_null())).to_series()).any():
+            row = int(grid.numbers[int(held.arg_true()[0])])
+            msg = f"row {row} holds a cell right of the table's last column, column {width}"
+            raise RaggedRowError(msg, row=row)
+        if grid.text.width < width:  # a sheet whose last columns hold nothing: fastexcel loads none of them
+            filler = [str(at) for at in range(grid.text.width, width)]
+
+            def widened(frame: pl.DataFrame | None, dtype: pl.DataType | type[pl.DataType]) -> pl.DataFrame | None:
+                return None if frame is None else frame.with_columns(pl.lit(None, dtype).alias(n) for n in filler)
+
+            text, kinds, floats, moments = (
+                widened(frame, dtype)
+                for frame, dtype in zip((grid.text, grid.kinds, grid.floats, grid.moments), _LACKED, strict=True)
+            )
+            text = typing.cast("pl.DataFrame", text)
+            grid = dataclasses.replace(grid, text=text, kinds=kinds, floats=floats, moments=moments)
+        return _named(grid, [str(at) for at in range(width)], labels)
+
+
+@dataclasses.dataclass(frozen=True)
+class Given:
+    """Fields the reader knows for every row of the file it reads (the table a file is of), stated, never read.
+
+    *values* are each field's text, typed as the field; *table* finds the table, whose header lacks them.
+    """
+
+    values: Mapping[str, str | None]
+    table: TableFinder = dataclasses.field(default_factory=Header)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", dict(self.values))
+
+    @property
+    def stated(self) -> frozenset[str]:
+        """The given fields, and those the table's own finder states."""
+        return self.table.stated | self.values.keys()
+
+    @property
+    def vouches(self) -> bool:
+        """Whether the table's own finder vouches for a table of no rows."""
+        return self.table.vouches
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table its finder finds, the given fields stated."""
+        if stray := self.values.keys() - read.columns.keys():
+            msg = f"the given fields {sorted(stray)} are no fields of the row"
+            raise LayoutError(msg)
+        read.stated.update(self.values)
+        return self.table.find(grid, read)
+
+
+@dataclasses.dataclass(frozen=True)
 class Beside:
     """A sheet's table with more beside it (a second list, a note, a work column): only the table's columns are read.
 
@@ -1709,6 +1801,43 @@ def _laid_empty(read: ReadContext) -> Table:
 
 
 # --- Shapes ---
+
+
+@dataclasses.dataclass(frozen=True)
+class Numbered:
+    """A field no cell holds, each row's place in the table (from *start*), set beside the table's own columns.
+
+    The column takes the field's place among the struct's columns, so the table's columns stay in the struct's order.
+    """
+
+    field: str
+    start: int = 1
+
+    def shape(self, table: Table, columns: Sequence[Column], read: ReadContext) -> Table:
+        """Return *table* with the field's column of row places."""
+        labels = [column.label for column in columns if column.field not in read.stated]
+        named = [column for column in columns if column.field == self.field]
+        if not named:
+            msg = f"the numbered field {self.field!r} is no field of the row"
+            raise LayoutError(msg)
+        label = named[0].label
+        if label in table.cells.columns:
+            msg = f"the numbered field {self.field!r} is a column of the table too: {label!r}"
+            raise LayoutError(msg)
+        height = table.cells.height
+        places = pl.int_range(self.start, self.start + height, dtype=pl.Int64, eager=True)
+        given = (
+            places.cast(pl.String),
+            pl.repeat("number", height, dtype=pl.String, eager=True),
+            places.cast(pl.Float64),
+            pl.repeat(None, height, dtype=pl.Datetime("us"), eager=True),
+        )
+        order = [name for name in labels if name in {*table.cells.columns, label}]
+        frames = [
+            None if frame is None else frame.with_columns(column.alias(label)).select(order)
+            for frame, column in zip(table.frames(), given, strict=True)
+        ]
+        return table.with_frames(frames, table.numbers)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)

@@ -40,6 +40,10 @@ no date cell (a sheet's alone), and a cell past the first column among the notes
 columns are kept (the first, one a field, or those `at` names), and `table` finds the table in them, so
 `Beside(table=Noted())` reads a table with notes under it and more beside it.
 
+`Headerless(fields=...)` reads a file of rows with no header, each row's cells the fields' columns in order;
+`Given(values, table=...)` states fields the reader knows for every row of a file (the table it is of); and the
+`Numbered(field)` shape sets each row's place in the table as a field no cell holds.
+
 In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
 In both, a body of CRLF lines that ends in a CR alone raises `TruncatedFileError`: it was cut between the CR and the
 LF, and `final_line_ending=True` took the CR for a whole line ending.

@@ -565,6 +565,48 @@ def test_a_table_s_columns_are_distinct_places(at: list[int]) -> None:
         fr.Header(header_row=0)
 
 
+class _Described(msgspec.Struct, frozen=True, gc=False):
+    table: str
+    column: int
+    series: str
+    unit: str
+
+
+_DESCRIBED = fr.Reader(
+    _Described,
+    fr.Csv(separator="\t", quote=None),
+    table=fr.Given({"table": "F101"}, table=fr.Headerless(fields=["series", "unit"])),
+    shape=fr.Numbered("column"),
+)
+
+
+def test_a_headerless_file_s_rows_are_its_fields_given_and_numbered() -> None:
+    described = [_Described("F101", 1, "FL1", "usd"), _Described("F101", 2, "FL2", "pct")]
+    assert _DESCRIBED.rows(b"FL1\tusd\nFL2\tpct\n") == described
+    with pytest.raises(RaggedRowError, match="row 2 has 3 fields, not the file's 2"):
+        _DESCRIBED.frame(b"FL1\tusd\nFL2\tpct\tx\n")
+    sheet = fr.Reader(_Described, fr.Sheet(), table=_DESCRIBED.table, shape=fr.Numbered("column"))
+    assert sheet.rows(workbook({"S": [["FL1", "usd"], ["FL2", "pct"]]})) == described
+    with pytest.raises(ReadError, match="the \\['unit'\\] columns have an empty cell"):
+        sheet.frame(workbook({"S": [["FL1", "usd"], ["FL2"]]}))
+    with pytest.raises(RaggedRowError, match="row 2 holds a cell right of the table's last column"):
+        sheet.frame(workbook({"S": [["FL1", "usd"], ["FL2", "pct", "x"]]}))
+
+
+@pytest.mark.parametrize(
+    ("build", "message"),
+    [
+        (lambda: fr.Headerless(fields=[]), "distinct fields"),
+        (lambda: fr.Reader(_Described, fr.Csv(), table=fr.Headerless(fields=["nope"])).frame(b"a\n"), "no fields"),
+        (lambda: fr.Reader(_Described, fr.Csv(), table=fr.Given({"nope": "x"})).frame(b"a\n"), "given fields"),
+        (lambda: fr.Reader(_Described, fr.Csv(), shape=fr.Numbered("nope")).frame(b"table,column\n"), "no field"),
+    ],
+)
+def test_a_headerless_given_or_numbered_field_is_the_row_s(build: typing.Callable[[], object], message: str) -> None:
+    with pytest.raises(LayoutError, match=message):
+        build()
+
+
 def test_a_sheet_s_header_runs_to_its_last_filled_cell() -> None:
     with pytest.raises(EmptyBodyError):
         _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"]]}))
