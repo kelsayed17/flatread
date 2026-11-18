@@ -4,6 +4,18 @@ Each release's changes, newest first, and what a reader declared for the release
 6.0.0 have no entry here; their tags and commit messages describe them. What a patch and a minor release may change is
 in the README, under "Versions".
 
+## Unreleased
+
+`flatread.next` reads a CSV's cells as 7.x's `CsvFile` reads them, where it read them as a text table's:
+
+- A number cell padded with whitespace (` 5`, `5 `, a tab) is refused, naming its cell and row, where it was trimmed;
+  a `Padded()` cleaner reads it, as 7.x's `PaddedCsv` did. A text cell of spaces is that text, not no value. Both the
+  typed fast path and the grid read this way: the fast path now reads every cell as text and casts its numbers, as
+  the grid does, where polars' parser took ` 5` as 5. Its speed is unchanged (measured, 300,000 rows).
+- A float cell that underflows (`1e-400`, which polars reads as `0.0`) is refused in every format, where the fast
+  path and the grid read `0.0`.
+- A body opening with two byte order marks raises `EncodingError`, where polars dropped the second too.
+
 ## 0.5.0
 
 Numbering restarts at 0.5.0. Releases 1.0.0 through 7.2.0 came out within one week while the API was still being

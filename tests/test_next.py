@@ -1293,7 +1293,6 @@ class TestCut:
             ("header", b"Name,N\na,1,\n"),
             ("header", b"Name,N,\na,1\n"),
             ("header", b"Name,N\na\n"),
-            ("header", b"Name,N\n  ,  \na, 2\n"),
             ("header_row", b"Title\n\nName,N\na,1\n"),
             ("blank ended", b"Name,N\na,1\n\nNotes,here\n"),
             ("blank ended", b"Name,N\na,1\n,,\nx,2\n"),
@@ -1305,6 +1304,13 @@ class TestCut:
     def test_a_csv_grid_is_cut_as_7x_cuts_it(self, piece: str, body: bytes) -> None:
         old, cut = self._pieces()[piece]
         assert fr.Reader(self.Count, fr.Csv(), table=cut).rows(body) == old.rows(body)  # ty: ignore[unresolved-attribute] (a 7.x reader)
+
+    def test_a_csv_grid_is_exact_and_padded_cells_read_as_7x_csv_text_with_padded(self) -> None:
+        body = b"Name,N\n  ,  \na, 2\n"
+        old, cut = self._pieces()["header"]
+        with pytest.raises(ReadError, match="' 2' is not a whole number: row 3"):
+            fr.Reader(self.Count, fr.Csv(), table=cut).rows(body)
+        assert fr.Reader(self.Count, fr.Csv(), table=cut, cells=[fr.Padded()]).rows(body) == old.rows(body)  # ty: ignore[unresolved-attribute] (a 7.x reader)
 
     def test_a_sheet_grid_is_cut_as_sheet_text_cuts_it_its_cells_kinds_kept(self) -> None:
         from flatread.sheets import SheetText  # noqa: PLC0415 (the 7.x reader it replaces)
@@ -2282,3 +2288,55 @@ class TestHtmlRecords:
         body = b'<table><tr><th>File</th></tr><tr><td><a href="/a">A</a></td></tr></table>'
         grid = fr.Html().grid(io.BytesIO(body), fr.ReadContext(body, columns=columns))
         assert grid.text.rows() == [("A",)]
+
+
+class TestACsvCellIsReadExactly:
+    """A CSV writes each cell exactly, as 7.x's CsvFile reads it: no number trimmed, no text of spaces made none."""
+
+    class Row(msgspec.Struct, frozen=True):
+        n: Annotated[int | None, Label("n")]
+        x: Annotated[float | None, Label("x")]
+        name: Annotated[str | None, Label("name")]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"n,x,name\n5,1.5,a\n",
+            b"n,x,name\n 5,1.5,a\n",
+            b"n,x,name\n5 ,1.5,a\n",
+            b"n,x,name\n5,\t1.5,a\n",
+            b'n,x,name\n 5,1.5,"a"\n',
+            b"n,x,name\n5,1e-400,a\n",
+            b"n,x,name\n5,0e-400,a\n",
+            b"n,x,name\n5,1.5, \n",
+            b"n,x,name\n5,1.5, a \n",
+            b"n,x,name\n ,  ,a\n",
+            b"\xef\xbb\xbfn,x,name\n5,1.5,a\n",
+            b"\xef\xbb\xbf\xef\xbb\xbfn,x,name\n5,1.5,a\n",
+            b'n,x,name\n"5",1.5,"a\nb"\n 6,2,c\n',
+        ],
+    )
+    def test_as_7x_csv_file_reads_it(self, body: bytes) -> None:
+        from flatread.delimited import CsvFile  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        def outcome(read: typing.Callable[[bytes], list[TestACsvCellIsReadExactly.Row]]) -> object:
+            try:
+                return read(body)
+            except ReadError:
+                return ReadError
+
+        assert outcome(fr.Reader(self.Row, fr.Csv()).rows) == outcome(CsvFile(self.Row).rows)
+
+    def test_a_padded_number_is_refused_by_its_cell_and_padded_reads_it(self) -> None:
+        body = b"n,x,name\n5,1.5,a\n 6,2.5,b\n"
+        with pytest.raises(ReadError, match=r"the 'n' cell ' 6' is not a whole number: row 3"):
+            fr.Reader(self.Row, fr.Csv()).rows(body)
+        assert fr.Reader(self.Row, fr.Csv(), cells=[fr.Padded()]).rows(body)[1] == self.Row(6, 2.5, "b")
+
+    def test_an_underflowing_float_is_refused_in_every_format(self) -> None:
+        with pytest.raises(ReadError, match=r"'1e-400' is not a number a float holds: it underflows to 0.0: row 2"):
+            fr.Reader(self.Row, fr.Csv(), cells=[fr.Padded()]).rows(b"n,x,name\n5,1e-400,a\n")
+
+    def test_a_second_byte_order_mark_is_refused(self) -> None:
+        with pytest.raises(EncodingError, match="two byte order marks"):
+            fr.Reader(self.Row, fr.Csv()).rows(b"\xef\xbb\xbf\xef\xbb\xbfn,x,name\n5,1.5,a\n")

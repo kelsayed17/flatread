@@ -15,7 +15,7 @@ import polars as pl
 
 from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzipped
 from flatread.core import _NUL, _THOUSANDS, _UNIT, Column, _check_above, _check_ending, _decoded, _stacked
-from flatread.delimited import _BOM
+from flatread.delimited import _BOM, _underflows
 from flatread.errors import (
     ControlTotalError,
     CorruptArchiveError,
@@ -209,7 +209,14 @@ class Csv:
     not close its cell as text, and a cell left open at the end runs to it (``csv``'s ``strict`` off), for a file whose
     prose notes misquote (``"ts." Holdings o"``); a cell quoted cleanly still holds its separator. Raises
     ``LayoutError`` when built for a separator or quote that is not one character, ends a line, or is the other.
+
+    A CSV writes each cell exactly (:attr:`exact`): a number padded with whitespace (`` 5``) is refused and a text
+    cell of spaces is that text, unless a :class:`Padded` cleaner strips them. One byte order mark opens the body or
+    none; a second raises ``EncodingError``.
     """
+
+    #: The engine reads its cells as written: no number trimmed, no text of spaces taken for no value.
+    exact: typing.ClassVar[bool] = True
 
     separator: str = ","
     quote: str | None = '"'
@@ -253,6 +260,10 @@ class Csv:
         except UnicodeDecodeError as e:
             msg = f"the body is not UTF-8: {e}"
             raise EncodingError(msg) from e
+        # polars' parser drops a byte order mark too: a second would leave the first label's text unread.
+        if text.startswith("\ufeff"):
+            msg = "the body opens with two byte order marks: the second, U+FEFF, is the first cell's text"
+            raise EncodingError(msg)
         return text
 
     def typed(  # noqa: PLR0911 (a None for each doubt)
@@ -260,14 +271,15 @@ class Csv:
     ) -> Table | None:
         """Return the table of a file that is its header of *dtypes*' labels and rows as wide, read typed in one pass.
 
-        polars' parser reads each column as its dtype in *dtypes* (``Int64``, ``Float64``, else ``String``), each of
-        *null_values* no value, so the engine has the text columns alone to type. ``None`` where the body may be
-        anything else: another header, a row of another width (counted from its separators outside quoted cells), a
-        quote out of place (as :meth:`_spanning` finds one), a line break polars does not break at, or a cell its
-        parser refuses as its dtype; :meth:`grid`'s reading then reads it, and names what is wrong. A body that is
-        empty, cut, not UTF-8 or opening blank raises as :meth:`grid` raises. Every number polars' parser takes, its
-        cast from text takes as the same value, so the table types as the grid's would; its rows are numbered by
-        place, which only a refusal names, and the engine's refusal of it reads the body again by :meth:`grid`.
+        polars' parser reads every cell as text, each of *null_values* no value, and the columns of an ``Int64`` or
+        ``Float64`` in *dtypes* are cast, so the engine has the text columns alone to type. ``None`` where the body
+        may be anything else: another header, a row of another width (counted from its separators outside quoted
+        cells), a quote out of place (as :meth:`_spanning` finds one), a line break polars does not break at, a cell
+        the cast refuses (a number padded with whitespace) or a float that underflows (``1e-400`` as 0.0);
+        :meth:`grid`'s reading then reads it, and names what is wrong. A body that is empty, cut, not UTF-8 or opening
+        blank raises as :meth:`grid` raises. The cast is the grid's, so the table types as the grid's would; its rows
+        are numbered by place, which only a refusal names, and the engine's refusal of it reads the body again by
+        :meth:`grid`.
         """
         text = self._text(body)
         if len(self.separator.encode()) != 1 or not _breaks_as_polars(text):
@@ -282,7 +294,9 @@ class Csv:
             return None
         if _unique(header) != labels:
             return None
-        schema = {label: dtype if dtype in (pl.Int64, pl.Float64) else pl.String for label, dtype in dtypes.items()}
+        # Every cell read as text, its numbers then cast: polars' parser takes a number after spaces or a tab (`` 5``),
+        # which its cast refuses, as the grid's reading does.
+        schema = dict.fromkeys(dtypes, pl.String)
 
         def parsed() -> pl.DataFrame | None:
             try:
@@ -317,6 +331,16 @@ class Csv:
             )
         if frame is None or frame.height != breaks - 1:
             return None
+        # A cell its cast refuses (padded, empty but quoted) or a float that underflows (``1e-400`` as 0.0): the
+        # grid's reading names it.
+        numbers = {label: dtype for label, dtype in dtypes.items() if dtype in (pl.Int64, pl.Float64)}
+        if numbers:
+            cast = frame.with_columns(pl.col(label).cast(dtype, strict=False) for label, dtype in numbers.items())
+            if any(cast[label].null_count() != frame[label].null_count() for label in numbers) or _underflows(
+                body, cast, numbers
+            ):
+                return None
+            frame = cast
         frame = frame.with_columns(pl.col(pl.String).replace("", None))
         return Table(frame, pl.int_range(2, frame.height + 2, eager=True).alias("number"))
 
