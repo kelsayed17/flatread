@@ -28,7 +28,18 @@ from flatread.errors import (
     UnknownLayoutError,
 )
 from flatread.next._headers import _LACKED, _laid_out
-from flatread.next._model import Cells, Grid, HeaderRule, Lines, ReadContext, Records, Source, Stream, Table
+from flatread.next._model import (
+    Cells,
+    Grid,
+    HeaderRule,
+    Lines,
+    ReadContext,
+    Records,
+    Source,
+    Stream,
+    Table,
+    TableFinder,
+)
 
 if typing.TYPE_CHECKING:
     from lxml import etree
@@ -37,6 +48,7 @@ if typing.TYPE_CHECKING:
     from flatread.pdf import PdfLine
 
 __all__ = [
+    "Beside",
     "Csv",
     "Cut",
     "Derived",
@@ -1254,6 +1266,65 @@ class Noted:
         if not rest:
             return pl.repeat(value=True, n=below.height, eager=True)
         return text.select(pl.all_horizontal(rest)).to_series()
+
+
+@dataclasses.dataclass(frozen=True)
+class Beside:
+    """A sheet's table with more beside it (a second list, a note, a work column): only the table's columns are read.
+
+    They are the sheet's first columns (``A`` on), one for each of the struct's fields *table* does not state, unless
+    *at* names them: the table's own columns, from 0 (``A`` is 0), in its fields' order, so a table may start right of
+    others or skip a spacer. Every other column is dropped before *table* (:class:`Header` by default, or
+    :class:`Noted` for a table with notes under it) finds the table in what is left. A grid narrower than its table's
+    columns raises ``UnknownLayoutError``.
+    """
+
+    at: Sequence[int] | None = None
+    table: TableFinder = dataclasses.field(default_factory=Header)
+
+    def __post_init__(self) -> None:
+        if self.at is not None:
+            if not self.at or any(place < 0 for place in self.at) or len(set(self.at)) != len(self.at):
+                msg = f"a table's columns are distinct places from 0, not {list(self.at)!r}"
+                raise LayoutError(msg)
+            object.__setattr__(self, "at", tuple(self.at))
+
+    @property
+    def stated(self) -> frozenset[str]:
+        """The fields the table's own finder states."""
+        return self.table.stated
+
+    @property
+    def vouches(self) -> bool:
+        """Whether the table's own finder vouches for a table of no rows."""
+        return self.table.vouches
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table found in the grid's table columns alone."""
+        if isinstance(grid, Lines):
+            msg = "a table beside others is a sheet's, whose columns stand apart"
+            raise LayoutError(msg)
+        places = list(range(len(read.columns.keys() - self.stated)) if self.at is None else self.at)
+        if wanting := [place for place in places if place >= grid.text.width]:
+            msg = f"the sheet has {grid.text.width} columns, and the table's column {wanting[0]} is not one of them"
+            raise UnknownLayoutError(msg)
+        kept = [str(place) for place in places]
+        names = {name: str(at) for at, name in enumerate(kept)}
+
+        def cut(frame: pl.DataFrame | None) -> pl.DataFrame | None:
+            return None if frame is None else frame.select(kept).rename(names)
+
+        text = typing.cast("pl.DataFrame", cut(grid.text))
+        raw = text.select(pl.concat_str(pl.all().fill_null(""), separator="\t").str.strip_chars_end("\t")).to_series()
+        cells = dataclasses.replace(
+            grid,
+            text=text,
+            raw=raw.alias("raw"),
+            kinds=cut(grid.kinds),
+            floats=cut(grid.floats),
+            moments=cut(grid.moments),
+        )
+        return self.table.find(cells, read)
 
 
 @dataclasses.dataclass(frozen=True)

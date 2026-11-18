@@ -30,6 +30,7 @@ from flatread.next._pages import Html, HtmlRecords, HtmlRows
 from flatread.next._reader import Reader
 from flatread.next._reports import Keyed, Report, Text
 from flatread.next._stages import (
+    Beside,
     Csv,
     Cut,
     Derived,
@@ -53,6 +54,7 @@ from flatread.next._stages import (
 
 __all__ = [
     "AsWritten",
+    "Beside",
     "Cells",
     "Cleaner",
     "Csv",

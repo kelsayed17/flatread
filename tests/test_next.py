@@ -533,6 +533,30 @@ def test_a_dated_table_runs_while_its_first_cell_is_a_date_cell() -> None:
         fr.Reader(Level, fr.Csv(), table=fr.Noted(ends="undated")).frame(b"day,level\n2026-01-02,1\n")
 
 
+def test_a_table_beside_others_reads_its_own_columns_alone() -> None:
+    reader = fr.Reader(_Erratum, fr.Sheet(), table=fr.Beside())
+    rows = [["week", "series", "value", None, "Notes"], [dt.date(2026, 1, 2), "WCESTUS1", 1.5, None, True]]
+    assert reader.rows(workbook({"S": rows})) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+    with pytest.raises(ReadError, match="row 3 is empty"):  # a cell beside a table is no row of it
+        reader.frame(workbook({"S": [*rows, [None, None, None, None, "Revised"]]}))
+    placed = fr.Reader(_Erratum, fr.Sheet(), table=fr.Beside(at=[1, 3, 4]))
+    shifted = [["key", "week", None, "series", "value"], [7, dt.date(2026, 1, 2), "x", "WCESTUS1", 1.5]]
+    assert placed.rows(workbook({"S": shifted})) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+    noted = fr.Reader(_Erratum, fr.Sheet(), table=fr.Beside(table=fr.Noted()))
+    body = workbook({"S": [*rows, ["Source: EIA", None, None, None, "more"]]})
+    assert noted.rows(body) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+    with pytest.raises(UnknownLayoutError, match="the sheet has 3 columns, and the table's column 3"):
+        placed.frame(workbook({"S": [["key", "week", "series"]]}))
+    with pytest.raises(LayoutError, match="a sheet's"):
+        fr.Reader(_Erratum, fr.Csv(), table=fr.Beside()).frame(b"week,series,value\n")
+
+
+@pytest.mark.parametrize("at", [[], [-1], [0, 0]])
+def test_a_table_s_columns_are_distinct_places(at: list[int]) -> None:
+    with pytest.raises(LayoutError, match="distinct places from 0"):
+        fr.Beside(at=at)
+
+
 def test_a_sheet_s_header_runs_to_its_last_filled_cell() -> None:
     with pytest.raises(EmptyBodyError):
         _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"]]}))

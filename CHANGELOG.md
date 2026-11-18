@@ -36,6 +36,10 @@ naming it. With `cells=[Padded()]` it reads what 7.x's `PaddedSheet` and `TextNu
 `DatedSheet` do: its rows end at the first holding nothing past its first column, or at the first whose first cell is
 no date cell (a sheet's alone), and a cell past the first column among the notes below raises, naming its row.
 
+`Beside(at=..., table=...)` reads a sheet's table with more beside it, as 7.x's `BesideSheet` does: only the table's
+columns are kept (the first, one a field, or those `at` names), and `table` finds the table in them, so
+`Beside(table=Noted())` reads a table with notes under it and more beside it.
+
 In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
 In both, a body of CRLF lines that ends in a CR alone raises `TruncatedFileError`: it was cut between the CR and the
 LF, and `final_line_ending=True` took the CR for a whole line ending.
