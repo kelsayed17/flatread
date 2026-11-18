@@ -12,6 +12,10 @@ in the README, under "Versions".
   columns in any order, as `NamedCsv` does, with `Label` alternatives, a `heading` that folds each cell, and fields
   `required` in every header. Both drop `unread` columns and check that `blank` ones hold nothing, which next lacked.
   A format whose headers follow a rule of their own implements `HeaderRule`.
+- `flatread.next` cuts a table from an irregular grid, as `CsvText`, `SheetText` and `GridFile`'s pieces do:
+  `Cut(header_row=..., above=..., title=..., filled=..., ends="blank", band=..., full_rows=...)`, one finder for a CSV
+  and a sheet, which keeps a sheet's cell kinds. `Csv(misquoted=True)` reads a stray quote as text, as `CsvText`'s
+  `_misquoted` does, and `Long` reads the record columns of a header over several rows by their last line.
 
 ## 0.5.0
 

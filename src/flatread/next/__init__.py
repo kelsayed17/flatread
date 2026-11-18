@@ -29,6 +29,7 @@ from flatread.next._model import (
 from flatread.next._reader import Reader
 from flatread.next._stages import (
     Csv,
+    Cut,
     Derived,
     Header,
     Layout,
@@ -51,6 +52,7 @@ __all__ = [
     "Cells",
     "Cleaner",
     "Csv",
+    "Cut",
     "Derived",
     "Engine",
     "Format",

@@ -14,7 +14,7 @@ from collections.abc import Callable, Collection, Generator, Iterator, Mapping, 
 import polars as pl
 
 from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzipped
-from flatread.core import _NUL, _THOUSANDS, Column, _check_ending, _decoded
+from flatread.core import _NUL, _THOUSANDS, _UNIT, Column, _check_above, _check_ending, _decoded, _stacked
 from flatread.delimited import _BOM
 from flatread.errors import (
     ControlTotalError,
@@ -37,6 +37,7 @@ if typing.TYPE_CHECKING:
 
 __all__ = [
     "Csv",
+    "Cut",
     "Derived",
     "Header",
     "Layout",
@@ -202,13 +203,16 @@ class Csv:
     """A delimited file: rows of cells split at *separator*, a cell quoted with *quote* (``None``: nothing is quoted).
 
     *final_line_ending* is whether the file always ends its last line with a line ending, so a body that ends otherwise
-    was cut; ``None`` leaves it unchecked. A blank line is a row of one empty cell. Raises ``LayoutError`` when built
-    for a separator or quote that is not one character, ends a line, or is the other.
+    was cut; ``None`` leaves it unchecked. A blank line is a row of one empty cell. *misquoted* reads a quote that does
+    not close its cell as text, and a cell left open at the end runs to it (``csv``'s ``strict`` off), for a file whose
+    prose notes misquote (``"ts." Holdings o"``); a cell quoted cleanly still holds its separator. Raises
+    ``LayoutError`` when built for a separator or quote that is not one character, ends a line, or is the other.
     """
 
     separator: str = ","
     quote: str | None = '"'
     final_line_ending: bool | None = None
+    misquoted: bool = False
 
     def __post_init__(self) -> None:
         for what, character in (("separator", self.separator), ("quote", self.quote)):
@@ -224,6 +228,8 @@ class Csv:
         del read
         body = stream.read()
         text = self._text(body)
+        if self.misquoted:
+            return self._whole(text, body, parse=False)
         parsed = self._parsed(body, text)
         if isinstance(parsed, Lines):
             return parsed
@@ -449,7 +455,9 @@ class Csv:
         split = (_LONE_CR.sub(stand_in, text) if lone else text).split("\n")
         lines = [line + "\n" for line in split[:-1]] + ([split[-1]] if split[-1] else [])
         quoting = csv.QUOTE_NONE if self.quote is None else csv.QUOTE_MINIMAL
-        reader = csv.reader(lines, delimiter=self.separator, quotechar=self.quote or '"', quoting=quoting, strict=True)
+        reader = csv.reader(
+            lines, delimiter=self.separator, quotechar=self.quote or '"', quoting=quoting, strict=not self.misquoted
+        )
         parsed = parse and _breaks_as_polars(text) and len(self.separator.encode()) == 1
         rows: list[list[str | None]] = []
         widths: list[int] = []
@@ -1158,6 +1166,184 @@ class Titled:
         return table
 
 
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Cut:
+    """A table cut from an irregular grid (CsvText's, SheetText's): its header in a row, every filled row below it.
+
+    The grid is taken whole: a short row's missing cells are no value, and so is a cell of spaces or one of the file's
+    words for none. Its header is in row *header_row* of the file (from 1), to its last filled cell, and its rows are
+    every row below it but an empty one, each numbered by its row in the file; a cell past the header's last raises.
+
+    *above* rows right over the header head its columns too (a group over its labels): a cell heads its own column and
+    those to its right with none of their own, each column's header its cells top to bottom joined by U+001F, as a
+    :class:`Long` shape's keys read them. The header is found, not placed, under *title* (the first row whose first
+    cell is it, alone: the header is the first filled row below) or by *filled*, ``(fewest, short_by)``: the first row
+    filling at least *fewest* cells and no more than *short_by* fewer than the fullest. A grid with no such row holds
+    no table: no rows, where the reader takes a table of none (``empty``), and refused otherwise.
+
+    *ends* ``"blank"`` ends the rows at the first empty one (notes or another table below); *band* ``(first, past)``
+    cuts the grid's columns to those, ``past`` ``None`` the grid's end (a second table beside it); *full_rows* refuses
+    a text file's row narrower than its widest but a blank line. One finder for a CSV's grid and a sheet's, which keeps
+    its cells' kinds; a *header* rule reads the header, as under every finder.
+    """
+
+    header_row: int = 1
+    above: int = 0
+    title: str | None = None
+    filled: tuple[int, int] | None = None
+    ends: typing.Literal["end", "blank"] = "end"
+    band: tuple[int, int | None] = (0, None)
+    full_rows: bool = False
+    stated: frozenset[str] = frozenset()
+    vouches: bool = False
+    header: HeaderRule | None = None
+
+    def __post_init__(self) -> None:
+        if self.header_row < 1:
+            msg = f"the header row {self.header_row} is no row of a grid, whose rows count from 1"
+            raise LayoutError(msg)
+        if (self.title is not None) + (self.filled is not None) + (self.header_row != 1) > 1:
+            msg = "a Cut's header is in its header_row, under its title or by how filled it is: one of the three"
+            raise LayoutError(msg)
+        if self.above and (self.title is not None or self.filled is not None):
+            msg = "the rows over a found header are not known to head its columns: above takes a header_row"
+            raise LayoutError(msg)
+        _check_above(self.above, self.header_row)
+        first, past = self.band
+        if first < 0 or (past is not None and past <= first):
+            msg = f"the band {self.band} is no columns of a grid: its first from 0, and its past after it"
+            raise LayoutError(msg)
+        if self.filled is not None and (self.filled[0] < 1 or self.filled[1] < 0):
+            msg = f"filled {self.filled} is no header's: it fills at least one cell, and no fewer than none short"
+            raise LayoutError(msg)
+        if self.ends not in ("end", "blank"):
+            msg = f"a Cut's rows end at the grid's end or a blank row, not {self.ends!r}"
+            raise LayoutError(msg)
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table cut from the grid."""
+        cells = self._cells(grid, read)
+        first, past = self.band
+        cells = _columns(cells, cells.cells.columns[first:past])
+        text = cells.cells
+        empty = text.select(pl.all_horizontal(pl.all().is_null())).to_series() if text.width else None
+        at = self._header_at(text, empty, read)
+        if at is None:
+            if not read.empty:
+                assert self.filled is not None  # noqa: S101 (only a header found by how filled it is goes unfound)
+                msg = f"the grid holds no table: no row of it fills {self.filled[0]} cells, as a header does"
+                raise EmptyBodyError(msg)
+            return _laid_empty(read)
+        header = self._header_of(text, at)
+        if self.above and len(set(header)) != len(header):
+            msg = f"the header {header} heads two columns alike, which no format of the grid tells apart"
+            raise UnknownLayoutError(msg, row=at)
+        if header.count("") > 1:
+            msg = f"the header {header} leaves two cells empty, which no format of the grid reads"
+            raise UnknownLayoutError(msg, row=at)
+        below = _sliced(cells, at)
+        if self.ends == "blank" and empty is not None and (end := empty.slice(at).arg_true()).len():
+            below = _sliced(below, 0, int(end[0]))
+        past_cells = below.cells.columns[len(header) :]
+        if (
+            past_cells
+            and (held := below.cells.select(pl.any_horizontal(pl.col(past_cells).is_not_null())).to_series()).any()
+        ):
+            row = int(below.numbers[int(held.arg_true()[0])])
+            msg = f"row {row} holds a cell past the header {header!r}, which no column of the table is"
+            raise ReadError(msg, row=row)
+        kept = below.cells.columns[: len(header)]
+        rows = _columns(below, kept)
+        if kept:
+            filled = ~rows.cells.select(pl.all_horizontal(pl.all().is_null())).to_series()
+            rows = rows.with_frames(
+                [None if f is None else f.filter(filled) for f in rows.frames()], rows.numbers.filter(filled)
+            )
+        _check_header(header)
+        named = _unique(header)
+        frames = [None if f is None else f.rename(dict(zip(kept, named, strict=True))) for f in rows.frames()]
+        return _matched(rows.with_frames(frames, rows.numbers), self.header, read)
+
+    def _cells(self, grid: Grid, read: ReadContext) -> Table:
+        """Return *grid* as a table of its columns ``0``, ``1``, ..., a cell of spaces or of a null word none."""
+        if isinstance(grid, Lines):
+            if self.full_rows and grid.height:
+                widest = typing.cast("int", grid.widths.max())
+                if (short := ((grid.widths < widest) & (grid.raw != "")).arg_true()).len():
+                    at = int(short[0])
+                    row = int(grid.numbers[at])
+                    msg = f"row {row} has {grid.widths[at]} fields, not the widest row's {widest}"
+                    raise RaggedRowError(msg, row=row)
+            table = Table(grid.cells, grid.numbers)
+        else:
+            table = Table(grid.text, grid.numbers, grid.kinds, grid.floats, grid.moments)
+        nulls = list(read.null_values)
+        text = table.cells.with_columns(
+            pl.when((pl.all().str.strip_chars() != "") & ~pl.all().is_in(nulls)).then(pl.all()).name.keep()
+        )
+        return table.with_frames([text, *table.frames()[1:]], table.numbers)
+
+    def _header_at(self, text: pl.DataFrame, empty: pl.Series | None, read: ReadContext) -> int | None:
+        """Return the grid row (from 1) of the header, or ``None`` for a grid of no table (by *filled*)."""
+        del read
+        if self.title is not None:
+            if not text.width:
+                msg = f"no row is the title {self.title!r} alone"
+                raise UnknownLayoutError(msg)
+            lead, rest = pl.col(text.columns[0]), pl.exclude(text.columns[0])
+            alone = (lead == self.title) & pl.all_horizontal(rest.is_null()) if text.width > 1 else lead == self.title
+            if not (titled := text.select(alone.fill_null(value=False)).to_series().arg_true()).len():
+                msg = f"no row is the title {self.title!r} alone"
+                raise UnknownLayoutError(msg)
+            title = int(titled[0])
+            assert empty is not None  # noqa: S101 (a grid of columns)
+            if not (header := (~empty.slice(title + 1)).arg_true()).len():
+                msg = f"the title {self.title!r} has no table below it"
+                raise UnknownLayoutError(msg)
+            return title + 2 + int(header[0])
+        if self.filled is not None:
+            fewest, short_by = self.filled
+            counts = text.select(pl.sum_horizontal(pl.all().is_not_null())).to_series() if text.width else None
+            fullest = typing.cast("int", counts.max()) if counts is not None and counts.len() else 0
+            if fullest < fewest:
+                return None
+            assert counts is not None  # noqa: S101 (a fullest row)
+            return int((counts >= max(fewest, fullest - short_by)).arg_true()[0]) + 1
+        return self.header_row
+
+    def _header_of(self, text: pl.DataFrame, at: int) -> list[str]:
+        """Return the labels the header row *at* writes, to its last filled cell, each under the rows over it."""
+        if text.height < at:
+            msg = f"the body has {text.height} rows, and its header is row {at}"
+            raise UnknownLayoutError(msg)
+        rows = [text.row(row) for row in range(at - 1 - self.above, at)]
+        if not self.above:
+            header: list[str] = [cell or "" for cell in rows[-1]]
+            while header and not header[-1]:
+                header.pop()
+            return header
+        cells = [[None if cell is None else cell.strip() or None for cell in row] for row in rows]
+        width = max((place + 1 for row in cells for place, cell in enumerate(row) if cell is not None), default=0)
+        return _stacked([row[:width] for row in cells])
+
+
+def _columns(table: Table, names: Sequence[str]) -> Table:
+    """Return *table*'s columns *names*, in every frame."""
+    return table.with_frames([None if f is None else f.select(names) for f in table.frames()], table.numbers)
+
+
+def _sliced(table: Table, at: int, length: int | None = None) -> Table:
+    """Return *table*'s rows from *at*, *length* of them (``None``: to its end), in every frame."""
+    frames = [None if f is None else f.slice(at, length) for f in table.frames()]
+    return table.with_frames(frames, table.numbers.slice(at, length))
+
+
+def _laid_empty(read: ReadContext) -> Table:
+    """Return a table of no rows under the struct's labels, but those a stage states: a grid that holds no table."""
+    labels = [column.label for column in read.columns.values() if column.field not in read.stated]
+    return Table(pl.DataFrame(schema=dict.fromkeys(labels, pl.String)), pl.Series("number", [], pl.Int64))
+
+
 # --- Shapes ---
 
 
@@ -1183,8 +1369,9 @@ class Long:
         ]
         labels = [column.label for column in record]
         header = [name.partition(_NUL)[0] for name in table.cells.columns]
-        if header[: len(labels)] != labels:
-            msg = f"the header opens {header[: len(labels)]!r}, not the record's {labels!r}"
+        # A header over several rows (Cut's above) ends each record column's in its label, which names it.
+        if (opening := [heading.rpartition(_UNIT)[2] for heading in header[: len(labels)]]) != labels:
+            msg = f"the header opens {opening!r}, not the record's {labels!r}"
             raise UnknownLayoutError(msg)
         keyed: dict[str, str | None] = {}
         for name, heading in zip(table.cells.columns[len(labels) :], header[len(labels) :], strict=True):
@@ -1207,7 +1394,8 @@ class Long:
             height, at = frame.height, pl.int_range(frame.height * len(keyed))
             cells = cells.select(pl.all().gather((at % len(keyed)) * height + at // len(keyed)))
             key = pl.col("_key").replace_strict(keyed, return_dtype=pl.String).alias(key_column.label)
-            return cells.select("_row", *record_columns, key, value_column.label)
+            record = (pl.col(name).alias(label) for name, label in zip(record_columns, labels, strict=True))
+            return cells.select("_row", *record, key, value_column.label)
 
         frames = [long(frame) for frame in table.frames()]
         cells = typing.cast("pl.DataFrame", frames[0])

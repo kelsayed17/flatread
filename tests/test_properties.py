@@ -198,6 +198,29 @@ def test_a_workbook_with_a_damaged_part_reads_or_raises_read_error(
     _reads_or_refuses(_SHEETS[reader], out.getvalue())
 
 
+_CUTS: dict[str, Callable[[bytes], object]] = {
+    "flatread.next Cut": fr.Reader(_Row, fr.Csv(), table=fr.Cut(ends="blank", header=fr.Named())).rows,
+    "flatread.next Cut, misquoted and found": fr.Reader(
+        _Row, fr.Csv(misquoted=True), table=fr.Cut(filled=(2, 1), full_rows=True), empty=True
+    ).rows,
+    "flatread.next Cut on a sheet": fr.Reader(
+        _Row, fr.Sheet(sheet="S"), table=fr.Cut(header=fr.Headers(lacking=[(), ("held",)]))
+    ).rows,
+}
+
+
+@pytest.mark.parametrize("reader", _CUTS)
+@_SETTINGS
+@given(rows=_ROWS, data=st.data())
+def test_a_damaged_grid_reads_or_raises_read_error(reader: str, rows: list[_Row], data: st.DataObject) -> None:
+    body = (
+        _csv(rows)
+        if "sheet" not in reader
+        else workbook({"S": [_LABELS, *([row.name, row.count, row.share, row.held] for row in rows)]})
+    )
+    _reads_or_refuses(_CUTS[reader], _damaged(body, data))
+
+
 class _Record(msgspec.Struct, frozen=True, gc=False):
     name: Annotated[str, Label("name")]
     count: Annotated[int | None, Label("count")]
@@ -206,6 +229,7 @@ class _Record(msgspec.Struct, frozen=True, gc=False):
 _ANY: dict[str, Callable[[bytes], object]] = {
     **_READERS,
     **_SHEETS,
+    **_CUTS,
     "XmlFile": XmlFile(_Record, root="t", record="r").rows,
     "HtmlFile": HtmlFile(_Record).rows,
 }

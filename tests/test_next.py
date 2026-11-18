@@ -1244,3 +1244,208 @@ class TestHeaderRules:
             fr.Reader(
                 self.Holding, fr.Csv(), table=fr.Header(header=fr.Named()), shape=fr.Long(keys=re.compile(r"\d+"))
             )
+
+
+class TestCut:
+    """One finder for an irregular grid, a CSV's or a sheet's (CsvText, SheetText and GridFile's pieces): cut."""
+
+    class Count(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        n: Annotated[int | None, Label("N")]
+
+    @staticmethod
+    def _pieces() -> dict[str, tuple[object, fr.Cut]]:
+        from flatread.delimited import CsvText  # noqa: PLC0415 (the 7.x readers it replaces)
+        from flatread.grids import BesideGrid, BlankEnded, FilledHeader, TitledGrid  # noqa: PLC0415
+
+        row = TestCut.Count
+
+        class Blank(BlankEnded[row], CsvText[row]):
+            pass
+
+        class Titled(TitledGrid[row], CsvText[row]):
+            _title = "Table 2"
+
+        class Filled(FilledHeader[row], CsvText[row]):
+            pass
+
+        class Beside(BesideGrid[row], CsvText[row]):
+            _band = (1, 3)
+
+        return {
+            "header": (CsvText(row), fr.Cut()),
+            "header_row": (CsvText(row, header_row=3), fr.Cut(header_row=3)),
+            "blank ended": (Blank(row), fr.Cut(ends="blank")),
+            "titled": (Titled(row), fr.Cut(title="Table 2")),
+            "filled": (Filled(row), fr.Cut(filled=(2, 3))),
+            "beside": (Beside(row), fr.Cut(band=(1, 3))),
+        }
+
+    @pytest.mark.parametrize(
+        ("piece", "body"),
+        [
+            ("header", b"Name,N\na,1\n,\nb,\n"),
+            ("header", b"Name,N\na,1,\n"),
+            ("header", b"Name,N,\na,1\n"),
+            ("header", b"Name,N\na\n"),
+            ("header", b"Name,N\n  ,  \na, 2\n"),
+            ("header_row", b"Title\n\nName,N\na,1\n"),
+            ("blank ended", b"Name,N\na,1\n\nNotes,here\n"),
+            ("blank ended", b"Name,N\na,1\n,,\nx,2\n"),
+            ("titled", b"Table 1\nX,Y\n1,2\n\nTable 2\n\nName,N\na,1\n"),
+            ("filled", b"Title\nName,N\na,1\n"),
+            ("beside", b"x,Name,N,y\n,a,1,z\n"),
+        ],
+    )
+    def test_a_csv_grid_is_cut_as_7x_cuts_it(self, piece: str, body: bytes) -> None:
+        old, cut = self._pieces()[piece]
+        assert fr.Reader(self.Count, fr.Csv(), table=cut).rows(body) == old.rows(body)  # ty: ignore[unresolved-attribute] (a 7.x reader)
+
+    def test_a_sheet_grid_is_cut_as_sheet_text_cuts_it_its_cells_kinds_kept(self) -> None:
+        from flatread.sheets import SheetText  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        for rows in [
+            [["T"], ["Name", "N"], ["a", 1], [None, None], ["b", 2.0]],
+            [[None, "T"], [None, "Name", "N"], [None, "a", 3]],
+        ]:
+            body = workbook({"S": rows})
+            reader = fr.Reader(self.Count, fr.Sheet(sheet="S"), table=fr.Cut(header_row=2))
+            assert reader.rows(body) == SheetText(self.Count, sheet="S", header_row=2).rows(body)
+
+    def test_a_null_word_is_an_empty_cell_and_a_row_of_them_no_row(self) -> None:
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Cut(), null_values=["NA"])
+        assert reader.rows(b"Name,N\na,NA\nNA,NA\nb,2\n") == [self.Count("a", None), self.Count("b", 2)]
+
+    @pytest.mark.parametrize(
+        ("cut", "body", "error", "words"),
+        [
+            (fr.Cut(), b"Name,N\na,1\nb,2,x\n", ReadError, r"^row 3 holds a cell past the header \['Name', 'N'\],"),
+            (
+                fr.Cut(header_row=3),
+                b"Title\nName,N\n",
+                UnknownLayoutError,
+                r"^the body has 2 rows, and its header is row 3$",
+            ),
+            (
+                fr.Cut(title="Table 2"),
+                b"Table 2,x\nName,N\n",
+                UnknownLayoutError,
+                r"^no row is the title 'Table 2' alone$",
+            ),
+            (
+                fr.Cut(title="Table 2"),
+                b"Table 2\n\n",
+                UnknownLayoutError,
+                r"^the title 'Table 2' has no table below it$",
+            ),
+            (
+                fr.Cut(filled=(2, 3)),
+                b"No trades\n",
+                EmptyBodyError,
+                r"^the grid holds no table: no row of it fills 2 cells",
+            ),
+            (fr.Cut(), b",,Name\na,b,c\n", UnknownLayoutError, r"leaves two cells empty"),
+            (fr.Cut(), b",,\na,b,c\n", ReadError, r"^row 2 holds a cell past the header \[\],"),
+            (
+                fr.Cut(full_rows=True),
+                b"Name,N\na,1\n\nb\n",
+                RaggedRowError,
+                r"^row 4 has 1 fields, not the widest row's 2$",
+            ),
+        ],
+        ids=[
+            "past the header",
+            "no header row",
+            "no title alone",
+            "nothing under the title",
+            "no table",
+            "two empty",
+            "an empty header",
+            "short",
+        ],
+    )
+    def test_a_grid_cut_raises(self, cut: fr.Cut, body: bytes, error: type[ReadError], words: str) -> None:
+        with pytest.raises(error, match=words):
+            fr.Reader(self.Count, fr.Csv(), table=cut).rows(body)
+
+    def test_full_rows_reads_a_grid_whose_rows_are_full_and_blank_lines(self) -> None:
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Cut(full_rows=True))
+        assert reader.rows(b"Name,N\na,1\n\nb,2\n") == [self.Count("a", 1), self.Count("b", 2)]
+
+    def test_a_header_row_of_no_labels_over_no_cells_is_no_header_of_the_struct(self) -> None:
+        with pytest.raises(UnknownLayoutError, match=r"^the header \[\] is not \['Name', 'N'\]$"):
+            fr.Reader(self.Count, fr.Csv(), table=fr.Cut()).rows(b",,\n,,\n")
+
+    def test_a_grid_of_no_table_is_no_rows_where_the_reader_takes_one(self) -> None:
+        assert fr.Reader(self.Count, fr.Csv(), table=fr.Cut(filled=(2, 3)), empty=True).rows(b"No trades\n") == []
+
+    def test_a_title_in_a_grid_of_no_columns_is_not_found(self) -> None:
+        with pytest.raises(UnknownLayoutError, match="no row is the title"):
+            fr.Reader(self.Count, fr.Sheet(sheet="S"), table=fr.Cut(title="T")).rows(workbook({"S": []}))
+
+    def test_a_title_alone_in_a_grid_of_one_column_is_found(self) -> None:
+        class Name(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name")]
+
+        assert fr.Reader(Name, fr.Csv(), table=fr.Cut(title="T")).rows(b"T\nName\na\n") == [Name("a")]
+
+    def test_a_header_over_rows_reads_long_as_long_file_reads_it(self) -> None:
+        from flatread.delimited import CsvText  # noqa: PLC0415 (the 7.x reader it replaces)
+        from flatread.layout import LongFile  # noqa: PLC0415
+
+        class Rate(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name")]
+            key: str
+            value: float | None
+
+        keys = re.compile(r"Rates\x1f\d{4}")
+
+        class Old(LongFile[Rate], CsvText[Rate]):
+            _above = 1
+            _keys = keys
+
+        body = b",Rates,\nName,2024,2025\na,1,2\nb,,3\n"
+        reader = fr.Reader(Rate, fr.Csv(), table=fr.Cut(header_row=2, above=1), shape=fr.Long(keys=keys))
+        assert reader.rows(body) == Old(Rate, header_row=2).rows(body)
+        with pytest.raises(UnknownLayoutError, match="heads two columns alike"):
+            reader.rows(b",Rates,\nName,2024,2024\na,1,2\n")
+
+    def test_a_header_rule_reads_a_cut_header(self) -> None:
+        cut = fr.Cut(header=fr.Headers(unread=["notes"]))
+        assert fr.Reader(self.Count, fr.Csv(), table=cut).rows(b"Name,notes,N\na,x,1\n") == [self.Count("a", 1)]
+
+    @pytest.mark.parametrize(
+        ("keywords", "words"),
+        [
+            ({"header_row": 0}, "is no row of a grid"),
+            ({"title": "T", "header_row": 2}, "one of the three"),
+            ({"title": "T", "filled": (2, 3)}, "one of the three"),
+            ({"above": 1, "title": "T"}, "above takes a header_row"),
+            ({"above": 2, "header_row": 2}, "do not fit above"),
+            ({"band": (-1, None)}, "is no columns of a grid"),
+            ({"band": (2, 2)}, "is no columns of a grid"),
+            ({"filled": (0, 3)}, "is no header's"),
+            ({"ends": "notes"}, "not 'notes'"),
+        ],
+    )
+    def test_a_cut_no_grid_has_is_refused_when_built(self, keywords: Mapping[str, typing.Any], words: str) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Cut(**keywords)
+
+
+def test_a_misquoted_csv_reads_a_stray_quote_as_text_as_csv_text_does() -> None:
+    from flatread.delimited import CsvText  # noqa: PLC0415 (the 7.x reader it replaces)
+
+    class Note(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        note: Annotated[str | None, Label("Note")]
+
+    class Misquoted(CsvText[Note]):
+        _misquoted = True
+
+    body = b'Name,Note\na,"ts." Holdings o"\nb,"x, y"\n'
+    reader = fr.Reader(Note, fr.Csv(misquoted=True), table=fr.Cut())
+    assert reader.rows(body) == Misquoted(Note).rows(body) == [Note("a", 'ts. Holdings o"'), Note("b", "x, y")]
+    assert fr.Reader(Note, fr.Csv(misquoted=True)).rows(b'Name,Note\na,b"c\n') == [Note("a", 'b"c')]
+    with pytest.raises(ReadError):
+        fr.Reader(Note, fr.Csv(), table=fr.Cut()).rows(body)

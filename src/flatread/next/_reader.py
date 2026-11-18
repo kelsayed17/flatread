@@ -74,7 +74,7 @@ class Reader[RowT: msgspec.Struct]:
         typed = {column.label: _parsed_as(column) for column in self.engine.columns}
         direct = (
             (
-                isinstance(self.format, Csv)
+                (isinstance(self.format, Csv) and not self.format.misquoted)
                 or (isinstance(self.format, Sheet) and all(_plain(column) for column in self.engine.columns))
             )
             and isinstance(self.table, Header)
@@ -97,6 +97,8 @@ class Reader[RowT: msgspec.Struct]:
             columns={column.field: column for column in self.engine.columns},
             row=self.row,
             required=self.engine.required,
+            null_values=frozenset(self._null_values),
+            empty=self.empty,
         )
         try:
             with self._opened(body, read) as stream:

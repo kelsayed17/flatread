@@ -166,7 +166,9 @@ class ReadContext:
     regex matches a stage found (``matches["trailer"]``); *member* the name of the zip member opened, if one was.
     *columns* are the row struct's columns, by field, and *row* the struct: a format with no header (a document's
     records, an SDMX message's attributes) lays its cells out by them. *required* are the fields that hold a value on
-    every row (none admits ``None`` or has a default), whose column every header names.
+    every row (none admits ``None`` or has a default), whose column every header names; *null_values* the reader's words
+    for no value, which a stage that tells an empty cell (a grid's cut) reads as one; *empty* whether a table of no
+    rows is an answer, as the reader was built.
     """
 
     body: bytes
@@ -176,6 +178,8 @@ class ReadContext:
     columns: Mapping[str, Column] = dataclasses.field(default_factory=dict)
     row: type | None = None
     required: frozenset[str] = frozenset()
+    null_values: frozenset[str] = frozenset()
+    empty: bool = False
 
 
 class Source(typing.Protocol):
