@@ -291,8 +291,10 @@ class Csv:
     ) -> Table | None:
         """Return the table of a file that is its header of *dtypes*' labels and rows as wide, read typed in one pass.
 
-        polars' parser reads every cell as text, each of *null_values* no value, and the columns of an ``Int64`` or
-        ``Float64`` in *dtypes* are cast, so the engine has the text columns alone to type. ``None`` where the body
+        polars' parser reads each column as its dtype in *dtypes* (``Int64``, ``Float64``, else ``String``), each of
+        *null_values* no value, so the engine has the text columns alone to type; where a cell may open with a space
+        or a tab (:meth:`_may_pad`), which the parser would take before a number, every cell is read as text and the
+        numbers cast, as the grid's are. ``None`` where the body
         may be anything else: another header, a row of another width (counted from its separators outside quoted
         cells), a quote out of place (as :meth:`_spanning` finds one), a line break polars does not break at, a cell
         the cast refuses (a number padded with whitespace) or a float that underflows (``1e-400`` as 0.0);
@@ -315,9 +317,13 @@ class Csv:
             return None
         if _unique(header) != labels:
             return None
-        # Every cell read as text, its numbers then cast: polars' parser takes a number after spaces or a tab (`` 5``),
-        # which its cast refuses, as the grid's reading does.
-        schema = dict.fromkeys(dtypes, pl.String)
+        # polars' parser takes a number after spaces or a tab (`` 5``), which its cast refuses, as the grid's reading
+        # does: a body where a cell may open so has every cell read as text, its numbers then cast.
+        padded = self._may_pad(body, quote)
+        schema = {
+            label: dtype if dtype in (pl.Int64, pl.Float64) and not padded else pl.String
+            for label, dtype in dtypes.items()
+        }
 
         def parsed() -> pl.DataFrame | None:
             try:
@@ -355,15 +361,27 @@ class Csv:
         # A cell its cast refuses (padded, empty but quoted) or a float that underflows (``1e-400`` as 0.0): the
         # grid's reading names it.
         numbers = {label: dtype for label, dtype in dtypes.items() if dtype in (pl.Int64, pl.Float64)}
-        if numbers:
+        if numbers and padded:
             cast = frame.with_columns(pl.col(label).cast(dtype, strict=False) for label, dtype in numbers.items())
-            if any(cast[label].null_count() != frame[label].null_count() for label in numbers) or _underflows(
-                body, cast, numbers
-            ):
+            if any(cast[label].null_count() != frame[label].null_count() for label in numbers):
                 return None
             frame = cast
+        if numbers and _underflows(body, frame, numbers):
+            return None
         frame = frame.with_columns(pl.col(pl.String).replace("", None))
         return Table(frame, pl.int_range(2, frame.height + 2, eager=True).alias("number"))
+
+    def _may_pad(self, body: bytes, quote: str | None) -> bool:
+        """Return whether a cell of *body* may open with a space or a tab, after a separator, a line break or a quote.
+
+        A few substring searches in polars, over the body's bytes.
+        """
+        opens = [self.separator.encode(), b"\n", *([quote.encode()] if quote is not None else [])]
+        if body.removeprefix(_BOM).startswith((b" ", b"\t")):
+            return True
+        found = pl.lit(pl.Series([body], dtype=pl.Binary))
+        pairs = [found.bin.contains(start + blank) for start in opens for blank in (b" ", b"\t")]
+        return bool(pl.select(pl.any_horizontal(pairs)).item())
 
     def _rows_of(self, text: str, quote: str, width: int) -> int | None:
         """Return how many rows *text* holds, where each is *width* cells quoted whole or holding no quote, or ``None``.
