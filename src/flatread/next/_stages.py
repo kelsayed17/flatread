@@ -1272,8 +1272,6 @@ class Noted:
             if isinstance(below, Lines) or below.kinds is None:
                 msg = "a table of dated rows is a sheet's, whose cells say which are dates"
                 raise LayoutError(msg)
-            if "0" not in below.kinds.columns:
-                return pl.repeat(value=True, n=below.height, eager=True)
             lead: pl.Series = below.kinds.get_column("0")
             return lead.ne_missing("moment")
         rest = [pl.col(name).is_null() | (pl.col(name).str.strip_chars() == "") for name in text.columns[1:]]

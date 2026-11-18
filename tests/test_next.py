@@ -519,6 +519,22 @@ def test_a_noted_table_ends_at_its_notes_and_refuses_a_row_among_them() -> None:
     assert fr.Reader(_Erratum, fr.Csv(), table=fr.Noted()).rows(csv) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
 
 
+def test_a_noted_table_s_header_is_a_row_of_the_grid() -> None:
+    blank: typing.Any = "blank"
+    with pytest.raises(LayoutError, match="the header row 0 is no row"):
+        fr.Noted(header_row=0)
+    with pytest.raises(LayoutError, match="a bare row or an undated one"):
+        fr.Noted(ends=blank)
+    with pytest.raises(UnknownLayoutError, match="the body has 2 rows, and its header is row 3"):
+        fr.Reader(_Erratum, fr.Csv(), table=fr.Noted(header_row=3)).frame(b"a\nb\n")
+
+    class Single(msgspec.Struct, frozen=True):
+        name: str
+
+    with pytest.raises(ReadError):  # a row of one column holds nothing past it: every row is a note
+        fr.Reader(Single, fr.Csv(), table=fr.Noted()).frame(b"name\na\n")
+
+
 def test_a_dated_table_runs_while_its_first_cell_is_a_date_cell() -> None:
     class Level(msgspec.Struct, frozen=True):
         day: dt.date
@@ -591,6 +607,31 @@ def test_a_headerless_file_s_rows_are_its_fields_given_and_numbered() -> None:
         sheet.frame(workbook({"S": [["FL1", "usd"], ["FL2"]]}))
     with pytest.raises(RaggedRowError, match="row 2 holds a cell right of the table's last column"):
         sheet.frame(workbook({"S": [["FL1", "usd"], ["FL2", "pct", "x"]]}))
+
+
+class _GivenAt(msgspec.Struct, frozen=True, gc=False):
+    at: dt.datetime | None
+    series: str
+    unit: str | None
+
+
+def test_a_headerless_sheet_s_columns_are_its_fields_no_stage_states() -> None:
+    given = fr.Given({"at": None}, table=fr.Headerless())
+    assert given.stated == frozenset({"at"})
+    reader = fr.Reader(_GivenAt, fr.Sheet(), table=given)
+    rows = [_GivenAt(None, "FL1", None), _GivenAt(None, "FL2", None)]
+    assert reader.rows(workbook({"S": [["FL1"], ["FL2"]]})) == rows
+    with pytest.raises(LayoutError, match="is a column of the table too"):
+        fr.Reader(_Described, fr.Csv(), shape=fr.Numbered("column")).frame(b"table,column,series,unit\nF,1,FL1,usd\n")
+
+
+def test_a_csv_header_opening_with_a_space_is_refused() -> None:
+    class Named(msgspec.Struct, frozen=True):
+        name: str
+        n: int
+
+    with pytest.raises(ReadError):
+        fr.Reader(Named, fr.Csv()).frame(b" name,n\na,1\n")
 
 
 @pytest.mark.parametrize(
