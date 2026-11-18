@@ -1,7 +1,45 @@
 # Changelog
 
 Each release's changes, newest first, and what a reader declared for the release before must change. Releases before
-6.0.0 have no entry here; their tags and commit messages describe them.
+6.0.0 have no entry here; their tags and commit messages describe them. What a patch and a minor release may change is
+in the README, under "Versions".
+
+## Unreleased
+
+- **A sheet's number cell in an `int` field must hold a whole number below 2\*\*53**, and one at or past it raises
+  `ReadError`. A number cell is a double, so `9007199254740993` written in a workbook loaded as `9007199254740992`
+  and read with no error; 7.x and 0.5.0 read every whole double up to 2\*\*63. Excel holds 15 digits, so no workbook
+  Excel writes holds such a number; a reader of one that does must read the column as text: a `str` field, marked
+  `AsWritten()` in `flatread.next`. This holds for `SheetFile`, the sheet readers built on it, and `flatread.next`'s `Sheet`.
+- `flatread.next` gains three stages the class-per-quirk readers had: `Thousands()`, a cleaner for numbers grouped in
+  thousands (`ThousandsCsv`, `Thousands`); `Zip(member, bare=True)`, a file published zipped or bare
+  (`ZippedOrBare`); and `Transcoded(encodings, eof=, lossy=, source=)`, a file in a legacy encoding, the body or a
+  zip's member (`Transcoded`).
+- `flatread.next` gains `Preamble(label=None)`, a table finder for a header below a preamble of any length, one stage
+  for a CSV and a sheet (`PreambleCsv`, `PreambleSheet`). A CSV's blank first line is now the table finder's to
+  refuse, not `Csv`'s, so a preamble may open with one; `Header()` refuses it as before.
+- `flatread.next` reads no sheet number cell into a `str` field unless the field is marked `AsWritten()`: a ZIP code
+  or CUSIP stored as a number has lost its leading zeros, so it is refused, not read as `2134`. `SheetFile` still
+  reads such a cell as its number's text (design-review finding 1, left to 7.x as it is).
+- `flatread.next`'s `Csv` reads a cell holding a vertical tab, a form feed, a line or paragraph separator, or a lone CR
+  as one cell, as polars and `CsvFile` do. Before, it broke the row there and raised `RaggedRowError`.
+- The README states the versioning policy (a "Versions" section): what a 0.x patch and minor release may change, and
+  what 1.0.0 waits for.
+- Property tests (`tests/test_properties.py`, hypothesis) read generated tables back exactly, and damaged ones and
+  bytes of no format as rows or a `ReadError`, through the CSV, sheet, XML and HTML readers of both APIs, and hold
+  the two CSV readers to the same rows. They found the two defects above.
+- A workbook whose zip lists a member's name twice raises `CorruptArchiveError`, as every other zip a reader opens
+  does. Before, a sheet reader opened it.
+- Importing `flatread.pdf` no longer changes pdfminer for any other caller: outside a flatread read, its stream decoders
+  are pdfminer's own again, logging included. The caps and the linear-time `decompress_corrupted` apply only during a
+  flatread read.
+- A `ReadError` carries `row`, `label` and `member` as attributes beside its message, each `None` where not known. A
+  `flatread.next` reader sets all three wherever its message names them, numbering a row as its file does; the other
+  readers set `row` and `label` on a cell's error, numbering rows as their messages do.
+- A `LayoutError` raised inside a read now stays a `LayoutError` at the five places that turn a `ValueError` into a
+  `ReadError` naming where. No read is known to reach them with one, so no reader is known to read differently.
+- One test of a Rust panic (`flatread.core._panicked`) serves every reader. Before, the core, sheet and
+  `flatread.next` readers each had their own.
 
 ## 0.5.0
 

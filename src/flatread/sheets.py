@@ -64,7 +64,7 @@ import polars as pl
 import xlrd
 from xlrd import compdoc
 
-from flatread.archives import _UNZIP_ERRORS, _inflated
+from flatread.archives import _UNZIP_ERRORS, _inflated, _listed_once
 from flatread.core import (
     _UNIT,
     Column,
@@ -75,6 +75,7 @@ from flatread.core import (
     _flagged,
     _moment,
     _none_dtype,
+    _panicked,
     _repeated,
     _stacked,
     _stated,
@@ -164,6 +165,10 @@ _DECIMAL_TEXT: Final = r"^-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$"
 
 #: The whole numbers an ``int`` field holds, 64 bits' (a float load reads ``1e20`` as one), as floats: low, high.
 _INT_RANGE: Final = (-(2.0**63), 2.0**63)
+#: The bound below which a number cell's whole number is the one written: a cell is a double, so ``9007199254740993``
+#: (2**53 + 1) written in its XML loads as 2**53. One at the bound or past it in an ``int`` field is refused, not read
+#: as some other number.
+_EXACT_INT: Final = 2.0**53
 
 
 #: The date fastexcel reads Excel's serial 60 as, 1900-02-29 in Excel's 1900 date system, a day no calendar has: the
@@ -172,8 +177,8 @@ _LEAP_DAY: Final = dt.date(1900, 2, 28)
 
 
 def _whole(numbers: pl.Series) -> pl.Series:
-    """Return whether each of *numbers*, floats, is a whole number an ``int`` field holds: 64 bits' (none is NaN)."""
-    return (numbers == numbers.floor()) & numbers.is_between(*_INT_RANGE, closed="left")
+    """Return whether each of *numbers*, floats, is a whole number an ``int`` field reads exactly: below 2**53."""
+    return (numbers == numbers.floor()) & (numbers.abs() < _EXACT_INT)
 
 
 def _refuse(text: pl.Series, wrong: pl.Series, what: str, row_one: int) -> None:
@@ -208,10 +213,9 @@ _PLACING: Final = ("_sheet_in", "_header_in")
 def _failed(e: BaseException) -> bool:
     """Return whether *e* is fastexcel's failure to read a body: its own error, or a panic of calamine's Rust code.
 
-    A panic is pyo3's ``PanicException``, a ``BaseException`` (``except Exception`` misses it) that no module exports,
-    so it is known by its name.
+    A panic is known as :func:`flatread.core._panicked` knows one, as every reader here knows it.
     """
-    return isinstance(e, fastexcel.FastExcelError) or type(e).__name__ == "PanicException"
+    return isinstance(e, fastexcel.FastExcelError) or _panicked(e)
 
 
 @contextlib.contextmanager
@@ -344,9 +348,13 @@ def _column_number(letters: bytes) -> int:
 
 @contextlib.contextmanager
 def _unzipped(body: bytes) -> Generator[zipfile.ZipFile]:
-    """Open an ``.xlsx`` *body*'s zip, raising ReadError for one that will not open or whose member will not inflate."""
+    """Open an ``.xlsx`` *body*'s zip, raising ReadError for one that won't open, lists a name twice or won't inflate.
+
+    A name listed twice is refused as :mod:`flatread.archives` refuses it: zipfile reads its member once per listing.
+    """
     try:
         with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            _listed_once(archive)
             yield archive
     except ReadError:  # a ValueError, as zipfile's own errors are
         raise
@@ -895,6 +903,8 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
             text = pl.select(pl.when(cells != "").then(cells)).to_series().alias(column.label)
             try:
                 return self._value(column, text, text)
+            except LayoutError:  # a reader declared wrong stays one, as the two loads would raise it
+                raise
             except ValueError:  # a cell its Format or Flag refuses: the two loads name it
                 return None
         dtype = pl.Date() if column.scalar is dt.date else _SHEET_CASTS.get(column.scalar, cells.dtype)
@@ -1188,6 +1198,8 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
         text = text.cast(pl.String).replace(["", *self._null_values], None).alias(column.label)
         try:
             value = self._value(column, text, typed)
+        except LayoutError:  # a reader declared wrong stays one: no ValueError below relabels it
+            raise
         except ValueError as e:
             msg = f"the {self._sheet!r} sheet's cell {column.label!r} is not its {column.field}: {e}"
             raise ReadError(msg) from e
@@ -1260,6 +1272,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
                 [
                     (wrong | (number != number.floor()), "whole number"),
                     (~number.is_between(*_INT_RANGE, closed="left"), "whole number of 64 bits"),
+                    (number.abs() >= _EXACT_INT, "whole number a number cell holds exactly (below 2**53)"),
                 ]
                 if column.scalar is int
                 else [(wrong, "number")]

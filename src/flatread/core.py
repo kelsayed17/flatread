@@ -463,6 +463,15 @@ def _check_markers(column: Column) -> None:
             raise LayoutError(msg) from e
 
 
+def _panicked(e: BaseException) -> bool:
+    """Return whether *e* is a panic of a Rust extension's code: pyo3's ``PanicException``, of polars or fastexcel.
+
+    Each extension built on pyo3 has its own ``PanicException`` class, a ``BaseException`` (``except Exception`` misses
+    it), and fastexcel exports its not, so a panic is known by its class's name, whichever extension raised it.
+    """
+    return type(e).__name__ == "PanicException"
+
+
 class File[RowT: msgspec.Struct](abc.ABC):
     """A file's reader, read two ways: :meth:`frame`, a DataFrame of its row struct's fields, and :meth:`rows`.
 
@@ -682,8 +691,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         try:
             return self._checked(self._join(self._read(body)))
         except BaseException as e:
-            # pyo3's PanicException is a BaseException no module of polars' or fastexcel's exports: named alone.
-            if type(e).__name__ != "PanicException":
+            if not _panicked(e):
                 raise
             msg = f"the body made the reader's Rust code panic, as no file of the format does: {e}"
             raise ReadError(msg) from e
@@ -725,7 +733,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
                 if (found := _found(~fits.fill_null(value=True), self._rows_of(frame.height))) is not None:
                     place, row = found
                     msg = f"the {column.label!r} cell {cells[place]!r} is not {what}: row {row}"
-                    raise ReadError(msg)
+                    raise ReadError(msg, row=row, label=column.label)
         return frame
 
     def _join(self, frame: pl.DataFrame) -> pl.DataFrame:
@@ -769,7 +777,7 @@ class File[RowT: msgspec.Struct](abc.ABC):
         if infinite := failed["infinite"]:
             row = min(infinite.values())
             msg = f"the {list(infinite)} columns hold NaN or an infinity, which is no number here: row {row}"
-            raise ReadError(msg)
+            raise ReadError(msg, row=row)
         if empty := failed["empty"]:
             msg = (
                 f"the {list(empty)} columns have an empty cell, a short row or no column, and every cell holds a value:"
@@ -805,7 +813,7 @@ class Thousands[RowT: msgspec.Struct](File[RowT]):
         if (found := _found(wrong, self._rows_of(cells.len()))) is not None:
             place, row = found
             msg = f"the {column.label!r} cell {cells[place]!r} is not a number grouped in thousands: row {row}"
-            raise ReadError(msg)
+            raise ReadError(msg, row=row, label=column.label)
         return cells.str.replace_all(",", "", literal=True)
 
 
@@ -923,7 +931,7 @@ class TextFile[RowT: msgspec.Struct](File[RowT]):
             if (found := _found(text[label].str.strip_chars().fill_null("") != "", rows)) is not None:
                 place, row = found
                 msg = f"the {label!r} column holds {text[label][place]!r}, and it never holds a value: row {row}"
-                raise ReadError(msg)
+                raise ReadError(msg, row=row, label=label)
         text = text.drop(dropped)
         columns = self._columns if (layout := self._layout(text.columns)) is None else layout
         if text.columns != (labels := [column.label for column in columns]):
@@ -965,7 +973,7 @@ def _typed(column: Column, text: pl.Series, what_cell: str, row_one: int | pl.Se
     if (found := _found(text.is_not_null() & values.is_null(), row_one)) is not None:
         place, row = found
         msg = f"the {what_cell} {text[place]!r} is not a {what}: row {row}"
-        raise ReadError(msg)
+        raise ReadError(msg, row=row, label=column.label)
     return values.alias(column.field)
 
 
@@ -1075,7 +1083,7 @@ def _flagged(cells: pl.Series, flag: Flag, row_one: int | pl.Series = 1) -> pl.S
     if (found := _found(cells.is_not_null() & values.is_null(), row_one)) is not None:
         place, row = found
         msg = f"the {cells.name!r} cell {cells[place]!r} is not {flag.true!r} or {flag.false!r}: row {row}"
-        raise ReadError(msg)
+        raise ReadError(msg, row=row, label=cells.name)
     return values
 
 
@@ -1225,7 +1233,7 @@ def _moment(
         place, row = found
         what = "date" if dtype == pl.Date else "time of day" if dtype == pl.Time else "time"
         msg = f"the {cells.name!r} cell {cells[place]!r} is not a {what} written {' or '.join(formats)}: row {row}"
-        raise ReadError(msg)
+        raise ReadError(msg, row=row, label=cells.name)
     taken = (pl.when(ok).then(values) for values, ok in zip(parsed, exact, strict=True))
     return pl.select(pl.coalesce(taken)).to_series().alias(cells.name)
 

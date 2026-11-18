@@ -251,6 +251,13 @@ class Engine[RowT: msgspec.Struct]:
                 _refuse(
                     ~floats.is_between(*_INT_RANGE, closed="left"), text, column, "whole number of 64 bits", numbers
                 )
+                _refuse(
+                    floats.abs() >= _EXACT_INT,
+                    text,
+                    column,
+                    "whole number a number cell holds exactly (below 2**53)",
+                    numbers,
+                )
                 return floats.cast(pl.Int64, strict=True).alias(column.field)
             return floats.alias(column.field)
         if column.scalar is bool:
@@ -295,14 +302,15 @@ class Engine[RowT: msgspec.Struct]:
         for name, dtype in frame.schema.items():
             if dtype == pl.Float64 and (found := _found(~frame[name].is_finite().fill_null(value=True), numbers)):
                 msg = f"the [{labels[name]!r}] column holds NaN or an infinity, which is no number here: row {found[1]}"
-                raise ReadError(msg)
+                raise ReadError(msg, row=found[1], label=labels[name])
         empty = {labels[name]: found[1] for name in self._required if (found := _found(frame[name].is_null(), numbers))}
         if empty:
+            row = min(empty.values())
             msg = (
                 f"the {list(empty)} columns have an empty cell, a short row or no column, and every cell holds a value:"
-                f" row {min(empty.values())}"
+                f" row {row}"
             )
-            raise ReadError(msg)
+            raise ReadError(msg, row=row, label=next(label for label, at in empty.items() if at == row))
         for column in self.columns:
             cells = frame[column.field]
             if column.shape is not None:
@@ -376,6 +384,8 @@ def _booleans(text: pl.Series, column: Column, numbers: int | pl.Series) -> pl.S
 
 #: The whole numbers an ``int`` field holds, 64 bits' (a float load reads ``1e20`` as one), as floats: low, high.
 _INT_RANGE: typing.Final = (-(2.0**63), 2.0**63)
+#: The bound below which a sheet's number cell, a double, holds a whole number exactly (``flatread.sheets._EXACT_INT``).
+_EXACT_INT: typing.Final = 2.0**53
 
 
 def _refuse(wrong: pl.Series, text: pl.Series, column: Column, what: str, numbers: int | pl.Series) -> None:
@@ -383,7 +393,7 @@ def _refuse(wrong: pl.Series, text: pl.Series, column: Column, what: str, number
     if (found := _found(wrong.fill_null(value=False), numbers)) is not None:
         place, row = found
         msg = f"the {column.label!r} cell {text[place]!r} is not a {what}: row {row}"
-        raise ReadError(msg)
+        raise ReadError(msg, row=row, label=column.label)
 
 
 def _refuse_values(values: pl.Series, wrong: pl.Series, column: Column, what: str, numbers: pl.Series) -> None:
@@ -391,7 +401,7 @@ def _refuse_values(values: pl.Series, wrong: pl.Series, column: Column, what: st
     if (found := _found(wrong.fill_null(value=False), numbers)) is not None:
         place, row = found
         msg = f"the {column.label!r} cell {values[place]!r} is not {what}: row {row}"
-        raise ReadError(msg)
+        raise ReadError(msg, row=row, label=column.label)
 
 
 #: Each msgspec ``Meta`` bound, the polars test a value passes, and how a failure reads.

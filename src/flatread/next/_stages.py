@@ -1,17 +1,20 @@
 """The built-in stages: sources, formats, table finders, shapes and cleaners, each one frozen value with one job."""
 
+import codecs
 import concurrent.futures
 import contextlib
 import csv
 import dataclasses
+import io
 import re
 import typing
+import zipfile
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 
 import polars as pl
 
 from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzipped
-from flatread.core import _NUL, Column, _check_ending
+from flatread.core import _NUL, _THOUSANDS, Column, _check_ending, _decoded
 from flatread.delimited import _BOM
 from flatread.errors import (
     ControlTotalError,
@@ -24,7 +27,7 @@ from flatread.errors import (
     TruncatedFileError,
     UnknownLayoutError,
 )
-from flatread.next._model import Cells, Grid, Lines, ReadContext, Records, Stream, Table
+from flatread.next._model import Cells, Grid, Lines, ReadContext, Records, Source, Stream, Table
 
 if typing.TYPE_CHECKING:
     from lxml import etree
@@ -81,6 +84,8 @@ def records_of(text: pl.DataFrame) -> Cells:
 #: The line breaks ``str.splitlines`` breaks at but a CSV row does not end at, and a NUL: a body holding one, or a
 #: lone CR, is not split fast.
 _OTHER_BREAKS = "\x00\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+#: A CR that ends no CRLF: polars reads it as a cell's text.
+_LONE_CR = re.compile(r"\r(?!\n)")
 
 
 def _breaks_as_polars(text: str) -> bool:
@@ -104,13 +109,21 @@ class Zip:
     A zip :mod:`flatread.archives` refuses (a name listed twice, a member that will not inflate or that inflates past
     its cap) raises ``ReadError`` naming the member; a zip holding no such member, or several, ``UnknownLayoutError``.
     The member's name is noted on the read (``read.member``).
+
+    With *bare*, a file published zipped or not: a body that is no zip, or a zip with no member matching (a workbook is
+    a zip of its parts), is the file itself, read whole; a zip :mod:`zipfile` opens only to fail on raises
+    ``CorruptArchiveError``.
     """
 
     member: re.Pattern[str]
+    bare: bool = False
 
     @contextlib.contextmanager
     def open(self, body: bytes, read: ReadContext) -> Generator[Stream]:
-        """Open the member, streaming."""
+        """Open the member, streaming; with *bare*, the body itself where it holds none."""
+        if self.bare and not self._zipped(body):
+            yield io.BytesIO(body)
+            return
         with _unzipped(body, None) as archive:
             names = archive.namelist()
             found = [name for name in names if self.member.fullmatch(name)]
@@ -128,6 +141,57 @@ class Zip:
             read.member = found[0]
             with member:  # its reads raise ReadError as it inflates, a cut stream or a CRC that fails
                 yield _Inflating(found[0], member)
+
+    def _zipped(self, body: bytes) -> bool:
+        """Return whether *body* is a zip holding a member *member* matches."""
+        try:
+            with zipfile.ZipFile(io.BytesIO(body)) as archive:
+                return any(self.member.fullmatch(name) for name in archive.namelist())
+        except zipfile.BadZipFile:
+            return False
+        except _UNZIP_ERRORS as e:
+            msg = f"the body is a zip that will not open: {e}"
+            raise CorruptArchiveError(msg) from e
+
+
+@dataclasses.dataclass(frozen=True)
+class Transcoded:
+    """A file written in a legacy encoding (EIA's Windows-1252), read as UTF-8 by the format.
+
+    The file is the body, or what *source* opens of it (a zip's member); it is decoded by the first of *encodings*
+    that reads it (``utf-16`` only where it opens with its byte-order mark), after dropping *eof*, a byte it ends with
+    after its last line (DOS's end-of-file mark). One none decodes raises ``EncodingError``, unless *lossy*: then a
+    byte the last does not decode is U+FFFD. Raises ``LayoutError``, when built, for no encodings or one Python lacks.
+    """
+
+    encodings: Sequence[str]
+    eof: bytes = b""
+    lossy: bool = False
+    source: Source | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.encodings, (str, bytes)) or not self.encodings:
+            msg = f"Transcoded names {self.encodings!r}, not the codecs its body may be written in"
+            raise LayoutError(msg)
+        for encoding in self.encodings:
+            try:
+                codecs.lookup(encoding)
+            except LookupError as e:
+                msg = f"Transcoded's encoding {encoding!r} is no codec Python reads"
+                raise LayoutError(msg) from e
+
+    @contextlib.contextmanager
+    def open(self, body: bytes, read: ReadContext) -> Generator[Stream]:
+        """Open the file as UTF-8."""
+        if self.source is None:
+            yield io.BytesIO(self._utf8(body))
+            return
+        with self.source.open(body, read) as stream:
+            data = stream.read()
+        yield io.BytesIO(self._utf8(data))
+
+    def _utf8(self, data: bytes) -> bytes:
+        return _decoded(data.removesuffix(self.eof), self.encodings, lossy=self.lossy).encode()
 
 
 # --- Formats ---
@@ -167,7 +231,10 @@ class Csv:
         return self._whole(text, body) if split is None else split
 
     def _text(self, body: bytes) -> str:
-        """Return *body*'s text, or raise for a body empty, cut (by *final_line_ending*), not UTF-8 or opening blank."""
+        """Return *body*'s text, or raise for a body empty, cut (by *final_line_ending*) or not UTF-8.
+
+        A blank line where the header stands is the table finder's to refuse: a preamble may open with one.
+        """
         if not body or body.isspace():
             msg = "the body is empty"
             raise EmptyBodyError(msg)
@@ -178,9 +245,6 @@ class Csv:
         except UnicodeDecodeError as e:
             msg = f"the body is not UTF-8: {e}"
             raise EncodingError(msg) from e
-        if text.startswith(("\n", "\r\n")):
-            msg = "the body opens with a blank line, not its header"
-            raise UnknownLayoutError(msg)
         return text
 
     def typed(  # noqa: PLR0911 (a None for each doubt)
@@ -377,7 +441,13 @@ class Csv:
         cells; elsewhere (a line break ``str.splitlines`` alone breaks at, or a first row narrower
         than the widest, which the parser refuses) ``csv``'s rows are the cells.
         """
-        lines = text.splitlines(keepends=True)
+        # Lines end at LF alone (a CRLF's CR stays, which csv reads as the row's end): str.splitlines also breaks at a
+        # lone CR, a form feed, a vertical tab and the rest of _OTHER_BREAKS, which a CSV row runs on past.
+        # A lone CR is a cell's text, as polars reads it, which csv refuses in an unquoted cell: it reads a stand-in.
+        lone = _LONE_CR.search(text) is not None
+        stand_in = next(chr(c) for c in range(0xE000, 0xF900) if chr(c) not in text) if lone else ""
+        split = (_LONE_CR.sub(stand_in, text) if lone else text).split("\n")
+        lines = [line + "\n" for line in split[:-1]] + ([split[-1]] if split[-1] else [])
         quoting = csv.QUOTE_NONE if self.quote is None else csv.QUOTE_MINIMAL
         reader = csv.reader(lines, delimiter=self.separator, quotechar=self.quote or '"', quoting=quoting, strict=True)
         parsed = parse and _breaks_as_polars(text) and len(self.separator.encode()) == 1
@@ -390,13 +460,15 @@ class Csv:
                 widths.append(len(cells) or 1)
                 ends.append(reader.line_num)
                 if not parsed:
-                    rows.append([cell or None for cell in cells] or [None])
+                    rows.append([(cell.replace(stand_in, "\r") if lone else cell) or None for cell in cells] or [None])
         except csv.Error as e:
             # A quoted cell open at the body's end was cut; any other quote out of place is a malformed row.
             msg = f"row {len(widths) + 1}: {e}"
             raise (TruncatedFileError if "unexpected end of data" in str(e) else ReadError)(msg) from e
         starts = [1, *(end + 1 for end in ends[:-1])]
         raw = ["".join(lines[start - 1 : end]).rstrip("\r\n") for start, end in zip(starts, ends, strict=True)]
+        if lone:
+            raw = [line.replace(stand_in, "\r") for line in raw]
         if not parsed:
             return lines_of(rows, raw, starts)
         try:
@@ -890,13 +962,21 @@ def _header_table(grid: Grid) -> Table:
         msg = "the body is empty"
         raise EmptyBodyError(msg)
     if isinstance(grid, Lines):
+        if grid.raw[0] == "":
+            number = int(grid.numbers[0])
+            msg = (
+                "the body opens with a blank line, not its header"
+                if number == 1
+                else f"row {number} is blank, not the header"
+            )
+            raise UnknownLayoutError(msg, row=number)
         width = int(grid.widths[0])
         header = [cell or "" for cell in grid.cells.row(0)[:width]]
         rows = grid.slice(1)
         if (wrong := (rows.widths != width).arg_true()).len():
             at = int(wrong[0])
             msg = f"row {rows.numbers[at]} has {rows.widths[at]} fields, not the header's {width}"
-            raise RaggedRowError(msg)
+            raise RaggedRowError(msg, row=int(rows.numbers[at]))
         _check_header(header)
         cells = rows.cells.select(rows.cells.columns[:width])
         return Table(cells.rename(dict(zip(cells.columns, _unique(header), strict=True))), rows.numbers)
@@ -908,13 +988,15 @@ def _header_table(grid: Grid) -> Table:
     past = rows.text.columns[width:]
     beyond = rows.text.select(pl.any_horizontal(pl.col(past).is_not_null())).to_series() if past else None
     if beyond is not None and (wrong := beyond.arg_true()).len():
-        msg = f"row {rows.numbers[int(wrong[0])]} holds a cell right of the header's last, column {width}"
-        raise RaggedRowError(msg)
+        row = int(rows.numbers[int(wrong[0])])
+        msg = f"row {row} holds a cell right of the header's last, column {width}"
+        raise RaggedRowError(msg, row=row)
     kept = rows.text.columns[:width]
     empty = rows.text.select(pl.all_horizontal(pl.col(kept).is_null())).to_series() if kept else None
     if empty is not None and (at := empty.arg_true()).len():
-        msg = f"row {rows.numbers[int(at[0])]} is empty, and a table's rows run to its end"
-        raise ReadError(msg)
+        row = int(rows.numbers[int(at[0])])
+        msg = f"row {row} is empty, and a table's rows run to its end"
+        raise ReadError(msg, row=row)
     _check_header(header)
     return _named(rows, kept, _unique(header))
 
@@ -966,6 +1048,31 @@ class Header:
         """Return the grid's table."""
         del read
         return _header_table(grid)
+
+
+@dataclasses.dataclass(frozen=True)
+class Preamble:
+    """A table below a preamble of any length (a title, a source, notes, blank rows): its header found, not placed.
+
+    The header is the first row whose first cell is *label*, by default the struct's first column's; the rows above it
+    are dropped unread, and the table below it read as :class:`Header` reads one. A grid with no such row raises
+    ``UnknownLayoutError``. One stage for a CSV's and a sheet's (``PreambleCsv``, ``PreambleSheet``); a preamble whose
+    every row is known is a :class:`Titled`'s.
+    """
+
+    label: str | None = None
+    stated: frozenset[str] = frozenset()
+    vouches: bool = False
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table under the first row opening with the header's first label."""
+        label = self.label if self.label is not None else next(iter(read.columns.values())).label
+        first = (grid.cells if isinstance(grid, Lines) else grid.text).get_column("0", default=None)
+        found = None if first is None else (first == label).fill_null(value=False).arg_true()
+        if found is None or not found.len():
+            msg = f"no row opens with the header's first label {label!r}"
+            raise UnknownLayoutError(msg)
+        return _header_table(grid.slice(int(found[0])))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1031,7 +1138,7 @@ class Titled:
             row = grid.raw[at]
             if (match := title.fullmatch(row)) is None:
                 msg = f"row {grid.numbers[at]} {row[:200]!r} is not its title {title.pattern!r}"
-                raise UnknownLayoutError(msg)
+                raise UnknownLayoutError(msg, row=int(grid.numbers[at]))
             read.stated.update({group: match[group] for group in title.groupindex if group != "count"})
             read.matches[f"title {at}"] = match
         table = _header_table(grid.slice(len(self.titles)))
@@ -1156,3 +1263,21 @@ class Padded:
         """Return *cells* stripped of spaces."""
         del column
         return cells.str.strip_chars(" ")
+
+
+@dataclasses.dataclass(frozen=True)
+class Thousands:
+    """Numbers written with thousands separators (``1,782,319``), each read as its number.
+
+    A number field's cell grouped so loses its commas; one holding a comma otherwise (``12,34``) keeps it, and so is
+    refused as no number, naming its row. Text fields are left as written.
+    """
+
+    def clean(self, cells: pl.Series, column: Column) -> pl.Series:
+        """Return a number *column*'s *cells*, each grouped in thousands without its commas."""
+        if column.scalar not in {int, float}:
+            return cells
+        grouped = cells.str.contains(_THOUSANDS)
+        return pl.select(
+            pl.when(grouped).then(cells.str.replace_all(",", "", literal=True)).otherwise(cells)
+        ).to_series()

@@ -3,6 +3,7 @@
 import dataclasses
 import datetime as dt
 import io
+import pickle
 import re
 import typing
 import zipfile
@@ -900,3 +901,195 @@ def test_a_csv_s_rows_too_wide_for_one_pattern_are_left_to_the_grid() -> None:
     """A width whose row pattern is past the regex engine's size is the grid's to read: no count, and no error."""
     for width, rows in ((1_000, 1), (3_000, None)):
         assert fr.Csv()._rows_of('"x"' + ",x" * (width - 1) + "\n", '"', width) == rows
+
+
+class TestWhereAReadWentWrong:
+    """A flatread.next read's ``ReadError`` carries the row, the label and the member, as values beside its message."""
+
+    def test_a_cell_names_its_row_and_label(self) -> None:
+        with pytest.raises(ReadError) as caught:
+            fr.Reader(_WhereDay, fr.Csv()).rows(b"Day\n01/02/2026\n1/2/2026\n")
+        assert (caught.value.row, caught.value.label, caught.value.member) == (3, "Day", None)
+
+    def test_an_empty_cell_names_its_row_and_label(self) -> None:
+        with pytest.raises(ReadError) as caught:
+            fr.Reader(_WhereDay, fr.Csv()).rows(b"Day\n01/02/2026\n\n")
+        assert (caught.value.row, caught.value.label) == (3, "Day")
+
+    def test_a_ragged_row_names_its_row(self) -> None:
+        with pytest.raises(RaggedRowError) as caught:
+            fr.Reader(_WhereDay, fr.Csv()).rows(b"Day\n01/02/2026,x\n")
+        assert (caught.value.row, caught.value.label) == (2, None)
+
+    def test_a_zip_members_cell_names_the_member(self) -> None:
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as archive:
+            archive.writestr("days.csv", b"Day\n1/2/2026\n")
+        with pytest.raises(ReadError) as caught:
+            fr.Reader(_WhereDay, fr.Csv(), source=fr.Zip(re.compile(r".*\.csv"))).rows(out.getvalue())
+        assert (caught.value.row, caught.value.label, caught.value.member) == (2, "Day", "days.csv")
+
+    def test_the_values_survive_pickling(self) -> None:
+        error = ReadError("x", row=2, label="Day", member="m")
+        copied = pickle.loads(pickle.dumps(error))  # noqa: S301 (an error of its own)
+        assert (str(copied), copied.row, copied.label, copied.member) == ("x", 2, "Day", "m")
+
+
+class _WhereDay(msgspec.Struct, frozen=True, gc=False):
+    day: Annotated[dt.date, Label("Day"), Format("%m/%d/%Y")]
+
+
+class TestFoundByProperties:
+    """Defects tests/test_properties.py found, each kept as a case of its own."""
+
+    def test_a_csv_cell_holding_a_vertical_tab_or_a_line_separator_is_one_cell(self) -> None:
+        # str.splitlines breaks at both, which a CSV row runs on past; until 2026-11-18 the row read as ragged.
+        reader = fr.Reader(_WhereName, fr.Csv())
+        assert reader.rows("Name\na\x0bb\nc\u2028d\n".encode()) == [_WhereName("a\x0bb"), _WhereName("c\u2028d")]
+
+    def test_a_csv_cell_holding_a_lone_cr_keeps_it(self) -> None:
+        reader = fr.Reader(_WhereName, fr.Csv())
+        assert reader.rows(b'Name\na\rb\n"c\rd"\n') == [_WhereName("a\rb"), _WhereName("c\rd")]
+        with pytest.raises(ReadError) as caught:
+            fr.Reader(_WhereDay, fr.Csv()).rows(b"Day\n1/2\r/2026\n")
+        assert caught.value.row == 2
+
+    def test_a_sheets_number_cell_at_2_to_the_53_is_no_int(self) -> None:
+        class Count(msgspec.Struct, frozen=True, gc=False):
+            count: Annotated[int, Label("Count")]
+
+        reader = fr.Reader(Count, fr.Sheet(sheet="S"))
+        assert reader.rows(workbook({"S": [["Count"], [2**53 - 1]]})) == [Count(2**53 - 1)]
+        with pytest.raises(
+            ReadError, match=r"not a whole number a number cell holds exactly \(below 2\*\*53\): row 2$"
+        ):
+            reader.rows(workbook({"S": [["Count"], [2**53 + 1]]}))
+
+
+class _WhereName(msgspec.Struct, frozen=True, gc=False):
+    name: Annotated[str, Label("Name")]
+
+
+class TestThousandsZippedOrBareAndTranscoded:
+    """Three stages the class-per-quirk readers had: ThousandsCsv, ZippedOrBare and Transcoded, as next's values."""
+
+    class Volume(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        shares: Annotated[int | None, Label("Shares")]
+        price: Annotated[float, Label("Price")]
+
+    def test_thousands_reads_each_grouped_number_and_leaves_text(self) -> None:
+        reader = fr.Reader(self.Volume, fr.Csv(separator="|"), cells=[fr.Thousands()])
+        assert reader.rows(b"Name|Shares|Price\nA, Inc.|1,782,319|-1,234.5\nB||7\n") == [
+            self.Volume("A, Inc.", 1782319, -1234.5),
+            self.Volume("B", None, 7.0),
+        ]
+
+    @pytest.mark.parametrize(("cell", "what"), [("12,34", "whole number"), ("1,0000", "whole number")])
+    def test_thousands_refuses_a_comma_out_of_place_naming_its_row(self, cell: str, what: str) -> None:
+        reader = fr.Reader(self.Volume, fr.Csv(separator="|"), cells=[fr.Thousands()])
+        with pytest.raises(ReadError, match=rf"^the 'Shares' cell '{cell}' is not a {what}: row 3$") as caught:
+            reader.rows(f"Name|Shares|Price\nA|1|1\nB|{cell}|1\n".encode())
+        assert (caught.value.row, caught.value.label) == (3, "Shares")
+
+    def test_thousands_reads_as_thousands_csv_does(self) -> None:
+        from flatread.delimited import ThousandsCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        body = b"Name|Shares|Price\nA|1,000|2,000.25\nB|-12|3\n"
+        assert fr.Reader(self.Volume, fr.Csv(separator="|"), cells=[fr.Thousands()]).rows(body) == ThousandsCsv(
+            self.Volume, separator="|"
+        ).rows(body)
+
+    @staticmethod
+    def _zip(name: str, data: bytes) -> bytes:
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as archive:
+            archive.writestr(name, data)
+        return out.getvalue()
+
+    def test_a_bare_zip_source_reads_the_member_or_the_body(self) -> None:
+        reader = fr.Reader(_WhereName, fr.Csv(), source=fr.Zip(re.compile(r".*\.csv"), bare=True))
+        assert reader.rows(b"Name\na\n") == [_WhereName("a")]
+        assert reader.rows(self._zip("x.csv", b"Name\nb\n")) == [_WhereName("b")]
+        with pytest.raises(ReadError):  # a zip of no such member is read whole: no CSV
+            reader.rows(self._zip("x.txt", b"Name\nc\n"))
+
+    def test_a_bare_zip_source_refuses_a_zip_that_will_not_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def unopenable(*_: object) -> typing.NoReturn:
+            msg = "a header zipfile cannot read"
+            raise OSError(msg)
+
+        monkeypatch.setattr(zipfile, "ZipFile", unopenable)
+        reader = fr.Reader(_WhereName, fr.Csv(), source=fr.Zip(re.compile(r".*\.csv"), bare=True))
+        with pytest.raises(
+            CorruptArchiveError, match=r"^the body is a zip that will not open: a header zipfile cannot"
+        ):
+            reader.rows(b"PK\x03\x04")
+
+    def test_transcoded_reads_a_legacy_encoding_and_drops_its_eof_byte(self) -> None:
+        reader = fr.Reader(_WhereName, fr.Csv(), source=fr.Transcoded(["utf-8", "cp1252"], eof=b"\x1a"))
+        assert reader.rows("Name\ncafé\n".encode("cp1252") + b"\x1a") == [_WhereName("café")]
+        assert reader.rows("Name\ncafé\n".encode()) == [_WhereName("café")]
+
+    def test_transcoded_reads_a_zips_member(self) -> None:
+        source = fr.Transcoded(["cp1252"], source=fr.Zip(re.compile(r".*\.csv")))
+        body = self._zip("x.csv", "Name\n€\n".encode("cp1252"))
+        assert fr.Reader(_WhereName, fr.Csv(), source=source).rows(body) == [_WhereName("€")]
+
+    def test_transcoded_refuses_what_no_encoding_reads_unless_lossy(self) -> None:
+        with pytest.raises(EncodingError, match=r"^the body is not utf-8: "):
+            fr.Reader(_WhereName, fr.Csv(), source=fr.Transcoded(["utf-8"])).rows(b"Name\n\xff\n")
+        lossy = fr.Reader(_WhereName, fr.Csv(), source=fr.Transcoded(["utf-8"], lossy=True))
+        assert lossy.rows(b"Name\n\xff\n") == [_WhereName("�")]
+
+    @pytest.mark.parametrize("encodings", [[], "utf-8", ["no-such-codec"]])
+    def test_transcoded_refuses_no_codecs_when_built(self, encodings: list[str] | str) -> None:
+        with pytest.raises(LayoutError):
+            fr.Transcoded(encodings)
+
+
+class TestPreamble:
+    """One table finder for a CSV's preamble and a sheet's (PreambleCsv, PreambleSheet): its header found."""
+
+    class Count(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        n: Annotated[int, Label("N")]
+
+    def test_a_csv_preamble_is_dropped_as_preamble_csv_drops_it(self) -> None:
+        from flatread.delimited import PreambleCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        body = b'Daily report\nSource: X\n\n"Name",N\na,1\nb,2\n'
+        rows = fr.Reader(self.Count, fr.Csv(), table=fr.Preamble()).rows(body)
+        assert rows == PreambleCsv(self.Count).rows(body) == [self.Count("a", 1), self.Count("b", 2)]
+
+    def test_a_sheet_preamble_is_dropped_as_preamble_sheet_drops_it(self) -> None:
+        from flatread.sheets import PreambleSheet  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        body = workbook({"S": [["Banner"], [None], ["Name", "N"], ["a", 1]]})
+        rows = fr.Reader(self.Count, fr.Sheet(sheet="S"), table=fr.Preamble()).rows(body)
+        assert rows == PreambleSheet(self.Count, sheet="S").rows(body) == [self.Count("a", 1)]
+
+    def test_an_error_names_the_files_own_row(self) -> None:
+        with pytest.raises(ReadError, match=r"^the 'N' cell 'x' is not a whole number: row 3$"):
+            fr.Reader(self.Count, fr.Csv(), table=fr.Preamble()).rows(b"Title\nName,N\na,x\n")
+
+    def test_a_label_of_its_own_finds_the_header(self) -> None:
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Preamble(label="Name"))
+        assert reader.rows(b"Name of the file\nName,N\na,1\n") == [self.Count("a", 1)]
+
+    @pytest.mark.parametrize("body", [b"Title\nNope,N\na,1\n", b"\nTitle\n"], ids=["no such row", "no header at all"])
+    def test_a_grid_with_no_header_raises(self, body: bytes) -> None:
+        with pytest.raises(UnknownLayoutError, match=r"^no row opens with the header's first label 'Name'$"):
+            fr.Reader(self.Count, fr.Csv(), table=fr.Preamble()).rows(body)
+
+    def test_a_preamble_opening_with_blank_lines_is_dropped(self) -> None:
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Preamble())
+        assert reader.rows(b"\n\nTitle\n\nName,N\na,1\n") == [self.Count("a", 1)]
+
+    def test_a_blank_line_where_the_header_stands_is_refused_by_its_row(self) -> None:
+        with pytest.raises(UnknownLayoutError, match=r"^the body opens with a blank line, not its header$"):
+            fr.Reader(self.Count, fr.Csv()).rows(b"\nName,N\na,1\n")
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Titled([re.compile("Report")]))
+        with pytest.raises(UnknownLayoutError, match=r"^row 2 is blank, not the header$") as caught:
+            reader.rows(b"Report\n\nName,N\na,1\n")
+        assert caught.value.row == 2

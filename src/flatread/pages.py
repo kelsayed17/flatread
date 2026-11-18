@@ -91,6 +91,7 @@ from flatread.core import Column, TextFile
 from flatread.errors import (
     EmptyBodyError,
     EncodingError,
+    LayoutError,
     RaggedRowError,
     ReadError,
     TruncatedFileError,
@@ -381,6 +382,8 @@ class _HtmlText[RowT: msgspec.Struct](TextFile[RowT]):
     def _read_cell(self, cell: Element, column: Column, where: str) -> str:
         try:
             return self._value(cell, column)
+        except LayoutError:  # a reader declared wrong stays one: no ValueError below relabels it
+            raise
         except ValueError as e:
             label = self._under[column.field]
             msg = f"{where}: its {f'{label!r} ' if label else ''}cell {e}"

@@ -20,9 +20,10 @@ of the caps a read spends, each a few kilobytes away from minutes and gigabytes:
 :data:`_NESTED_MAX` deep or drawn more than :data:`_DRAWN_MAX` times (a form that draws the next twice doubles the
 page at each level), more than :data:`_PAGE_CHARS_MAX` characters on a page or :data:`_CHARS_MAX` in all. pdfminer
 inflates a stream inside ``pdfminer.pdftypes``, so importing this module replaces three of that module's names:
-``zlib`` (with one whose ``decompress`` is bounded), ``decompress_corrupted`` and ``lzwdecode``, each decoding the same
-bytes, stopping at the cap during a read (no cap outside one) and, for ``decompress_corrupted``, in linear time
-rather than quadratic.
+``zlib`` (with one whose ``decompress`` is bounded), ``decompress_corrupted`` and ``lzwdecode``. Outside a read of
+this module's each calls pdfminer's own, so pdfminer behaves for any other caller in the process exactly as it would
+without flatread; during one each decodes the same bytes, stops at the cap and, for ``decompress_corrupted``, runs in
+linear time rather than quadratic.
 pdfminer is imported here, not in :mod:`flatread`, which every CSV reader loads.
 """
 
@@ -97,33 +98,38 @@ class _Budget:
 _BUDGET: Final = contextvars.ContextVar[_Budget | None]("_BUDGET", default=None)
 
 
-def _decoded(data: bytes) -> bytes:
+def _decoded(data: bytes, budget: _Budget) -> bytes:
     """Return *data*, bytes a stream decoded to, counted against the read's cap, which raises ``ReadError`` past it."""
-    if (budget := _BUDGET.get()) is not None:
-        budget.decoded += len(data)
-        if budget.decoded > _DECODED_MAX:
-            msg = f"the PDF's streams decode to more than {_DECODED_MAX} bytes"
-            raise ReadError(msg)
+    budget.decoded += len(data)
+    if budget.decoded > _DECODED_MAX:
+        msg = f"the PDF's streams decode to more than {_DECODED_MAX} bytes"
+        raise ReadError(msg)
     return data
 
 
-def _limit() -> int:
-    """Return the most bytes the next decode may yield, one past the read's cap (zlib's ``max_length``; 0: no cap)."""
-    budget = _BUDGET.get()
-    return 0 if budget is None else _DECODED_MAX - budget.decoded + 1
+def _limit(budget: _Budget) -> int:
+    """Return the most bytes the next decode may yield: one past what is left of the read's cap (zlib's max_length)."""
+    return _DECODED_MAX - budget.decoded + 1
+
+
+#: pdfminer's own decoders, which a stream decoded outside a read of this module's gets.
+_PDFMINER_DAMAGED: Final = pdftypes.decompress_corrupted
+_PDFMINER_LZW: Final = pdftypes.lzwdecode
 
 
 def _inflate(data: bytes) -> bytes:
     """Return *data* inflated, as ``zlib.decompress`` does, but never more than one byte past the read's cap.
 
     A stream cut short raises ``zlib.error`` as zlib does, uncounted: pdfminer then reads it with
-    :func:`_inflate_damaged`.
+    :func:`_inflate_damaged`. Outside a read of this module's, ``zlib.decompress`` itself.
     """
+    if (budget := _BUDGET.get()) is None:
+        return zlib.decompress(data)
     inflater = zlib.decompressobj()
-    limit = _limit()
+    limit = _limit(budget)
     inflated = inflater.decompress(data, limit)
-    if inflater.eof or (limit and len(inflated) == limit):
-        return _decoded(inflated)
+    if inflater.eof or len(inflated) == limit:
+        return _decoded(inflated, budget)
     msg = "Error -5 while decompressing data: incomplete or truncated stream"
     raise zlib.error(msg)
 
@@ -133,22 +139,27 @@ def _inflate_damaged(data: bytes) -> bytes:
 
     That is the bytes *data* inflates to before an error in its last three bytes (a damaged checksum), or all of them
     for a stream cut short; an error before the last three raises ``zlib.error``. pdfminer's own feeds a byte at a time
-    and adds each output to the last, quadratic in what it inflates (16 MB took 6 s).
+    and adds each output to the last, quadratic in what it inflates (16 MB took 6 s). Outside a read of this module's,
+    pdfminer's own.
     """
+    if (budget := _BUDGET.get()) is None:
+        return _PDFMINER_DAMAGED(data)
     inflater = zlib.decompressobj()
     cut = max(len(data) - 3, 0)
-    inflated = [_decoded(inflater.decompress(data[:cut], _limit()))]
+    inflated = [_decoded(inflater.decompress(data[:cut], _limit(budget)), budget)]
     for at in range(cut, len(data)):
         try:
-            inflated.append(_decoded(inflater.decompress(data[at : at + 1], _limit())))
+            inflated.append(_decoded(inflater.decompress(data[at : at + 1], _limit(budget)), budget))
         except zlib.error:
             break
     return b"".join(inflated)
 
 
 def _lzw(data: bytes) -> bytes:
-    """Return *data* decoded as pdfminer's ``lzwdecode`` does, stopping past the read's cap."""
-    return b"".join(_decoded(chunk) for chunk in LZWDecoder(io.BytesIO(data)).run())
+    """Return *data* decoded as pdfminer's ``lzwdecode`` does, stopping past the read's cap; outside a read, its own."""
+    if (budget := _BUDGET.get()) is None:
+        return _PDFMINER_LZW(data)
+    return b"".join(_decoded(chunk, budget) for chunk in LZWDecoder(io.BytesIO(data)).run())
 
 
 # shortcut: RunLength, ASCII85 and ASCIIHex decode at most 64 times their input and are counted only through the Flate
