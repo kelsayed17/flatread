@@ -104,11 +104,15 @@ class Headers:
         header = _header(table)
         table = _dropped(table, self.unread, self.blank)
         columns = _read(read)
-        published = [tuple(c.label for c in columns if c.field not in lacking) for lacking in self.lacking]
-        if (found := tuple(_header(table))) not in published:
-            msg = f"the header {header!r} is none of the file's {[list(h) for h in published]}"
+        # A label two fields share is matched by place: each header names its columns as written, a NUL apart.
+        published = [[c for c in columns if c.field not in lacking] for lacking in self.lacking]
+        shown = [tuple(_label(c.label) for c in published_columns) for published_columns in published]
+        if (found := tuple(_header(table))) not in shown:
+            msg = f"the header {header!r} is none of the file's {[list(h) for h in shown]}"
             raise UnknownLayoutError(msg)
-        return _laid_out(table, dict(zip(table.cells.columns, found, strict=True)), [c.label for c in columns])
+        laid = published[shown.index(found)]
+        names = {name: column.label for name, column in zip(table.cells.columns, laid, strict=True)}
+        return _laid_out(table, names, [c.label for c in columns])
 
 
 @dataclasses.dataclass(frozen=True)
@@ -168,7 +172,8 @@ def _words(columns: Sequence[Column]) -> dict[str, str]:
 
     Raises ``LayoutError`` for a word two fields share.
     """
-    words = [(word, column.label) for column in columns for word in (column.label, *column.aliases)]
+    # A label two fields share by place is one word: a header read by name tells no two such fields apart.
+    words = [(word, column.label) for column in columns for word in (_label(column.label), *column.aliases)]
     if len(labeled := dict(words)) != len(words):
         msg = f"two fields share a label: {sorted(word for word, _ in words)}"
         raise LayoutError(msg)

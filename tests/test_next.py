@@ -1927,3 +1927,45 @@ class TestReport:
             fr.Reader(Row, fr.Sheet(sheet="S"), shape=fr.Keyed(key_field="name")).rows(
                 workbook({"S": [["name", "value"], ["a", "1"]]})
             )
+
+
+class TestARepeatedLabel:
+    """A label two fields share is two columns, by place, as 7.x reads a header that writes ``%`` twice."""
+
+    class Change(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("name")]
+        month: Annotated[float, Label("%")]
+        year: Annotated[float | None, Label("%")] = None
+
+    def test_a_csv_s_and_a_sheet_s_repeated_heading_is_each_field_s_by_place_as_7x_reads_it(self) -> None:
+        from flatread.delimited import CsvFile  # noqa: PLC0415 (the 7.x reader)
+        from flatread.sheets import SheetFile  # noqa: PLC0415
+
+        body = b"name,%,%\nx,1,2\n"
+        assert (
+            fr.Reader(self.Change, fr.Csv()).rows(body) == CsvFile(self.Change).rows(body) == [self.Change("x", 1, 2)]
+        )
+        sheet = workbook({"S": [["name", "%", "%"], ["x", 1, 2]]})
+        assert fr.Reader(self.Change, fr.Sheet(sheet="S")).rows(sheet) == SheetFile(self.Change, sheet="S").rows(sheet)
+        assert fr.Reader(self.Change, fr.Csv(), table=fr.Cut()).rows(body) == [self.Change("x", 1, 2)]
+
+    def test_a_published_header_lacking_one_of_them_reads_the_other(self) -> None:
+        rule = fr.Headers(lacking=[(), ("year",)])
+        reader = fr.Reader(self.Change, fr.Csv(), table=fr.Header(header=rule))
+        assert reader.rows(b"name,%\nx,1\n") == [self.Change("x", 1, None)]
+        assert reader.rows(b"name,%,%\nx,1,2\n") == [self.Change("x", 1, 2)]
+        with pytest.raises(
+            UnknownLayoutError, match=r"is none of the file's \[\['name', '%', '%'\], \['name', '%'\]\]"
+        ):
+            reader.rows(b"name,%,%,%\nx,1,2,3\n")
+
+    def test_an_error_shows_the_label_as_written(self) -> None:
+        with pytest.raises(ReadError, match=r"^the '%' cell 'z' is not a number: row 2$") as caught:
+            fr.Reader(self.Change, fr.Csv()).rows(b"name,%,%\nx,1,z\n")
+        assert caught.value.label == "%"
+        with pytest.raises(UnknownLayoutError, match=r"^the header \['name', '%'\] is not \['name', '%', '%'\]$"):
+            fr.Reader(self.Change, fr.Csv()).rows(b"name,%\nx,1\n")
+
+    def test_a_header_read_by_name_tells_no_two_fields_apart_by_one_label(self) -> None:
+        with pytest.raises(LayoutError, match="two fields share a label"):
+            fr.Reader(self.Change, fr.Csv(), table=fr.Header(header=fr.Named()))

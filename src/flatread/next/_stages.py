@@ -1401,7 +1401,9 @@ class Found:
             msg = f"the section field {self.section_field!r} is no field of the row"
             raise LayoutError(msg)
         columns = [c for c in read.columns.values() if c.field not in read.stated and c.field != self.section_field]
-        words = [(word, column.label) for column in columns for word in (column.label, *column.aliases)]
+        words = [
+            (word, column.label) for column in columns for word in (column.label.partition(_NUL)[0], *column.aliases)
+        ]
         if len(by_word := dict(words)) != len(words):
             msg = f"two fields share a label: {sorted(word for word, _ in words)}"
             raise LayoutError(msg)

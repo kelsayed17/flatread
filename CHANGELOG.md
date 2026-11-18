@@ -25,6 +25,8 @@ in the README, under "Versions".
 - `flatread.next` reads a report laid out for a page, as `ReportFile` and `KeyedReport` do: the `Text` format reads a
   file of lines, the `Report` finder its rows among header and framing lines (a format checks more by subclassing it
   and overriding `check`), and the `Keyed` shape a report's runs of values long, a row per key.
+- `flatread.next` reads a label two fields share by place, as 7.x does (a header that writes `%` twice); a header
+  read by name refuses one, which it cannot tell apart.
 
 ## 0.5.0
 
