@@ -276,9 +276,7 @@ class Engine[RowT: msgspec.Struct]:
             _refuse(under, text, column, "number a float holds: it underflows to 0.0", numbers)
         return values
 
-    def _typed(
-        self, column: Column, table: Table, cleaners: Sequence[Cleaner], numbers: pl.Series
-    ) -> pl.Series:
+    def _typed(self, column: Column, table: Table, cleaners: Sequence[Cleaner], numbers: pl.Series) -> pl.Series:
         if table.kinds is None or column.label in table.written:
             return self._from_cells(column, table.cells[column.label], cleaners, numbers)
         text = self._blanked(column, table.cells[column.label], cleaners)
