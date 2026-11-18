@@ -545,6 +545,12 @@ def test_a_table_beside_others_reads_its_own_columns_alone() -> None:
     noted = fr.Reader(_Erratum, fr.Sheet(), table=fr.Beside(table=fr.Noted()))
     body = workbook({"S": [*rows, ["Source: EIA", None, None, None, "more"]]})
     assert noted.rows(body) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+    titled = fr.Reader(_Erratum, fr.Sheet(), table=fr.Beside(table=fr.Header(header_row=2)))
+    assert titled.rows(workbook({"S": [["Weekly", None, None, None, "x"], *rows]})) == [
+        _Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)
+    ]
+    with pytest.raises(UnknownLayoutError, match="the body has 1 rows, and its header is row 2"):
+        titled.frame(workbook({"S": [["Weekly", None, "x"]]}))
     with pytest.raises(UnknownLayoutError, match="the sheet has 3 columns, and the table's column 3"):
         placed.frame(workbook({"S": [["key", "week", "series"]]}))
     with pytest.raises(LayoutError, match="a sheet's"):
@@ -555,6 +561,8 @@ def test_a_table_beside_others_reads_its_own_columns_alone() -> None:
 def test_a_table_s_columns_are_distinct_places(at: list[int]) -> None:
     with pytest.raises(LayoutError, match="distinct places from 0"):
         fr.Beside(at=at)
+    with pytest.raises(LayoutError, match="the header row 0 is no row"):
+        fr.Header(header_row=0)
 
 
 def test_a_sheet_s_header_runs_to_its_last_filled_cell() -> None:

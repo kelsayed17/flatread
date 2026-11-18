@@ -1138,16 +1138,26 @@ class Header:
 
     A line's row is as wide as the header; a sheet's header runs to its last filled cell, and a row of the sheet must
     hold no cell right of it and some cell under it. The header is the struct's labels in order, unless a *header*
-    rule reads it (:class:`Headers`, :class:`Named`), as it does under every finder.
+    rule reads it (:class:`Headers`, :class:`Named`), as it does under every finder. A *header_row* past the first
+    (from 1) drops the rows above it unread (a title, a source): the grid's table starts there.
     """
 
+    header_row: int = 1
     stated: frozenset[str] = frozenset()
     vouches: bool = False
     header: HeaderRule | None = None
 
+    def __post_init__(self) -> None:
+        if self.header_row < 1:
+            msg = f"the header row {self.header_row} is no row of a grid, whose rows count from 1"
+            raise LayoutError(msg)
+
     def find(self, grid: Grid, read: ReadContext) -> Table:
-        """Return the grid's table."""
-        return _matched(_header_table(grid), self.header, read)
+        """Return the grid's table, from its header row down."""
+        if 1 < self.header_row > grid.height:
+            msg = f"the body has {grid.height} rows, and its header is row {self.header_row}"
+            raise UnknownLayoutError(msg)
+        return _matched(_header_table(grid.slice(self.header_row - 1)), self.header, read)
 
 
 @dataclasses.dataclass(frozen=True)

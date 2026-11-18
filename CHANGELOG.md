@@ -36,7 +36,7 @@ naming it. With `cells=[Padded()]` it reads what 7.x's `PaddedSheet` and `TextNu
 `DatedSheet` do: its rows end at the first holding nothing past its first column, or at the first whose first cell is
 no date cell (a sheet's alone), and a cell past the first column among the notes below raises, naming its row.
 
-`Beside(at=..., table=...)` reads a sheet's table with more beside it, as 7.x's `BesideSheet` does: only the table's
+`Header(header_row=...)` drops the rows above a header row unread, as 7.x's `header_row` does. `Beside(at=..., table=...)` reads a sheet's table with more beside it, as 7.x's `BesideSheet` does: only the table's
 columns are kept (the first, one a field, or those `at` names), and `table` finds the table in them, so
 `Beside(table=Noted())` reads a table with notes under it and more beside it.
 
