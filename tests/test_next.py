@@ -1046,3 +1046,50 @@ class TestThousandsZippedOrBareAndTranscoded:
     def test_transcoded_refuses_no_codecs_when_built(self, encodings: list[str] | str) -> None:
         with pytest.raises(LayoutError):
             fr.Transcoded(encodings)
+
+
+class TestPreamble:
+    """One table finder for a CSV's preamble and a sheet's (PreambleCsv, PreambleSheet): its header found."""
+
+    class Count(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        n: Annotated[int, Label("N")]
+
+    def test_a_csv_preamble_is_dropped_as_preamble_csv_drops_it(self) -> None:
+        from flatread.delimited import PreambleCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        body = b'Daily report\nSource: X\n\n"Name",N\na,1\nb,2\n'
+        rows = fr.Reader(self.Count, fr.Csv(), table=fr.Preamble()).rows(body)
+        assert rows == PreambleCsv(self.Count).rows(body) == [self.Count("a", 1), self.Count("b", 2)]
+
+    def test_a_sheet_preamble_is_dropped_as_preamble_sheet_drops_it(self) -> None:
+        from flatread.sheets import PreambleSheet  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        body = workbook({"S": [["Banner"], [None], ["Name", "N"], ["a", 1]]})
+        rows = fr.Reader(self.Count, fr.Sheet(sheet="S"), table=fr.Preamble()).rows(body)
+        assert rows == PreambleSheet(self.Count, sheet="S").rows(body) == [self.Count("a", 1)]
+
+    def test_an_error_names_the_files_own_row(self) -> None:
+        with pytest.raises(ReadError, match=r"^the 'N' cell 'x' is not a whole number: row 3$"):
+            fr.Reader(self.Count, fr.Csv(), table=fr.Preamble()).rows(b"Title\nName,N\na,x\n")
+
+    def test_a_label_of_its_own_finds_the_header(self) -> None:
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Preamble(label="Name"))
+        assert reader.rows(b"Name of the file\nName,N\na,1\n") == [self.Count("a", 1)]
+
+    @pytest.mark.parametrize("body", [b"Title\nNope,N\na,1\n", b"\nTitle\n"], ids=["no such row", "no header at all"])
+    def test_a_grid_with_no_header_raises(self, body: bytes) -> None:
+        with pytest.raises(UnknownLayoutError, match=r"^no row opens with the header's first label 'Name'$"):
+            fr.Reader(self.Count, fr.Csv(), table=fr.Preamble()).rows(body)
+
+    def test_a_preamble_opening_with_blank_lines_is_dropped(self) -> None:
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Preamble())
+        assert reader.rows(b"\n\nTitle\n\nName,N\na,1\n") == [self.Count("a", 1)]
+
+    def test_a_blank_line_where_the_header_stands_is_refused_by_its_row(self) -> None:
+        with pytest.raises(UnknownLayoutError, match=r"^the body opens with a blank line, not its header$"):
+            fr.Reader(self.Count, fr.Csv()).rows(b"\nName,N\na,1\n")
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Titled([re.compile("Report")]))
+        with pytest.raises(UnknownLayoutError, match=r"^row 2 is blank, not the header$") as caught:
+            reader.rows(b"Report\n\nName,N\na,1\n")
+        assert caught.value.row == 2

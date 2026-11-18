@@ -15,6 +15,9 @@ in the README, under "Versions".
   thousands (`ThousandsCsv`, `Thousands`); `Zip(member, bare=True)`, a file published zipped or bare
   (`ZippedOrBare`); and `Transcoded(encodings, eof=, lossy=, source=)`, a file in a legacy encoding, the body or a
   zip's member (`Transcoded`).
+- `flatread.next` gains `Preamble(label=None)`, a table finder for a header below a preamble of any length, one stage
+  for a CSV and a sheet (`PreambleCsv`, `PreambleSheet`). A CSV's blank first line is now the table finder's to
+  refuse, not `Csv`'s, so a preamble may open with one; `Header()` refuses it as before.
 - `flatread.next` reads no sheet number cell into a `str` field unless the field is marked `AsWritten()`: a ZIP code
   or CUSIP stored as a number has lost its leading zeros, so it is refused, not read as `2134`. `SheetFile` still
   reads such a cell as its number's text (design-review finding 1, left to 7.x as it is).

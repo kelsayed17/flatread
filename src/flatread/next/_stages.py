@@ -231,7 +231,10 @@ class Csv:
         return self._whole(text, body) if split is None else split
 
     def _text(self, body: bytes) -> str:
-        """Return *body*'s text, or raise for a body empty, cut (by *final_line_ending*), not UTF-8 or opening blank."""
+        """Return *body*'s text, or raise for a body empty, cut (by *final_line_ending*) or not UTF-8.
+
+        A blank line where the header stands is the table finder's to refuse: a preamble may open with one.
+        """
         if not body or body.isspace():
             msg = "the body is empty"
             raise EmptyBodyError(msg)
@@ -242,9 +245,6 @@ class Csv:
         except UnicodeDecodeError as e:
             msg = f"the body is not UTF-8: {e}"
             raise EncodingError(msg) from e
-        if text.startswith(("\n", "\r\n")):
-            msg = "the body opens with a blank line, not its header"
-            raise UnknownLayoutError(msg)
         return text
 
     def typed(  # noqa: PLR0911 (a None for each doubt)
@@ -962,6 +962,14 @@ def _header_table(grid: Grid) -> Table:
         msg = "the body is empty"
         raise EmptyBodyError(msg)
     if isinstance(grid, Lines):
+        if grid.raw[0] == "":
+            number = int(grid.numbers[0])
+            msg = (
+                "the body opens with a blank line, not its header"
+                if number == 1
+                else f"row {number} is blank, not the header"
+            )
+            raise UnknownLayoutError(msg, row=number)
         width = int(grid.widths[0])
         header = [cell or "" for cell in grid.cells.row(0)[:width]]
         rows = grid.slice(1)
@@ -1040,6 +1048,31 @@ class Header:
         """Return the grid's table."""
         del read
         return _header_table(grid)
+
+
+@dataclasses.dataclass(frozen=True)
+class Preamble:
+    """A table below a preamble of any length (a title, a source, notes, blank rows): its header found, not placed.
+
+    The header is the first row whose first cell is *label*, by default the struct's first column's; the rows above it
+    are dropped unread, and the table below it read as :class:`Header` reads one. A grid with no such row raises
+    ``UnknownLayoutError``. One stage for a CSV's and a sheet's (``PreambleCsv``, ``PreambleSheet``); a preamble whose
+    every row is known is a :class:`Titled`'s.
+    """
+
+    label: str | None = None
+    stated: frozenset[str] = frozenset()
+    vouches: bool = False
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table under the first row opening with the header's first label."""
+        label = self.label if self.label is not None else next(iter(read.columns.values())).label
+        first = (grid.cells if isinstance(grid, Lines) else grid.text).get_column("0", default=None)
+        found = None if first is None else (first == label).fill_null(value=False).arg_true()
+        if found is None or not found.len():
+            msg = f"no row opens with the header's first label {label!r}"
+            raise UnknownLayoutError(msg)
+        return _header_table(grid.slice(int(found[0])))
 
 
 @dataclasses.dataclass(frozen=True)
