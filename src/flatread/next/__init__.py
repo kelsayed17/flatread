@@ -35,8 +35,10 @@ from flatread.next._stages import (
     Pdf,
     Sdmx,
     Sheet,
+    Thousands,
     Titled,
     Trailer,
+    Transcoded,
     Zip,
 )
 
@@ -67,7 +69,9 @@ __all__ = [
     "Stream",
     "Table",
     "TableFinder",
+    "Thousands",
     "Titled",
     "Trailer",
+    "Transcoded",
     "Zip",
 ]

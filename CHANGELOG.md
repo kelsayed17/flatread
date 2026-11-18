@@ -11,6 +11,10 @@ in the README, under "Versions".
   and read with no error; 7.x and 0.5.0 read every whole double up to 2\*\*63. Excel holds 15 digits, so no workbook
   Excel writes holds such a number; a reader of one that does must read the column as text: a `str` field, marked
   `AsWritten()` in `flatread.next`. This holds for `SheetFile`, the sheet readers built on it, and `flatread.next`'s `Sheet`.
+- `flatread.next` gains three stages the class-per-quirk readers had: `Thousands()`, a cleaner for numbers grouped in
+  thousands (`ThousandsCsv`, `Thousands`); `Zip(member, bare=True)`, a file published zipped or bare
+  (`ZippedOrBare`); and `Transcoded(encodings, eof=, lossy=, source=)`, a file in a legacy encoding, the body or a
+  zip's member (`Transcoded`).
 - `flatread.next` reads no sheet number cell into a `str` field unless the field is marked `AsWritten()`: a ZIP code
   or CUSIP stored as a number has lost its leading zeros, so it is refused, not read as `2134`. `SheetFile` still
   reads such a cell as its number's text (design-review finding 1, left to 7.x as it is).

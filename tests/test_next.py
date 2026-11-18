@@ -968,3 +968,81 @@ class TestFoundByProperties:
 
 class _WhereName(msgspec.Struct, frozen=True, gc=False):
     name: Annotated[str, Label("Name")]
+
+
+class TestThousandsZippedOrBareAndTranscoded:
+    """Three stages the class-per-quirk readers had: ThousandsCsv, ZippedOrBare and Transcoded, as next's values."""
+
+    class Volume(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        shares: Annotated[int | None, Label("Shares")]
+        price: Annotated[float, Label("Price")]
+
+    def test_thousands_reads_each_grouped_number_and_leaves_text(self) -> None:
+        reader = fr.Reader(self.Volume, fr.Csv(separator="|"), cells=[fr.Thousands()])
+        assert reader.rows(b"Name|Shares|Price\nA, Inc.|1,782,319|-1,234.5\nB||7\n") == [
+            self.Volume("A, Inc.", 1782319, -1234.5),
+            self.Volume("B", None, 7.0),
+        ]
+
+    @pytest.mark.parametrize(("cell", "what"), [("12,34", "whole number"), ("1,0000", "whole number")])
+    def test_thousands_refuses_a_comma_out_of_place_naming_its_row(self, cell: str, what: str) -> None:
+        reader = fr.Reader(self.Volume, fr.Csv(separator="|"), cells=[fr.Thousands()])
+        with pytest.raises(ReadError, match=rf"^the 'Shares' cell '{cell}' is not a {what}: row 3$") as caught:
+            reader.rows(f"Name|Shares|Price\nA|1|1\nB|{cell}|1\n".encode())
+        assert (caught.value.row, caught.value.label) == (3, "Shares")
+
+    def test_thousands_reads_as_thousands_csv_does(self) -> None:
+        from flatread.delimited import ThousandsCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        body = b"Name|Shares|Price\nA|1,000|2,000.25\nB|-12|3\n"
+        assert fr.Reader(self.Volume, fr.Csv(separator="|"), cells=[fr.Thousands()]).rows(body) == ThousandsCsv(
+            self.Volume, separator="|"
+        ).rows(body)
+
+    @staticmethod
+    def _zip(name: str, data: bytes) -> bytes:
+        out = io.BytesIO()
+        with zipfile.ZipFile(out, "w") as archive:
+            archive.writestr(name, data)
+        return out.getvalue()
+
+    def test_a_bare_zip_source_reads_the_member_or_the_body(self) -> None:
+        reader = fr.Reader(_WhereName, fr.Csv(), source=fr.Zip(re.compile(r".*\.csv"), bare=True))
+        assert reader.rows(b"Name\na\n") == [_WhereName("a")]
+        assert reader.rows(self._zip("x.csv", b"Name\nb\n")) == [_WhereName("b")]
+        with pytest.raises(ReadError):  # a zip of no such member is read whole: no CSV
+            reader.rows(self._zip("x.txt", b"Name\nc\n"))
+
+    def test_a_bare_zip_source_refuses_a_zip_that_will_not_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def unopenable(*_: object) -> typing.NoReturn:
+            msg = "a header zipfile cannot read"
+            raise OSError(msg)
+
+        monkeypatch.setattr(zipfile, "ZipFile", unopenable)
+        reader = fr.Reader(_WhereName, fr.Csv(), source=fr.Zip(re.compile(r".*\.csv"), bare=True))
+        with pytest.raises(
+            CorruptArchiveError, match=r"^the body is a zip that will not open: a header zipfile cannot"
+        ):
+            reader.rows(b"PK\x03\x04")
+
+    def test_transcoded_reads_a_legacy_encoding_and_drops_its_eof_byte(self) -> None:
+        reader = fr.Reader(_WhereName, fr.Csv(), source=fr.Transcoded(["utf-8", "cp1252"], eof=b"\x1a"))
+        assert reader.rows("Name\ncafé\n".encode("cp1252") + b"\x1a") == [_WhereName("café")]
+        assert reader.rows("Name\ncafé\n".encode()) == [_WhereName("café")]
+
+    def test_transcoded_reads_a_zips_member(self) -> None:
+        source = fr.Transcoded(["cp1252"], source=fr.Zip(re.compile(r".*\.csv")))
+        body = self._zip("x.csv", "Name\n€\n".encode("cp1252"))
+        assert fr.Reader(_WhereName, fr.Csv(), source=source).rows(body) == [_WhereName("€")]
+
+    def test_transcoded_refuses_what_no_encoding_reads_unless_lossy(self) -> None:
+        with pytest.raises(EncodingError, match=r"^the body is not utf-8: "):
+            fr.Reader(_WhereName, fr.Csv(), source=fr.Transcoded(["utf-8"])).rows(b"Name\n\xff\n")
+        lossy = fr.Reader(_WhereName, fr.Csv(), source=fr.Transcoded(["utf-8"], lossy=True))
+        assert lossy.rows(b"Name\n\xff\n") == [_WhereName("�")]
+
+    @pytest.mark.parametrize("encodings", [[], "utf-8", ["no-such-codec"]])
+    def test_transcoded_refuses_no_codecs_when_built(self, encodings: list[str] | str) -> None:
+        with pytest.raises(LayoutError):
+            fr.Transcoded(encodings)

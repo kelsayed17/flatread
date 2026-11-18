@@ -1,17 +1,20 @@
 """The built-in stages: sources, formats, table finders, shapes and cleaners, each one frozen value with one job."""
 
+import codecs
 import concurrent.futures
 import contextlib
 import csv
 import dataclasses
+import io
 import re
 import typing
+import zipfile
 from collections.abc import Callable, Collection, Generator, Iterator, Mapping, Sequence
 
 import polars as pl
 
 from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzipped
-from flatread.core import _NUL, Column, _check_ending
+from flatread.core import _NUL, _THOUSANDS, Column, _check_ending, _decoded
 from flatread.delimited import _BOM
 from flatread.errors import (
     ControlTotalError,
@@ -24,7 +27,7 @@ from flatread.errors import (
     TruncatedFileError,
     UnknownLayoutError,
 )
-from flatread.next._model import Cells, Grid, Lines, ReadContext, Records, Stream, Table
+from flatread.next._model import Cells, Grid, Lines, ReadContext, Records, Source, Stream, Table
 
 if typing.TYPE_CHECKING:
     from lxml import etree
@@ -106,13 +109,21 @@ class Zip:
     A zip :mod:`flatread.archives` refuses (a name listed twice, a member that will not inflate or that inflates past
     its cap) raises ``ReadError`` naming the member; a zip holding no such member, or several, ``UnknownLayoutError``.
     The member's name is noted on the read (``read.member``).
+
+    With *bare*, a file published zipped or not: a body that is no zip, or a zip with no member matching (a workbook is
+    a zip of its parts), is the file itself, read whole; a zip :mod:`zipfile` opens only to fail on raises
+    ``CorruptArchiveError``.
     """
 
     member: re.Pattern[str]
+    bare: bool = False
 
     @contextlib.contextmanager
     def open(self, body: bytes, read: ReadContext) -> Generator[Stream]:
-        """Open the member, streaming."""
+        """Open the member, streaming; with *bare*, the body itself where it holds none."""
+        if self.bare and not self._zipped(body):
+            yield io.BytesIO(body)
+            return
         with _unzipped(body, None) as archive:
             names = archive.namelist()
             found = [name for name in names if self.member.fullmatch(name)]
@@ -130,6 +141,57 @@ class Zip:
             read.member = found[0]
             with member:  # its reads raise ReadError as it inflates, a cut stream or a CRC that fails
                 yield _Inflating(found[0], member)
+
+    def _zipped(self, body: bytes) -> bool:
+        """Return whether *body* is a zip holding a member *member* matches."""
+        try:
+            with zipfile.ZipFile(io.BytesIO(body)) as archive:
+                return any(self.member.fullmatch(name) for name in archive.namelist())
+        except zipfile.BadZipFile:
+            return False
+        except _UNZIP_ERRORS as e:
+            msg = f"the body is a zip that will not open: {e}"
+            raise CorruptArchiveError(msg) from e
+
+
+@dataclasses.dataclass(frozen=True)
+class Transcoded:
+    """A file written in a legacy encoding (EIA's Windows-1252), read as UTF-8 by the format.
+
+    The file is the body, or what *source* opens of it (a zip's member); it is decoded by the first of *encodings*
+    that reads it (``utf-16`` only where it opens with its byte-order mark), after dropping *eof*, a byte it ends with
+    after its last line (DOS's end-of-file mark). One none decodes raises ``EncodingError``, unless *lossy*: then a
+    byte the last does not decode is U+FFFD. Raises ``LayoutError``, when built, for no encodings or one Python lacks.
+    """
+
+    encodings: Sequence[str]
+    eof: bytes = b""
+    lossy: bool = False
+    source: Source | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.encodings, (str, bytes)) or not self.encodings:
+            msg = f"Transcoded names {self.encodings!r}, not the codecs its body may be written in"
+            raise LayoutError(msg)
+        for encoding in self.encodings:
+            try:
+                codecs.lookup(encoding)
+            except LookupError as e:
+                msg = f"Transcoded's encoding {encoding!r} is no codec Python reads"
+                raise LayoutError(msg) from e
+
+    @contextlib.contextmanager
+    def open(self, body: bytes, read: ReadContext) -> Generator[Stream]:
+        """Open the file as UTF-8."""
+        if self.source is None:
+            yield io.BytesIO(self._utf8(body))
+            return
+        with self.source.open(body, read) as stream:
+            data = stream.read()
+        yield io.BytesIO(self._utf8(data))
+
+    def _utf8(self, data: bytes) -> bytes:
+        return _decoded(data.removesuffix(self.eof), self.encodings, lossy=self.lossy).encode()
 
 
 # --- Formats ---
@@ -1168,3 +1230,21 @@ class Padded:
         """Return *cells* stripped of spaces."""
         del column
         return cells.str.strip_chars(" ")
+
+
+@dataclasses.dataclass(frozen=True)
+class Thousands:
+    """Numbers written with thousands separators (``1,782,319``), each read as its number.
+
+    A number field's cell grouped so loses its commas; one holding a comma otherwise (``12,34``) keeps it, and so is
+    refused as no number, naming its row. Text fields are left as written.
+    """
+
+    def clean(self, cells: pl.Series, column: Column) -> pl.Series:
+        """Return a number *column*'s *cells*, each grouped in thousands without its commas."""
+        if column.scalar not in {int, float}:
+            return cells
+        grouped = cells.str.contains(_THOUSANDS)
+        return pl.select(
+            pl.when(grouped).then(cells.str.replace_all(",", "", literal=True)).otherwise(cells)
+        ).to_series()

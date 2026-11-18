@@ -49,10 +49,12 @@ def test_the_readme_shows_every_example_as_its_file_is() -> None:
     assert [name for name in files if shown[name] != _text((_EXAMPLES / name).read_bytes())] == []
 
 
-#: Every public class of flatread's modules, by name.
+#: Every public class of flatread's modules, by name: the class-per-quirk readers the examples are filed under, not
+#: flatread.next's stages, some of which share a name (``Transcoded``).
 _CLASSES = {
     name: value
     for module in pkgutil.iter_modules(flatread.__path__)
+    if module.name != "next"
     for name, value in vars(importlib.import_module(f"flatread.{module.name}")).items()
     if inspect.isclass(value) and value.__module__.startswith("flatread.") and not name.startswith("_")
 }
