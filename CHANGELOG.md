@@ -4,6 +4,15 @@ Each release's changes, newest first, and what a reader declared for the release
 6.0.0 have no entry here; their tags and commit messages describe them. What a patch and a minor release may change is
 in the README, under "Versions".
 
+## Unreleased
+
+- `flatread.next` reads a header that is not the struct's labels in order: every table finder (`Header`, `Preamble`,
+  `Titled`, `Trailer`) takes a `header=` rule. `Headers(lacking=...)` reads a file published under several headers,
+  each the struct's labels in order with some left out, as `HeadersCsv` does; `Named(...)` one whose header names its
+  columns in any order, as `NamedCsv` does, with `Label` alternatives, a `heading` that folds each cell, and fields
+  `required` in every header. Both drop `unread` columns and check that `blank` ones hold nothing, which next lacked.
+  A format whose headers follow a rule of their own implements `HeaderRule`.
+
 ## 0.5.0
 
 Numbering restarts at 0.5.0. Releases 1.0.0 through 7.2.0 came out within one week while the API was still being

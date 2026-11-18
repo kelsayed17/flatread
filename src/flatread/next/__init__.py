@@ -2,17 +2,20 @@
 
 ``Reader(Row, Csv(separator="|"), table=Trailer(...), shape=Long(...), cells=[Padded()], source=Zip(...))``: each
 stage is one frozen value with one job, configured by keyword, and a stage of a format's own is a class implementing
-its protocol (:class:`Source`, :class:`Format`, :class:`TableFinder`, :class:`Shape`, :class:`Cleaner`,
-:class:`Records`), handed the read's :class:`ReadContext`. One :class:`Engine` types every format's table. Not yet
-stable: this module's names may change in any 0.x release.
+its protocol (:class:`Source`, :class:`Format`, :class:`TableFinder`, :class:`HeaderRule`, :class:`Shape`,
+:class:`Cleaner`, :class:`Records`), handed the read's :class:`ReadContext`. One :class:`Engine` types every format's
+table. A finder's header rule reads a header that is not the struct's labels in order (``Header(header=Named())``).
+Not yet stable: this module's names may change in any 0.x release.
 """
 
 from flatread.next._engine import AsWritten, Engine
+from flatread.next._headers import Headers, Named
 from flatread.next._model import (
     Cells,
     Cleaner,
     Format,
     Grid,
+    HeaderRule,
     Kind,
     Lines,
     ReadContext,
@@ -53,10 +56,13 @@ __all__ = [
     "Format",
     "Grid",
     "Header",
+    "HeaderRule",
+    "Headers",
     "Kind",
     "Layout",
     "Lines",
     "Long",
+    "Named",
     "Observations",
     "Padded",
     "Pdf",

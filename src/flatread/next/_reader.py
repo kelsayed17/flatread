@@ -8,7 +8,7 @@ import msgspec
 import polars as pl
 
 from flatread.core import Column, _panicked
-from flatread.errors import ReadError
+from flatread.errors import LayoutError, ReadError
 from flatread.next._engine import Engine
 from flatread.next._model import Cleaner, Format, ReadContext, Shape, Source, Stream, TableFinder
 
@@ -43,6 +43,7 @@ class Reader[RowT: msgspec.Struct]:
         as_written: Collection[str] = (),
         empty: bool | None = None,
     ) -> None:
+        from flatread.next._headers import Headers  # noqa: PLC0415 (built on this module, as the stages are)
         from flatread.next._stages import Csv, Header, Sheet  # noqa: PLC0415 (the default finder, built on this module)
 
         self.row = row
@@ -54,15 +55,31 @@ class Reader[RowT: msgspec.Struct]:
         self.empty = self.table.vouches if empty is None else empty
         self.engine = Engine(row, null_values=null_values, as_written=as_written, rows_required=not self.empty)
         self._null_values = list(null_values)
+        header = getattr(
+            self.table, "header", None
+        )  # a finder's header rule, which a finder of a format's own may lack
+        if header is not None:
+            header.check(self.engine.columns, self.engine.required)
+            if shape is not None:
+                msg = "a header rule reads the struct's columns and a shape the table as written: a reader takes one"
+                raise LayoutError(msg)
+        aliased = [column.field for column in self.engine.columns if column.aliases]
+        if aliased and (header is None or isinstance(header, Headers)):
+            msg = f"the fields {aliased} name Label alternatives, which only a header read by name takes"
+            raise LayoutError(msg)
         # A CSV or a sheet that is a header and its rows, read with nothing between, has a typed read of its own
         # (Csv.typed, Sheet.typed): its numbers by polars' parser or fastexcel's strict load, in one pass, and the
         # grid's reading only where that read is unsure or refused. A sheet's every field is a plain one, as a
         # column's kind then says all its cells are: a text column of a date's or a flag's is the grid's to read.
         typed = {column.label: _parsed_as(column) for column in self.engine.columns}
         direct = (
-            isinstance(self.format, Csv)
-            or (isinstance(self.format, Sheet) and all(_plain(column) for column in self.engine.columns))
-        ) and isinstance(self.table, Header)
+            (
+                isinstance(self.format, Csv)
+                or (isinstance(self.format, Sheet) and all(_plain(column) for column in self.engine.columns))
+            )
+            and isinstance(self.table, Header)
+            and self.table.header is None
+        )
         self._typed = typed if direct and shape is None and not cells and not as_written else None
 
     def frame(self, body: bytes) -> pl.DataFrame:
@@ -75,7 +92,12 @@ class Reader[RowT: msgspec.Struct]:
 
     def read(self, body: bytes) -> tuple[pl.DataFrame, ReadContext]:
         """Read *body* as :meth:`frame` does, and return what the read learned with it (a trailer's match)."""
-        read = ReadContext(body, columns={column.field: column for column in self.engine.columns}, row=self.row)
+        read = ReadContext(
+            body,
+            columns={column.field: column for column in self.engine.columns},
+            row=self.row,
+            required=self.engine.required,
+        )
         try:
             with self._opened(body, read) as stream:
                 if self._typed is None:

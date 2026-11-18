@@ -1093,3 +1093,154 @@ class TestPreamble:
         with pytest.raises(UnknownLayoutError, match=r"^row 2 is blank, not the header$") as caught:
             reader.rows(b"Report\n\nName,N\na,1\n")
         assert caught.value.row == 2
+
+
+class TestHeaderRules:
+    """A finder's header rule: a file under several headers (HeadersCsv), or one named in any order (NamedCsv)."""
+
+    class Holding(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        n: Annotated[int, Label("N")]
+        shares: Annotated[int | None, Label("Shares")] = None
+
+    @staticmethod
+    def _published() -> fr.Reader[TestHeaderRules.Holding]:
+        rule = fr.Headers(lacking=((), ("shares",)), blank=("Filler",), unread=("notes",))
+        return fr.Reader(TestHeaderRules.Holding, fr.Csv(), table=fr.Header(header=rule))
+
+    @staticmethod
+    def _named(required: Sequence[str] = ()) -> fr.Reader[TestHeaderRules.Holding]:
+        return fr.Reader(TestHeaderRules.Holding, fr.Csv(), table=fr.Header(header=fr.Named(required=required)))
+
+    @pytest.mark.parametrize(
+        "body",
+        [b"Name,N,Shares\na,1,2\n", b"Name,N\na,1\n", b"Name,Filler,N,Filler\na,,1,\n", b"notes,Name,N\nhi,a,1\n"],
+        ids=["whole", "lacking", "blank columns", "an unread column"],
+    )
+    def test_a_published_header_reads_as_headers_csv_reads_it(self, body: bytes) -> None:
+        from flatread.delimited import HeadersCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Published(HeadersCsv[TestHeaderRules.Holding]):
+            _headers_lacking = ((), ("shares",))
+            _blank_columns = ("Filler", "Filler")
+            _unread = ("notes",)
+
+        assert self._published().rows(body) == Published(self.Holding).rows(body)
+
+    @pytest.mark.parametrize("body", [b"N,Name\n1,a\n", b"Name\na\n", b"Name,N,Shares,X\na,1,2,3\n"])
+    def test_a_header_none_of_the_files_is_refused(self, body: bytes) -> None:
+        with pytest.raises(UnknownLayoutError, match=r"^the header \[.*\] is none of the file's \[\['Name', 'N', 'S"):
+            self._published().rows(body)
+
+    @pytest.mark.parametrize("held", ["x", " "])
+    def test_a_blank_column_holding_anything_is_refused_by_its_row(self, held: str) -> None:
+        # A space too, as HeadersCsv refuses it: a blank column holds nothing.
+        with pytest.raises(
+            ReadError, match=rf"^the 'Filler' column holds '{held}', and it never holds a value: row 3$"
+        ) as e:
+            self._published().rows(f"Name,Filler,N\na,,1\nb,{held},2\n".encode())
+        assert (e.value.row, e.value.label) == (3, "Filler")
+
+    def test_a_header_the_file_is_not_published_under_is_refused_though_it_is_the_whole(self) -> None:
+        reader = fr.Reader(self.Holding, fr.Csv(), table=fr.Header(header=fr.Headers(lacking=[("shares",)])))
+        assert reader.rows(b"Name,N\na,1\n") == [self.Holding("a", 1)]
+        with pytest.raises(UnknownLayoutError, match="is none of the file's"):
+            reader.rows(b"Name,N,Shares\na,1,2\n")
+
+    @pytest.mark.parametrize("body", [b"N,Name\n1,a\n", b"Shares,notes,N,Name\n3,hi,1,a\n", b"Name,N,Filler\na,1,\n"])
+    def test_a_named_header_reads_as_named_csv_reads_it(self, body: bytes) -> None:
+        from flatread.delimited import NamedCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Named(NamedCsv[TestHeaderRules.Holding]):
+            _blank_columns = ("Filler",)
+            _unread = ("notes",)
+
+        reader = fr.Reader(self.Holding, fr.Csv(), table=fr.Header(header=fr.Named(blank=["Filler"], unread=["notes"])))
+        assert reader.rows(body) == Named(self.Holding).rows(body)
+
+    @pytest.mark.parametrize(
+        ("body", "words"),
+        [
+            (b"Name\na\n", r"lacks \['N'\], which every one names"),
+            (b"Name,N,Bogus,Nope\na,1,2,3\n", r"names \['Bogus', 'Nope'\], which are no field's labels"),
+            (b"Name,N,N\na,1,2\n", r"names \['N'\] twice"),
+        ],
+        ids=["a required column lacked", "a cell no label names", "a label twice"],
+    )
+    def test_a_named_header_is_refused_for(self, body: bytes, words: str) -> None:
+        with pytest.raises(UnknownLayoutError, match=words):
+            self._named().rows(body)
+
+    def test_a_required_field_that_may_be_empty_is_in_every_header(self) -> None:
+        reader = self._named(required=["shares"])
+        assert reader.rows(b"Shares,N,Name\n,1,a\n") == [self.Holding("a", 1)]
+        with pytest.raises(UnknownLayoutError, match=r"lacks \['Shares'\]"):
+            reader.rows(b"N,Name\n1,a\n")
+
+    def test_a_header_writes_a_label_as_its_alternative_or_folded(self) -> None:
+        class Filed(msgspec.Struct, frozen=True, gc=False):
+            number: Annotated[str, Label("file_number", alternatives=("file_no",))]
+            form: Annotated[str, Label("form")]
+
+        reader = fr.Reader(Filed, fr.Csv(), table=fr.Header(header=fr.Named(heading=str.lower)))
+        assert reader.rows(b"FORM,File_No\n10-K,001\n") == [Filed("001", "10-K")]
+        assert reader.rows(b"file_number,form\n002,8-K\n") == [Filed("002", "8-K")]
+
+    def test_a_sheet_reads_under_either_rule(self) -> None:
+        named = fr.Reader(self.Holding, fr.Sheet(sheet="S"), table=fr.Header(header=fr.Named()))
+        assert named.rows(workbook({"S": [["Shares", "N", "Name"], [3, 1, "a"]]})) == [self.Holding("a", 1, 3)]
+        published = fr.Reader(self.Holding, fr.Sheet(sheet="S"), table=fr.Header(header=fr.Headers([(), ("shares",)])))
+        assert published.rows(workbook({"S": [["Name", "N"], ["a", 1]]})) == [self.Holding("a", 1)]
+
+    def test_every_finder_takes_a_rule(self) -> None:
+        rule = fr.Named()
+        trailer = fr.Trailer(re.compile(r"(?P<count>\d+) rows"), header=rule)
+        titled = fr.Titled([re.compile("Report")], header=rule)
+        for table, body in [
+            (fr.Preamble(label="N", header=rule), b"Title\nN,Name\n1,a\n"),
+            (trailer, b"N,Name\n1,a\n1 rows\n"),
+            (titled, b"Report\nN,Name\n1,a\n"),
+        ]:
+            assert fr.Reader(self.Holding, fr.Csv(), table=table).rows(body) == [self.Holding("a", 1)]
+
+    def test_a_stated_field_is_in_no_header(self) -> None:
+        class Stamped(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name")]
+            on: str
+
+        table = fr.Trailer(re.compile(r"as of (?P<on>\S+)"), header=fr.Headers())
+        assert fr.Reader(Stamped, fr.Csv(), table=table).rows(b"Name\na\nas of 2026\n") == [Stamped("a", "2026")]
+        named = fr.Trailer(re.compile(r"as of (?P<on>\S+)"), header=fr.Named())
+        with pytest.raises(UnknownLayoutError, match=r"names \['on'\]"):
+            fr.Reader(Stamped, fr.Csv(), table=named).rows(b"Name,on\na,x\nas of 2026\n")
+
+    @pytest.mark.parametrize(
+        ("rule", "words"),
+        [
+            (fr.Headers(lacking=()), "lacking is empty"),
+            (fr.Headers(lacking=[("nope",)]), r"lack \['nope'\], which are no fields"),
+            (fr.Headers(lacking=[("n",)]), r"lacking \['n'\] could never be read"),
+            (fr.Named(required=["nope"]), r"required fields \['nope'\] are no fields"),
+        ],
+    )
+    def test_a_rule_that_could_never_read_its_struct_is_refused_when_built(
+        self, rule: fr.HeaderRule, words: str
+    ) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Reader(self.Holding, fr.Csv(), table=fr.Header(header=rule))
+
+    def test_a_word_two_fields_share_and_an_alternative_no_named_header_reads_are_refused_when_built(self) -> None:
+        class Shared(msgspec.Struct, frozen=True):
+            a: Annotated[str, Label("a", alternatives=("b",))]
+            b: str
+
+        with pytest.raises(LayoutError, match="two fields share a label"):
+            fr.Reader(Shared, fr.Csv(), table=fr.Header(header=fr.Named()))
+        with pytest.raises(LayoutError, match="only a header read by name takes"):
+            fr.Reader(Shared, fr.Csv(), table=fr.Header(header=fr.Headers()))
+
+    def test_a_rule_and_a_shape_are_refused_together(self) -> None:
+        with pytest.raises(LayoutError, match="a reader takes one"):
+            fr.Reader(
+                self.Holding, fr.Csv(), table=fr.Header(header=fr.Named()), shape=fr.Long(keys=re.compile(r"\d+"))
+            )

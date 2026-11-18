@@ -92,6 +92,17 @@ def _same(read: list[_Row], written: list[_Row]) -> bool:
     )
 
 
+@_SETTINGS
+@given(rows=_ROWS, order=st.permutations(range(len(_LABELS))))
+def test_a_csv_named_in_any_order_reads_back_the_rows_written(rows: list[_Row], order: list[int]) -> None:
+    # The same file, its columns in another order: Named reads it as the struct's.
+    lines = list(csv.reader(io.StringIO(_csv(rows).decode())))
+    out = io.StringIO()
+    csv.writer(out, lineterminator="\n").writerows([line[at] for at in order] for line in lines)
+    named = fr.Reader(_Row, fr.Csv(), table=fr.Header(header=fr.Named()))
+    assert _same(named.rows(out.getvalue().encode()), rows)
+
+
 _READERS: dict[str, Callable[[bytes], object]] = {
     "CsvFile": CsvFile(_Row).rows,
     "flatread.next Csv": fr.Reader(_Row, fr.Csv()).rows,

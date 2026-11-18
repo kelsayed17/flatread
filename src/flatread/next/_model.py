@@ -16,7 +16,7 @@ import contextlib
 import dataclasses
 import re
 import typing
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 import polars as pl
 
@@ -31,6 +31,7 @@ __all__ = [
     "Cleaner",
     "Format",
     "Grid",
+    "HeaderRule",
     "Kind",
     "Lines",
     "ReadContext",
@@ -164,7 +165,8 @@ class ReadContext:
     *stated* holds the text of the fields a stage reads once for every row (a trailer's stamp), by field; *matches* the
     regex matches a stage found (``matches["trailer"]``); *member* the name of the zip member opened, if one was.
     *columns* are the row struct's columns, by field, and *row* the struct: a format with no header (a document's
-    records, an SDMX message's attributes) lays its cells out by them.
+    records, an SDMX message's attributes) lays its cells out by them. *required* are the fields that hold a value on
+    every row (none admits ``None`` or has a default), whose column every header names.
     """
 
     body: bytes
@@ -173,6 +175,7 @@ class ReadContext:
     member: str | None = None
     columns: Mapping[str, Column] = dataclasses.field(default_factory=dict)
     row: type | None = None
+    required: frozenset[str] = frozenset()
 
 
 class Source(typing.Protocol):
@@ -216,6 +219,23 @@ class TableFinder(typing.Protocol):
 
     def find(self, grid: Grid, read: ReadContext) -> Table:
         """Return the table in *grid*, noting what it states on *read*, or raise ``ReadError``."""
+        ...
+
+
+class HeaderRule(typing.Protocol):
+    """How a header's labels name the struct's columns: which headers a file is published under, what they drop.
+
+    A table finder finds the header row and hands its table here, each column under its header cell (a repeated
+    cell's later columns apart, by a NUL and their count); the rule returns it under the struct's labels, in the
+    struct's order, a column the header lacks null, or raises ``UnknownLayoutError`` for a header it is not.
+    """
+
+    def check(self, columns: Sequence[Column], required: Collection[str]) -> None:
+        """Raise ``LayoutError`` if the rule could never read the struct of *columns*, *required* its fields'."""
+        ...
+
+    def match(self, table: Table, read: ReadContext) -> Table:
+        """Return *table* under the struct's labels, in order, a column its header lacks null; or raise."""
         ...
 
 

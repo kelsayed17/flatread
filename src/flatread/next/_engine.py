@@ -97,6 +97,8 @@ class Engine[RowT: msgspec.Struct]:
             for field in fields
             if types.NoneType not in typing.get_args(_bare(field.type)) and field.name not in self._defaults
         ]
+        #: The fields that hold a value on every row: none admits ``None`` or has a default.
+        self.required = frozenset(self._required)
         self._metas = {field.name: _metas(field.type) for field in fields}
         self.dtypes = {
             column.field: _DTYPES.get(column.scalar) or _temporal(column.scalar, column.written)
@@ -340,9 +342,6 @@ def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Colu
             msg = f"the field {row.__name__}.{field.name} is a {marker.__name__}'s, which flatread.next lacks"
             raise LayoutError(msg)
     named = _marker(metadata, Label)
-    if named is not None and named.alternatives:
-        msg = f"the field {row.__name__}.{field.name} names Label alternatives, which flatread.next lacks"
-        raise LayoutError(msg)
     try:
         scalar = _scalar_type(field.type)
     except LayoutError as e:
@@ -361,6 +360,7 @@ def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Colu
         written,
         _marker(metadata, Flag),
         None,
+        aliases=() if named is None else tuple(named.alternatives),
         shape=_marker(metadata, Shape),
         literal=_literal(field.type),
     )

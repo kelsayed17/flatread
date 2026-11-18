@@ -27,7 +27,7 @@ from flatread.errors import (
     TruncatedFileError,
     UnknownLayoutError,
 )
-from flatread.next._model import Cells, Grid, Lines, ReadContext, Records, Source, Stream, Table
+from flatread.next._model import Cells, Grid, HeaderRule, Lines, ReadContext, Records, Source, Stream, Table
 
 if typing.TYPE_CHECKING:
     from lxml import etree
@@ -1033,21 +1033,27 @@ def _unique(header: Sequence[str]) -> list[str]:
     return named
 
 
+def _matched(table: Table, header: HeaderRule | None, read: ReadContext) -> Table:
+    """Return *table* under the struct's labels by its *header* rule, or as its header writes them for none."""
+    return table if header is None else header.match(table, read)
+
+
 @dataclasses.dataclass(frozen=True)
 class Header:
     """The table is the grid: its first row the header, every row below it a row.
 
     A line's row is as wide as the header; a sheet's header runs to its last filled cell, and a row of the sheet must
-    hold no cell right of it and some cell under it.
+    hold no cell right of it and some cell under it. The header is the struct's labels in order, unless a *header*
+    rule reads it (:class:`Headers`, :class:`Named`), as it does under every finder.
     """
 
     stated: frozenset[str] = frozenset()
     vouches: bool = False
+    header: HeaderRule | None = None
 
     def find(self, grid: Grid, read: ReadContext) -> Table:
         """Return the grid's table."""
-        del read
-        return _header_table(grid)
+        return _matched(_header_table(grid), self.header, read)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1063,6 +1069,7 @@ class Preamble:
     label: str | None = None
     stated: frozenset[str] = frozenset()
     vouches: bool = False
+    header: HeaderRule | None = None
 
     def find(self, grid: Grid, read: ReadContext) -> Table:
         """Return the table under the first row opening with the header's first label."""
@@ -1072,7 +1079,7 @@ class Preamble:
         if found is None or not found.len():
             msg = f"no row opens with the header's first label {label!r}"
             raise UnknownLayoutError(msg)
-        return _header_table(grid.slice(int(found[0])))
+        return _matched(_header_table(grid.slice(int(found[0]))), self.header, read)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1086,6 +1093,7 @@ class Trailer:
 
     pattern: re.Pattern[str]
     vouches: bool = True
+    header: HeaderRule | None = None
 
     @property
     def stated(self) -> frozenset[str]:
@@ -1099,11 +1107,11 @@ class Trailer:
             msg = f"the last line {last!r} is not the file's trailer: the body was cut"
             raise TruncatedFileError(msg)
         read.matches["trailer"] = match
-        table = _header_table(grid.slice(0, -1))
+        read.stated.update({field: match[field] for field in self.stated})
+        table = _matched(_header_table(grid.slice(0, -1)), self.header, read)
         if "count" in self.pattern.groupindex and int(match["count"]) != table.cells.height:
             msg = f"the trailer counts {match['count']} rows, and the body holds {table.cells.height}"
             raise ControlTotalError(msg)
-        read.stated.update({field: match[field] for field in self.stated})
         return table
 
 
@@ -1118,6 +1126,7 @@ class Titled:
 
     titles: Sequence[re.Pattern[str]]
     vouches: bool = False
+    header: HeaderRule | None = None
 
     def __post_init__(self) -> None:
         if not self.titles:
@@ -1141,7 +1150,7 @@ class Titled:
                 raise UnknownLayoutError(msg, row=int(grid.numbers[at]))
             read.stated.update({group: match[group] for group in title.groupindex if group != "count"})
             read.matches[f"title {at}"] = match
-        table = _header_table(grid.slice(len(self.titles)))
+        table = _matched(_header_table(grid.slice(len(self.titles))), self.header, read)
         for match in read.matches.values():
             if "count" in match.re.groupindex and int(match["count"]) != table.cells.height:
                 msg = f"a title counts {match['count']} rows, and the body holds {table.cells.height}"
