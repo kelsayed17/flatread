@@ -137,7 +137,8 @@ class Table:
     """A file's table: its cells' text under its header's labels, each row's number, and its cells' kinds if known.
 
     *kinds*, *floats* and *moments* are a :class:`Cells` grid's, their columns named as *cells*' are: ``None`` for a
-    table of text alone.
+    table of text alone. *written* are the labels of columns a stage wrote as text in a table of kinds (a long table's
+    keys, from its header), typed by the rules for text, whatever their kinds.
     """
 
     cells: pl.DataFrame
@@ -145,6 +146,7 @@ class Table:
     kinds: pl.DataFrame | None = None
     floats: pl.DataFrame | None = None
     moments: pl.DataFrame | None = None
+    written: frozenset[str] = frozenset()
 
     def frames(self) -> list[pl.DataFrame | None]:
         """Return the table's frames, all of one shape: its text, kinds, floats and moments."""
@@ -154,7 +156,7 @@ class Table:
         """Return a table of *frames*, as :meth:`frames` orders them, and *numbers*."""
         cells, kinds, floats, moments = frames
         assert cells is not None  # noqa: S101 (a table always has its text)
-        return Table(cells, numbers, kinds, floats, moments)
+        return Table(cells, numbers, kinds, floats, moments, self.written & set(cells.columns))
 
 
 @dataclasses.dataclass

@@ -5,6 +5,7 @@ import datetime as dt
 import io
 import pickle
 import re
+import types
 import typing
 import zipfile
 from pathlib import Path
@@ -1449,3 +1450,159 @@ def test_a_misquoted_csv_reads_a_stray_quote_as_text_as_csv_text_does() -> None:
     assert fr.Reader(Note, fr.Csv(misquoted=True)).rows(b'Name,Note\na,b"c\n') == [Note("a", 'b"c')]
     with pytest.raises(ReadError):
         fr.Reader(Note, fr.Csv(), table=fr.Cut()).rows(body)
+
+
+class TestLong:
+    """LongFile's switches as Long's: several keys, spacers, scattered and beside columns, repeats, needs_rows."""
+
+    class One(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        year: int
+        value: float | None
+
+    class Two(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        measure: str
+        year: int
+        value: float | None
+
+    class Noted(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        note: Annotated[str | None, Label("Note")]
+        year: int
+        value: float | None
+
+    class Placed(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        year: int
+        n: int
+        value: float | None
+
+    _YEAR: typing.ClassVar = re.compile(r"\d{4}")
+    _MEASURE: typing.ClassVar = re.compile(r"(?P<measure>[a-z_]+)_(?P<year>\d{4})")
+
+    @staticmethod
+    def _old(row: type[msgspec.Struct], keys: re.Pattern[str], switches: Mapping[str, object]) -> typing.Any:  # noqa: ANN401 (a 7.x reader)
+        from flatread.delimited import CsvText  # noqa: PLC0415 (the 7.x reader it replaces)
+        from flatread.layout import LongFile  # noqa: PLC0415
+
+        bases = (LongFile[row], CsvText[row])  # ty: ignore[invalid-type-form] (a reader of the case's row)
+        old = types.new_class("Old", bases, exec_body=lambda body: body.update({"_keys": keys, **switches}))
+        return old(row)
+
+    @pytest.mark.parametrize(
+        ("row", "switches", "long", "body"),
+        [
+            (
+                Two,
+                {"_key_count": 2},
+                fr.Long(keys=_MEASURE, key_count=2),
+                b"Name,mv_2003,mv_2004,debt_2003\na,1,2,3\nb,,5,\n",
+            ),
+            (One, {"_spacer_columns": True}, fr.Long(keys=_YEAR, spacers=True), b"Name,2001,,2002\na,1,,2\n"),
+            (One, {"_scattered": True}, fr.Long(keys=_YEAR, scattered=True), b"2001,Name,2002\n1,a,2\n"),
+            (Noted, {"_beside": ("note",)}, fr.Long(keys=_YEAR, beside=["note"]), b"Name,2001,Note,2002\na,1,hi,2\n"),
+            (Noted, {"_beside": ("note",)}, fr.Long(keys=_YEAR, beside=["note"]), b"Name,2001,2002\na,1,2\n"),
+            (One, {"_empty_cells": "drop"}, fr.Long(keys=_YEAR, empty_cells="drop"), b"Name,2001,2002\na,1,\nb,,\n"),
+        ],
+        ids=["several keys", "spacers", "scattered", "beside", "beside lacked", "drop"],
+    )
+    def test_a_long_table_reads_as_long_file_reads_it(
+        self, row: type[msgspec.Struct], switches: Mapping[str, object], long: fr.Long, body: bytes
+    ) -> None:
+        reader = fr.Reader(row, fr.Csv(), table=fr.Cut(), shape=long)
+        assert reader.rows(body) == self._old(row, long.keys, switches).rows(body)
+
+    def test_a_key_written_twice_is_two_keys_by_their_place_where_headings_repeat(self) -> None:
+        long = fr.Long(keys=re.compile(r"(?P<year>\d{4})"), key_count=2, repeats=True)
+        rows = fr.Reader(self.Placed, fr.Csv(), shape=long).rows(b"Name,2001,2001\na,1,2\n")
+        assert rows == [self.Placed("a", 2001, 1, 1.0), self.Placed("a", 2001, 2, 2.0)]
+
+    @pytest.mark.parametrize(
+        ("row", "long", "body", "error", "words"),
+        [
+            (Two, fr.Long(keys=_MEASURE, key_count=2), b"Name,mv_2003,mv_2003\na,1,2\n", UnknownLayoutError, "twice"),
+            (Two, fr.Long(keys=_MEASURE, key_count=2), b"Name,mv_x\na,1\n", UnknownLayoutError, "are not keys"),
+            (
+                One,
+                fr.Long(keys=_YEAR, spacers=True),
+                b"Name,2001,,2002\na,1,x,2\n",
+                ReadError,
+                r"^a column with no heading holds a cell: row 2$",
+            ),
+            (One, fr.Long(keys=_YEAR, scattered=True), b"Name,2001,Name\na,1,b\n", UnknownLayoutError, "no one 'Name'"),
+            (
+                Noted,
+                fr.Long(keys=_YEAR, beside=["note"]),
+                b"Name,Note,2001,Note\na,x,1,y\n",
+                UnknownLayoutError,
+                "has 2 'Note' columns",
+            ),
+            (
+                One,
+                fr.Long(keys=_YEAR, needs_rows=True),
+                b"Name,2001\n",
+                EmptyBodyError,
+                r"^the body is a header and no",
+            ),
+            (
+                Two,
+                fr.Long(keys=re.compile(r"(?P<measure>[a-z]*)_(?P<year>\d{4})"), key_count=2),
+                b"Name,_2001\na,1\n",
+                UnknownLayoutError,
+                r"name no measure, which every row holds",
+            ),
+        ],
+        ids=[
+            "a key twice",
+            "no key",
+            "a spacer holding a cell",
+            "scattered twice",
+            "beside twice",
+            "no rows",
+            "no text",
+        ],
+    )
+    def test_a_long_table_is_refused_for(
+        self, row: type[msgspec.Struct], long: fr.Long, body: bytes, error: type[ReadError], words: str
+    ) -> None:
+        with pytest.raises(error, match=words):
+            fr.Reader(row, fr.Csv(), shape=long, empty=True).rows(body)
+
+    def test_a_table_of_no_rows_is_one_where_needs_rows_is_unset(self) -> None:
+        assert fr.Reader(self.One, fr.Csv(), shape=fr.Long(keys=self._YEAR), empty=True).rows(b"Name,2001\n") == []
+
+    def test_a_header_of_no_keys_is_a_table_of_no_rows(self) -> None:
+        reader = fr.Reader(self.One, fr.Csv(), shape=fr.Long(keys=self._YEAR), empty=True)
+        assert reader.rows(b"Name\na\n") == []
+
+    def test_a_sheet_s_key_is_its_header_text_typed_as_the_key_field(self) -> None:
+        from flatread.layout import LongFile  # noqa: PLC0415 (the 7.x reader it replaces)
+        from flatread.sheets import SheetFile  # noqa: PLC0415
+
+        class Old(LongFile[TestLong.One], SheetFile[TestLong.One]):
+            _keys = re.compile(r"\d{4}")
+
+        body = workbook({"S": [["Name", "2001", "2002"], ["a", 1, 2.5]]})
+        reader = fr.Reader(self.One, fr.Sheet(sheet="S"), shape=fr.Long(keys=self._YEAR))
+        expected = [self.One("a", 2001, 1.0), self.One("a", 2002, 2.5)]
+        assert reader.rows(body) == Old(self.One, sheet="S").rows(body) == expected
+
+    def test_a_long_shape_no_table_has_is_refused_when_built(self) -> None:
+        with pytest.raises(LayoutError, match="at least one key"):
+            fr.Long(keys=self._YEAR, key_count=0)
+        with pytest.raises(LayoutError, match="kept or dropped"):
+            fr.Long(keys=self._YEAR, empty_cells="skip")  # ty: ignore[invalid-argument-type] (refused)
+
+    @pytest.mark.parametrize(
+        ("row", "long", "words"),
+        [
+            (Noted, fr.Long(keys=_YEAR, beside=["nope"]), r"beside names \['nope'\]"),
+            (Two, fr.Long(keys=re.compile(r"(?P<year>\d{4})"), key_count=2), r"the key fields \['measure'\] are named"),
+        ],
+    )
+    def test_a_long_shape_its_row_does_not_fit_is_refused_when_read(
+        self, row: type[msgspec.Struct], long: fr.Long, words: str
+    ) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Reader(row, fr.Csv(), shape=long).rows(b"Name,2001\na,1\n")

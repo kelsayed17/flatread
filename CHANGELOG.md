@@ -16,6 +16,9 @@ in the README, under "Versions".
   `Cut(header_row=..., above=..., title=..., filled=..., ends="blank", band=..., full_rows=...)`, one finder for a CSV
   and a sheet, which keeps a sheet's cell kinds. `Csv(misquoted=True)` reads a stray quote as text, as `CsvText`'s
   `_misquoted` does, and `Long` reads the record columns of a header over several rows by their last line.
+- `flatread.next`'s `Long` takes `LongFile`'s switches: `key_count` (a header naming several keys, each from its
+  group), `spacers`, `scattered` and `beside` record columns, `repeats` and `needs_rows`. A sheet's key is its header
+  text typed as the key field, as `LongFile` types it; next refused an `int` key on a sheet before.
 
 ## 0.5.0
 

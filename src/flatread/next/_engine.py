@@ -231,7 +231,7 @@ class Engine[RowT: msgspec.Struct]:
     def _typed(  # noqa: PLR0911 (one answer a scalar)
         self, column: Column, table: Table, cleaners: Sequence[Cleaner], numbers: pl.Series
     ) -> pl.Series:
-        if table.kinds is None:
+        if table.kinds is None or column.label in table.written:
             return self._from_cells(column, table.cells[column.label], cleaners, numbers)
         text = self._blanked(column, table.cells[column.label], cleaners)
         assert table.floats is not None  # noqa: S101 (a Cells grid has all three)

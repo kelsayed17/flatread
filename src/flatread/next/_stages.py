@@ -1349,63 +1349,206 @@ def _laid_empty(read: ReadContext) -> Table:
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Long:
-    """A wide table read long: a row per cell under a key's header, the struct's last two fields its key and value.
+    """A wide table read long: a row per cell under a key's header, the struct's last fields its keys and value.
 
-    The fields before them are the record's, their columns leading the header; every header after them fullmatches
-    *keys*, and *key* gives the key's text from the match (its whole text by default). An empty value cell is a row
-    whose value is ``None`` (*empty_cells* ``"keep"``), or no row (``"drop"``). Rows come record by record. A sheet's
-    cells keep their kinds.
+    The fields before them are the record's, their columns leading the header (by their labels, a header over several
+    rows by its last line), or found by label anywhere in it (*scattered*: an empty label is the first column's); a
+    field of *beside* stands among the keys, found by its label wherever it is, and is ``None`` where the header has
+    none. Every other header fullmatches *keys*: *key* gives the key's text from the match (its whole text by
+    default), or, for a header naming several keys (``market_value_residence_2003``), *key_count* fields before the
+    value each take the text of the group named for it (an empty one no text, where the field admits none). A heading
+    with no text heads a spacer, a column holding nothing, where *spacers* is set; no two headings give one key, and
+    none is written twice, unless *repeats*: then a key field no group names is its heading's place among the keys,
+    from 1. An empty value cell is a row whose value is ``None`` (*empty_cells* ``"keep"``), or no row (``"drop"``).
+    Rows come record by record, a record's keys in header order; a table of a header and no rows is refused where
+    *needs_rows* is set, though the reader takes a table of none (one of rows with no value is still an answer). A
+    sheet's cells keep their kinds.
     """
 
     keys: re.Pattern[str]
     key: Callable[[re.Match[str]], str | None] = lambda match: match[0]
+    key_count: int = 1
     empty_cells: typing.Literal["keep", "drop"] = "keep"
+    spacers: bool = False
+    scattered: bool = False
+    beside: Collection[str] = ()
+    repeats: bool = False
+    needs_rows: bool = False
+
+    def __post_init__(self) -> None:
+        if self.key_count < 1:
+            msg = f"a long table's header names at least one key, not {self.key_count}"
+            raise LayoutError(msg)
+        if self.empty_cells not in ("keep", "drop"):
+            msg = f"an empty value cell is kept or dropped, not {self.empty_cells!r}"
+            raise LayoutError(msg)
 
     def shape(self, table: Table, columns: Sequence[Column], read: ReadContext) -> Table:
-        """Return *table* read long, under the record's labels and the key and value fields' names."""
-        stated = [column for column in columns if column.field in read.stated]
-        *record, key_column, value_column = [
-            column for column in columns if column not in stated or column in columns[-2:]
-        ]
-        labels = [column.label for column in record]
-        header = [name.partition(_NUL)[0] for name in table.cells.columns]
-        # A header over several rows (Cut's above) ends each record column's in its label, which names it.
-        if (opening := [heading.rpartition(_UNIT)[2] for heading in header[: len(labels)]]) != labels:
-            msg = f"the header opens {opening!r}, not the record's {labels!r}"
-            raise UnknownLayoutError(msg)
-        keyed: dict[str, str | None] = {}
-        for name, heading in zip(table.cells.columns[len(labels) :], header[len(labels) :], strict=True):
-            if (match := self.keys.fullmatch(heading)) is None:
-                msg = f"the header {heading!r} is not a key: it does not fullmatch {self.keys.pattern!r}"
+        """Return *table* read long, under the record's labels and the key and value fields' labels."""
+        *fields, value_column = columns[: len(columns)]
+        key_columns, fields = fields[len(fields) - self.key_count :], fields[: len(fields) - self.key_count]
+        if stray := set(self.beside) - {column.field for column in fields}:
+            msg = f"beside names {sorted(stray)}, which are no record fields of the long row"
+            raise LayoutError(msg)
+        if (
+            self.key_count > 1
+            and not self.repeats
+            and (unnamed := [k.field for k in key_columns if k.field not in self.keys.groupindex])
+        ):
+            msg = f"the key fields {unnamed} are named by no group of {self.keys.pattern!r}, and no heading repeats"
+            raise LayoutError(msg)
+        fields = [column for column in fields if column.field not in read.stated]
+        record = [column for column in fields if column.field not in self.beside]
+        names = table.cells.columns
+        header = [name.partition(_NUL)[0] for name in names]
+        tails = [heading.rpartition(_UNIT)[2] for heading in header]
+        places = self._record_places(header, tails, record)
+        besides: dict[str, str] = {}
+        for column in (column for column in fields if column.field in self.beside):
+            found = [names[at] for at, tail in enumerate(tails) if tail == column.label and at not in places]
+            if len(found) > 1:
+                msg = f"the header {header!r} has {len(found)} {column.label!r} columns, not one"
                 raise UnknownLayoutError(msg)
-            keyed[name] = self.key(match)
-        if len(set(keyed.values())) != len(keyed):
-            msg = f"the header names a key twice: {list(keyed.values())!r}"
+            if found:
+                besides[column.label] = found[0]
+        taken = {*(names[at] for at in places), *besides.values()}
+        rest = [at for at, name in enumerate(names) if name not in taken]
+        spacers = [names[at] for at in rest if self.spacers and not tails[at]]
+        keyed = [at for at in rest if names[at] not in spacers]
+        if stray_keys := [header[at] for at in keyed if not self.keys.fullmatch(header[at])]:
+            msg = f"the header's columns {stray_keys!r} are not keys, which match {self.keys.pattern!r}"
             raise UnknownLayoutError(msg)
-        record_columns = table.cells.columns[: len(labels)]
+        headings = [header[at] for at in keyed]
+        if not self.repeats and len(set(headings)) != len(headings):
+            msg = f"the header names a key twice: {headings!r}"
+            raise UnknownLayoutError(msg)
+        texts = self._key_texts(headings, key_columns, read)
+        if len(set(texts)) != len(texts):
+            shown = [text[0] for text in texts] if self.key_count == 1 else [list(text) for text in texts]
+            msg = f"the header names a key twice: its headings {headings!r} name the keys {shown!r}"
+            raise UnknownLayoutError(msg)
+        if spacers and (held := table.cells.select(pl.any_horizontal(pl.col(spacers).is_not_null())).to_series()).any():
+            row = int(table.numbers[int(held.arg_true()[0])])
+            msg = f"a column with no heading holds a cell: row {row}"
+            raise ReadError(msg, row=row)
+        if self.needs_rows and not table.cells.height:
+            msg = "the body is a header and no rows"
+            raise EmptyBodyError(msg)
+        return self._long(
+            table,
+            record=[(names[at], column.label) for at, column in places.items()],
+            besides=besides,
+            fields=fields,
+            keyed=[names[at] for at in keyed],
+            texts=texts,
+            keys=key_columns,
+            value=value_column,
+        )
 
-        def long(frame: pl.DataFrame | None) -> pl.DataFrame | None:
+    def _record_places(
+        self, header: Sequence[str], tails: Sequence[str], record: Sequence[Column]
+    ) -> dict[int, Column]:
+        """Return the record's columns by their place in the header: leading it, or found anywhere (*scattered*)."""
+        labels = [column.label for column in record]
+        if not self.scattered:
+            if (opening := list(tails[: len(labels)])) != labels:
+                msg = f"the header opens {opening!r}, not the record's {labels!r}"
+                raise UnknownLayoutError(msg)
+            return dict(enumerate(record))
+        places = {}
+        for column in record:
+            # An empty label is the first column's, under an empty cell: a spacer's is empty too.
+            found = [at for at, tail in enumerate(tails) if tail == column.label and (column.label or at == 0)]
+            if len(found) != 1:
+                msg = f"the header {list(header)!r} has no one {column.label!r} column"
+                raise UnknownLayoutError(msg)
+            places[found[0]] = column
+        return dict(sorted(places.items()))
+
+    def _key_texts(
+        self, headings: Sequence[str], keys: Sequence[Column], read: ReadContext
+    ) -> list[tuple[str | None, ...]]:
+        """Return each heading's key texts, one per key field; a required key that one names none of raises."""
+        matches = [typing.cast("re.Match[str]", self.keys.fullmatch(heading)) for heading in headings]
+        texts: list[tuple[str | None, ...]]
+        if self.key_count == 1:
+            texts = [(self.key(match),) for match in matches]
+        else:
+            texts = [
+                tuple((match[key.field] or None) if key.field in self.keys.groupindex else str(place) for key in keys)
+                for place, match in enumerate(matches, 1)
+            ]
+        for at, key in enumerate(keys):
+            if key.field in read.required and (
+                empty := [h for h, t in zip(headings, texts, strict=True) if t[at] is None]
+            ):
+                msg = f"the headers {empty!r} name no {key.field}, which every row holds"
+                raise UnknownLayoutError(msg)
+        return texts
+
+    def _long(  # noqa: PLR0913 (the table and how its columns lay out)
+        self,
+        table: Table,
+        *,
+        record: Sequence[tuple[str, str]],
+        besides: Mapping[str, str],
+        fields: Sequence[Column],
+        keyed: Sequence[str],
+        texts: Sequence[tuple[str | None, ...]],
+        keys: Sequence[Column],
+        value: Column,
+    ) -> Table:
+        """Return *table*'s cells under the *keyed* columns read long, a row per cell, record by record."""
+        by_label = {label: name for name, label in record} | dict(besides)
+        index = [by_label[column.label] for column in fields if column.label in by_label]
+        lacked = (pl.String, pl.String, pl.Float64, pl.Datetime("us"))
+
+        def long(
+            frame: pl.DataFrame | None, kind: pl.DataType | type[pl.DataType], *, text: bool
+        ) -> pl.DataFrame | None:
             if frame is None:
                 return None
-            cells = frame.with_row_index("_row").unpivot(
-                index=["_row", *record_columns], on=list(keyed), variable_name="_key", value_name=value_column.label
-            )
-            # unpivot writes key by key; row r's key j is at j * height + r, so rows come record by record in key order.
-            height, at = frame.height, pl.int_range(frame.height * len(keyed))
-            cells = cells.select(pl.all().gather((at % len(keyed)) * height + at // len(keyed)))
-            key = pl.col("_key").replace_strict(keyed, return_dtype=pl.String).alias(key_column.label)
-            record = (pl.col(name).alias(label) for name, label in zip(record_columns, labels, strict=True))
-            return cells.select("_row", *record, key, value_column.label)
+            if not keyed:
+                cells = (
+                    frame.select(index)
+                    .clear()
+                    .with_columns(pl.lit(None, kind).alias("_key"), pl.lit(None, kind).alias(value.label))
+                )
+            else:
+                cells = frame.with_row_index("_row").unpivot(
+                    index=["_row", *index], on=list(keyed), variable_name="_key", value_name=value.label
+                )
+                # unpivot writes key by key; row r's key j is at j * height + r, so rows come record by record.
+                height, at = frame.height, pl.int_range(frame.height * len(keyed))
+                cells = cells.select(pl.all().gather((at % len(keyed)) * height + at // len(keyed)))
+            out = [
+                pl.col(by_label[column.label]).alias(column.label)
+                if column.label in by_label
+                else pl.lit(None, kind).alias(column.label)
+                for column in fields
+            ]
+            for place, key in enumerate(keys):
+                named = {name: text_of[place] for name, text_of in zip(keyed, texts, strict=True)}
+                key_text = (
+                    pl.col("_key").replace_strict(named, return_dtype=pl.String) if keyed else pl.lit(None, pl.String)
+                )
+                out.append(key_text.alias(key.label) if text else pl.lit(None, kind).alias(key.label))
+            return cells.select(*(["_row"] if keyed else []), *out, value.label)
 
-        frames = [long(frame) for frame in table.frames()]
+        frames = [
+            long(frame, kind, text=at in (0, 1))
+            for at, (frame, kind) in enumerate(zip(table.frames(), lacked, strict=True))
+        ]
         cells = typing.cast("pl.DataFrame", frames[0])
         if frames[1] is not None:  # a key is text, whatever kind its column's cells are
-            frames[1] = frames[1].with_columns(pl.lit("text").alias(key_column.label))
-        keep = pl.Series([True] * cells.height)
+            frames[1] = frames[1].with_columns(pl.lit("text").alias(key.label) for key in keys)
+        keep = pl.repeat(True, cells.height, dtype=pl.Boolean, eager=True)  # noqa: FBT003 (a mask's value)
         if self.empty_cells == "drop":
-            keep = cells[value_column.label].str.strip_chars().fill_null("") != ""
-        numbers = table.numbers.gather(cells.filter(keep)["_row"])
-        return table.with_frames([None if f is None else f.filter(keep).drop("_row") for f in frames], numbers)
+            keep = cells[value.label].str.strip_chars().fill_null("") != ""
+        numbers = table.numbers.gather(cells.filter(keep)["_row"]) if keyed else table.numbers.clear()
+        table = dataclasses.replace(table, written=frozenset(key.label for key in keys))
+        frames = [None if f is None else f.filter(keep).drop("_row", strict=False) for f in frames]
+        return table.with_frames(frames, numbers)
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
