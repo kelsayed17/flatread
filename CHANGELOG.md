@@ -32,6 +32,10 @@ digits are text in that format (`198803` for `%Y%m`), and one that is a word for
 `-`, of 64 bits, digit for digit; a float's a plain decimal, no exponent, `nan` or `inf`), and any other text refused,
 naming it. With `cells=[Padded()]` it reads what 7.x's `PaddedSheet` and `TextNumbersSheet` read together.
 
+`Noted(header_row=..., ends="bare" | "undated")` finds a table with notes under it, as 7.x's `NotedSheet` and
+`DatedSheet` do: its rows end at the first holding nothing past its first column, or at the first whose first cell is
+no date cell (a sheet's alone), and a cell past the first column among the notes below raises, naming its row.
+
 In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
 In both, a body of CRLF lines that ends in a CR alone raises `TruncatedFileError`: it was cut between the CR and the
 LF, and `final_line_ending=True` took the CR for a whole line ending.

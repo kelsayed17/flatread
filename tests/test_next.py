@@ -501,6 +501,38 @@ def test_a_sheet_of_text_numbers_reads_a_text_cell_as_its_number_strictly(cell: 
         fr.Reader(_Charted, fr.Sheet()).frame(workbook({"S": [["month", "rate", "count"], ["1988m1", "1.03", 1]]}))
 
 
+class _Erratum(msgspec.Struct, frozen=True):
+    week: dt.date
+    series: str
+    value: float
+
+
+def test_a_noted_table_ends_at_its_notes_and_refuses_a_row_among_them() -> None:
+    reader = fr.Reader(_Erratum, fr.Sheet(), table=fr.Noted(header_row=3))
+    rows = [["Appendix E"], ["As of 2026-11-18"], ["week", "series", "value"], [dt.date(2026, 1, 2), "WCESTUS1", 1.5]]
+    notes = [[None], ["Source: EIA"], ["Notes:"]]
+    assert reader.rows(workbook({"S": [*rows, *notes]})) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+    lost = workbook({"S": [*rows, *notes, [dt.date(2026, 1, 9), "WCESTUS1", 2.5]]})
+    with pytest.raises(ReadError, match="row 8 holds a cell past its first column under the table, ending at row 5"):
+        reader.frame(lost)
+    csv = b"week,series,value\n2026-01-02,WCESTUS1,1.5\n\nSource: EIA\n"
+    assert fr.Reader(_Erratum, fr.Csv(), table=fr.Noted()).rows(csv) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+
+
+def test_a_dated_table_runs_while_its_first_cell_is_a_date_cell() -> None:
+    class Level(msgspec.Struct, frozen=True):
+        day: dt.date
+        level: float | None
+
+    reader = fr.Reader(Level, fr.Sheet(), table=fr.Noted(ends="undated"))
+    body = workbook({"S": [["day", "level"], [dt.date(2026, 1, 2), 1.0], [dt.date(2026, 1, 3), None], ["Source: Fed"]]})
+    assert reader.rows(body) == [Level(dt.date(2026, 1, 2), 1.0), Level(dt.date(2026, 1, 3), None)]
+    with pytest.raises(ReadError, match="row 3 holds a cell past its first column under the table, ending at row 3"):
+        reader.frame(workbook({"S": [["day", "level"], [dt.date(2026, 1, 2), 1.0], ["2026-01-03", 2.0]]}))
+    with pytest.raises(LayoutError, match="a sheet's"):
+        fr.Reader(Level, fr.Csv(), table=fr.Noted(ends="undated")).frame(b"day,level\n2026-01-02,1\n")
+
+
 def test_a_sheet_s_header_runs_to_its_last_filled_cell() -> None:
     with pytest.raises(EmptyBodyError):
         _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"]]}))

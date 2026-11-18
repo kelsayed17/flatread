@@ -44,6 +44,7 @@ __all__ = [
     "Header",
     "Layout",
     "Long",
+    "Noted",
     "Observations",
     "Padded",
     "Pdf",
@@ -1194,6 +1195,65 @@ class Trailer:
             msg = f"the trailer counts {match['count']} rows, and the body holds {table.cells.height}"
             raise ControlTotalError(msg)
         return table
+
+
+@dataclasses.dataclass(frozen=True)
+class Noted:
+    """A table with notes under it (a ``Source:`` line, a ``Notes:`` heading, disclosures), the notes dropped.
+
+    Its header is row *header_row* (from 1), and its rows run to the first row holding nothing past its first column
+    (*ends* ``"bare"``, NotedSheet's), or to the first whose first cell is no date cell (``"undated"``, a sheet's dated
+    rows, DatedSheet's: a row of empty values is still a row). Below it only the first column holds anything, the
+    notes; a cell past it there is a row the table lost, and raises, naming its row. The table is read as
+    :class:`Header` reads one, a *header* rule reading its header.
+    """
+
+    header_row: int = 1
+    ends: typing.Literal["bare", "undated"] = "bare"
+    stated: frozenset[str] = frozenset()
+    vouches: bool = False
+    header: HeaderRule | None = None
+
+    def __post_init__(self) -> None:
+        if self.header_row < 1:
+            msg = f"the header row {self.header_row} is no row of a grid, whose rows count from 1"
+            raise LayoutError(msg)
+        if self.ends not in ("bare", "undated"):
+            msg = f"a noted table ends at a bare row or an undated one, not {self.ends!r}"
+            raise LayoutError(msg)
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table above the notes, refusing a cell past the first column among them."""
+        if grid.height < self.header_row:
+            msg = f"the body has {grid.height} rows, and its header is row {self.header_row}"
+            raise UnknownLayoutError(msg)
+        below = grid.slice(self.header_row)
+        text = below.cells if isinstance(below, Lines) else below.text
+        ended = self._ended(below, text)
+        end = int(ended.arg_true()[0]) if ended.any() else below.height
+        notes = text.slice(end)
+        rest = notes.columns[1:]
+        if rest and (held := notes.select(pl.any_horizontal(pl.col(rest).str.strip_chars() != "")).to_series()).any():
+            row = int(below.numbers[end + int(held.arg_true()[0])])
+            ends = int(below.numbers[end])
+            msg = f"row {row} holds a cell past its first column under the table, ending at row {ends}: notes go there"
+            raise ReadError(msg, row=row)
+        return _matched(_header_table(grid.slice(self.header_row - 1, self.header_row + end)), self.header, read)
+
+    def _ended(self, below: Grid, text: pl.DataFrame) -> pl.Series:
+        """Return, for each row below the header, whether it is past the table's end."""
+        if self.ends == "undated":
+            if isinstance(below, Lines) or below.kinds is None:
+                msg = "a table of dated rows is a sheet's, whose cells say which are dates"
+                raise LayoutError(msg)
+            if "0" not in below.kinds.columns:
+                return pl.repeat(value=True, n=below.height, eager=True)
+            lead: pl.Series = below.kinds.get_column("0")
+            return lead.ne_missing("moment")
+        rest = [pl.col(name).is_null() | (pl.col(name).str.strip_chars() == "") for name in text.columns[1:]]
+        if not rest:
+            return pl.repeat(value=True, n=below.height, eager=True)
+        return text.select(pl.all_horizontal(rest)).to_series()
 
 
 @dataclasses.dataclass(frozen=True)
