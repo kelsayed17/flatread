@@ -4,7 +4,29 @@ Each release's changes, newest first, and what a reader declared for the release
 6.0.0 have no entry here; their tags and commit messages describe them. What a patch and a minor release may change is
 in the README, under "Versions".
 
-## Unreleased
+## 0.5.0
+
+Numbering restarts at 0.5.0. Releases 1.0.0 through 7.2.0 came out within one week while the API was still being
+found, so their numbers record that search, not stability. flatread stays at 0.x until its API holds still, and any
+0.x minor may change it. A version resolver orders 7.2.0 above 0.5.0, so pin a tag (`@v0.5.0`), not a range.
+The tags v1.0.0 through v7.2.0 stay as they are.
+
+The `flatread` readers read every file as 7.2.0 does but two, each below: a sheet's `int` field refuses a number cell
+at or past 2\*\*53, and a workbook whose zip lists a name twice is refused. New:
+
+- `flatread.next`, a preview: a reader is `Reader(Row, format, table=..., shape=..., cells=[...], source=...)`, a
+  pipeline of frozen stage values instead of a class per quirk (README, "flatread.next (preview)"). Its formats are
+  `Csv`, `Sheet`, `Layout` (fixed width), `Pdf` and `Sdmx`, and its stages are `Header`, `Titled`, `Trailer`, `Long`,
+  `Observations`, `Derived`, `Padded` and `Zip`. One engine types every format's cells, and a reader checks msgspec
+  `Meta` constraints itself.
+- `flatread.next` numbers a row as its file does (a text file's line, a sheet's row), not from the first data row.
+- Its fast paths: a CSV whose fields are all plain text, numbers or booleans is typed by polars directly, its rows
+  counted by one regex over the body and checked against what polars read; a sheet of such fields loads once. Either
+  path gives way to the general one on anything it cannot vouch for, so both read every body the general path does.
+- A whole number past 64 bits in an int field is refused as a `ReadError`, where the general path raised polars'
+  `InvalidOperationError`.
+
+Also in 0.5.0:
 
 - `flatread.next` reads a header that is not the struct's labels in order: every table finder (`Header`, `Preamble`,
   `Titled`, `Trailer`) takes a `header=` rule. `Headers(lacking=...)` reads a file published under several headers,
