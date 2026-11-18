@@ -904,7 +904,7 @@ def test_an_xls_sheet_is_read_by_its_grid_where_its_one_load_finds_another_heade
 
 def test_a_csv_s_rows_too_wide_for_one_pattern_are_left_to_the_grid() -> None:
     """A width whose row pattern is past the regex engine's size is the grid's to read: no count, and no error."""
-    for width, rows in ((1_000, 1), (3_000, None)):
+    for width, rows in ((700, 1), (1_000, None)):
         assert fr.Csv()._rows_of('"x"' + ",x" * (width - 1) + "\n", '"', width) == rows
 
 
@@ -2306,6 +2306,8 @@ class TestACsvCellIsReadExactly:
             b"n,x,name\n5 ,1.5,a\n",
             b"n,x,name\n5,\t1.5,a\n",
             b'n,x,name\n 5,1.5,"a"\n',
+            b'n,x,name\n" 5",1.5,"a"\n',
+            b'n,x,name\n5,1.5," a, b"\n',
             b"n,x,name\n5,1e-400,a\n",
             b"n,x,name\n5,0e-400,a\n",
             b"n,x,name\n5,1.5, \n",

@@ -10,8 +10,10 @@ in the README, under "Versions".
 
 - A number cell padded with whitespace (` 5`, `5 `, a tab) is refused, naming its cell and row, where it was trimmed;
   a `Padded()` cleaner reads it, as 7.x's `PaddedCsv` did. A text cell of spaces is that text, not no value. Both the
-  typed fast path and the grid read this way: where a cell may open with a space or a tab, the fast path reads every
-  cell as text and casts its numbers, as the grid does, where polars' parser took ` 5` as 5.
+  typed fast path and the grid read this way, where polars' parser took ` 5` as 5: an unquoted body where a cell may
+  open with a space or a tab is read as text and its numbers cast, and a quoted body's row check gives way to the grid
+  on such a cell. That check's pattern is larger, so a quoted CSV of about 1,000 columns or more (was about 3,000) is
+  read by the grid.
 - A float cell that underflows (`1e-400`, which polars reads as `0.0`) is refused in every format, where the fast
   path and the grid read `0.0`.
 - A body opening with two byte order marks raises `EncodingError`, where polars dropped the second too.

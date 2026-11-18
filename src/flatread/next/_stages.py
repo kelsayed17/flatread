@@ -319,7 +319,8 @@ class Csv:
             return None
         # polars' parser takes a number after spaces or a tab (`` 5``), which its cast refuses, as the grid's reading
         # does: a body where a cell may open so has every cell read as text, its numbers then cast.
-        padded = self._may_pad(body, quote)
+        # A quoted body's row check refuses a cell opening so (:meth:`_rows_of`); an unquoted one is searched for one.
+        padded = quote is None and self._may_pad(body)
         schema = {
             label: dtype if dtype in (pl.Int64, pl.Float64) and not padded else pl.String
             for label, dtype in dtypes.items()
@@ -371,17 +372,16 @@ class Csv:
         frame = frame.with_columns(pl.col(pl.String).replace("", None))
         return Table(frame, pl.int_range(2, frame.height + 2, eager=True).alias("number"))
 
-    def _may_pad(self, body: bytes, quote: str | None) -> bool:
-        """Return whether a cell of *body* may open with a space or a tab, after a separator, a line break or a quote.
+    def _may_pad(self, body: bytes) -> bool:
+        """Return whether a cell of unquoted *body* may open with a space or a tab: after a separator or a line break.
 
         A few substring searches in polars, over the body's bytes.
         """
-        opens = [self.separator.encode(), b"\n", *([quote.encode()] if quote is not None else [])]
         if body.removeprefix(_BOM).startswith((b" ", b"\t")):
             return True
         blanks = (b" ", b"\t") if b"\t" in body else (b" ",)  # a byte's search is memchr's: a tab is seldom there
         found = pl.lit(pl.Series([body], dtype=pl.Binary))
-        pairs = [found.bin.contains(start + blank) for start in opens for blank in blanks]
+        pairs = [found.bin.contains(start + blank) for start in (self.separator.encode(), b"\n") for blank in blanks]
         return bool(pl.select(pl.any_horizontal(pairs)).item())
 
     def _rows_of(self, text: str, quote: str, width: int) -> int | None:
@@ -391,10 +391,12 @@ class Csv:
         any other cell holds none of them. One fullmatch of polars' regex engine, so a quote out of place, a row of
         another width or a quoted cell that does not close is ``None``, as :meth:`_spanning` finds each; so is a width
         whose pattern is past the engine's size, which the grid's reading reads. The rows are counted as the text's
-        line breaks, those inside its quoted cells too, and one more where its last line has none.
+        line breaks, those inside its quoted cells too, and one more where its last line has none. A cell opening with
+        a space or a tab, quoted or not, is ``None`` too: polars' parser would take a number after one, which the
+        grid's reading refuses.
         """
         q, sep = re.escape(quote), re.escape(self.separator)
-        cell = f"(?:{q}[^{q}]*(?:{q}{q}[^{q}]*)*{q}|[^{sep}\r\n{q}]*)"
+        cell = f"(?:{q}(?:[^{q} \t][^{q}]*)?(?:{q}{q}[^{q}]*)*{q}|(?:[^{sep}\r\n{q} \t][^{sep}\r\n{q}]*)?)"
         row = f"{cell}(?:{sep}{cell}){{{width - 1}}}"
         whole = pl.col("text")
         try:
