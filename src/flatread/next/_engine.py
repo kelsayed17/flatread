@@ -291,6 +291,8 @@ class Engine[RowT: msgspec.Struct]:
             _refuse(
                 text.is_not_null() & (kinds != "number").fill_null(value=False), text, column, "number cell", numbers
             )
+            # A number cell that is one of the file's words for none (a stored NaN, written ``NaN``) holds none.
+            floats = pl.select(pl.when(text.is_not_null()).then(floats)).to_series().alias(floats.name)
             if column.scalar is int:
                 _refuse(floats != floats.floor(), text, column, "whole number", numbers)
                 _refuse(
@@ -318,6 +320,8 @@ class Engine[RowT: msgspec.Struct]:
             return native.zip_with(stored, values).alias(column.field)
         # A date or time: a moment cell is its value; a text cell is read by its field's format.
         stored = text.is_not_null() & (kinds == "moment").fill_null(value=False)
+        if column.written not in (None, _ISO_DATE):  # a number cell's digits, text in its own Format (%Y%m: 198803)
+            is_text = is_text | (kinds == "number").fill_null(value=False)
         if column.written is None and column.scalar is not dt.date:  # no Format: a moment cell alone
             _refuse(
                 text.is_not_null() & ~stored, text, column, "date cell: its field names no Format for text", numbers

@@ -23,6 +23,9 @@ in the README, under "Versions".
 
 A `flatread.next` sheet's date-and-time or time field may name no `Format`, as a 7.x `SheetFile`'s may: it reads the
 sheet's date cells alone, and refuses a text cell, naming it. A text format's such field still needs its `Format`.
+A sheet's number cell is read as 7.x reads it in two more places: under a date field with a `Format` of its own, its
+digits are text in that format (`198803` for `%Y%m`), and one that is a word for none (a stored `NaN` under
+`null_values=["NaN"]`) holds none, where both were refused.
 
 In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
 In both, a body of CRLF lines that ends in a CR alone raises `TruncatedFileError`: it was cut between the CR and the

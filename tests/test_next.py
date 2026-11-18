@@ -438,6 +438,29 @@ def test_a_sheet_s_moment_field_of_no_format_reads_its_moment_cells_alone() -> N
         long.frame(workbook({"S": [["until", "2026-01-02"], [dt.time(16), 1.5]]}))
 
 
+def test_a_sheet_s_number_cell_under_a_formatted_date_is_its_digits_in_that_format() -> None:
+    class Expiry(msgspec.Struct, frozen=True):
+        month: Annotated[dt.date, Format("%Y%m")]
+
+    reader = fr.Reader(Expiry, fr.Sheet())
+    assert reader.rows(workbook({"S": [["month"], [198803], ["198804"]]})) == [
+        Expiry(dt.date(1988, 3, 1)),
+        Expiry(dt.date(1988, 4, 1)),
+    ]
+    with pytest.raises(ReadError, match=r"'month' cell '1988\.5'"):
+        reader.frame(workbook({"S": [["month"], [1988.5]]}))
+    with pytest.raises(ReadError, match="'month' cell 'true' is not a date cell or text"):
+        reader.frame(workbook({"S": [["month"], [True]]}))
+
+
+def test_a_sheet_s_number_cell_that_is_a_word_for_none_holds_none() -> None:
+    class Surprise(msgspec.Struct, frozen=True):
+        mps: float | None
+
+    xlsx = workbook({"S": [["mps"], [0.5], [float("nan")]]})  # a number cell, its text NaN
+    assert fr.Reader(Surprise, fr.Sheet(), null_values=["NaN"]).rows(xlsx) == [Surprise(0.5), Surprise(None)]
+
+
 def test_a_sheet_s_header_runs_to_its_last_filled_cell() -> None:
     with pytest.raises(EmptyBodyError):
         _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"]]}))
