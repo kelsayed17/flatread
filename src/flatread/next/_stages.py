@@ -379,8 +379,9 @@ class Csv:
         opens = [self.separator.encode(), b"\n", *([quote.encode()] if quote is not None else [])]
         if body.removeprefix(_BOM).startswith((b" ", b"\t")):
             return True
+        blanks = (b" ", b"\t") if b"\t" in body else (b" ",)  # a byte's search is memchr's: a tab is seldom there
         found = pl.lit(pl.Series([body], dtype=pl.Binary))
-        pairs = [found.bin.contains(start + blank) for start in opens for blank in (b" ", b"\t")]
+        pairs = [found.bin.contains(start + blank) for start in opens for blank in blanks]
         return bool(pl.select(pl.any_horizontal(pairs)).item())
 
     def _rows_of(self, text: str, quote: str, width: int) -> int | None:

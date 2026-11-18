@@ -195,13 +195,8 @@ class Engine[RowT: msgspec.Struct]:
             .collect()
         )
         refused = typed.select(
-            (
-                pl.col(f"{column.field}\0b").is_not_null()
-                & (
-                    pl.col(column.field).is_null()
-                    | (_underflowed(column, pl.col(f"{column.field}\0b"), pl.col(column.field)))
-                )
-            ).any()
+            (pl.col(f"{column.field}\0b").is_not_null() & pl.col(column.field).is_null()).any()
+            | _any_underflowed(column, pl.col(f"{column.field}\0b"), pl.col(column.field))
             for column in plain
         ).row(0)
         return {column.field: typed[column.field] for column, bad in zip(plain, refused, strict=True) if not bad}
@@ -263,8 +258,12 @@ class Engine[RowT: msgspec.Struct]:
         if number and self._exact:
             _refuse(text.is_not_null() & (text != text.str.strip_chars()), text, column, what, numbers)
         values = _typed(column._replace(label=_shown(column.label)), text, f"{_shown(column.label)!r} cell", numbers)
-        if number and column.scalar is float:
-            under = pl.select(_underflowed(column, pl.lit(text), pl.lit(values))).to_series()
+        if (
+            number
+            and column.scalar is float
+            and pl.select(_any_underflowed(column, pl.lit(text), pl.lit(values))).item()
+        ):
+            under = (values == 0) & text.str.contains(_DIGIT)
             _refuse(under, text, column, "number a float holds: it underflows to 0.0", numbers)
         return values
 
@@ -433,14 +432,19 @@ _INT_RANGE: typing.Final = (-(2.0**63), 2.0**63)
 _EXACT_INT: typing.Final = 2.0**53
 
 
-def _underflowed(column: Column, text: pl.Expr, value: pl.Expr) -> pl.Expr:
-    """Return where a float *column*'s *value* is 0.0 though its *text*'s digits before any exponent are not all zero.
+#: A number's text whose digits before any exponent are not all zero.
+_DIGIT: typing.Final = r"^[^eE]*[1-9]"
 
-    polars reads ``1e-400``, past a float's least, as ``0.0``: a value the file did not write.
+
+def _any_underflowed(column: Column, text: pl.Expr, value: pl.Expr) -> pl.Expr:
+    """Return whether a float *column*'s *value* is 0.0 where its *text*'s digits before any exponent are not all zero.
+
+    polars reads ``1e-400``, past a float's least, as ``0.0``: a value the file did not write. Only the zeros' text is
+    looked at.
     """
     if column.scalar is not float or column.written is not None or column.flag is not None:
         return pl.lit(value=False)
-    return (value == 0) & text.str.contains(r"^[^eE]*[1-9]")
+    return text.filter(value == 0).str.contains(_DIGIT).any()
 
 
 def _refuse(wrong: pl.Series, text: pl.Series, column: Column, what: str, numbers: int | pl.Series) -> None:
