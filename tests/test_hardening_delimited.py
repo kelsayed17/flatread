@@ -29,7 +29,7 @@ from flatread.delimited import (
     TitledCsv,
     TrailerCsv,
 )
-from flatread.errors import LayoutError, RaggedRowError, ReadError
+from flatread.errors import LayoutError, RaggedRowError, ReadError, UnknownLayoutError
 from flatread.fields import Format, Label, Span
 from flatread.fixed import FixedWidthFile
 from flatread.found import FoundCsv
@@ -207,6 +207,34 @@ class TestAGroupNamingNoField:
             _Maybe(_Volume).rows(b"Symbol,Volume\nA,1\nRows\n")
         with pytest.raises(ReadError, match=r"the title's count None"):
             _Titled(_Volume).rows(b"Issues\nSymbol,Volume\nA,1\n")
+
+
+class TestATitledCsvsHeader:
+    def test_a_blank_line_below_the_titles_is_refused_not_skipped(self) -> None:
+        """A blank line no title names was read past: polars skips blank lines before a header."""
+
+        class _Titled(TitledCsv[_Volume]):
+            _titles = (re.compile(r"Volumes"),)
+
+        assert _Titled(_Volume).rows(b"Volumes\nSymbol,Volume\nA,1\n") == [_Volume("A", 1)]
+        for body in (b"Volumes\n\nSymbol,Volume\nA,1\n", b"Volumes\r\n\r\nSymbol,Volume\r\nA,1\r\n"):
+            with pytest.raises(UnknownLayoutError, match="line 2 is blank, not the header"):
+                _Titled(_Volume).rows(body)
+
+
+class TestABodyCutInsideCrlf:
+    def test_a_crlf_body_ending_in_a_cr_alone_was_cut(self) -> None:
+        """A cut between a CRLF's CR and LF left a line ending that looks whole, and the rows after it unread."""
+        from flatread import next as fr  # noqa: PLC0415 (both readers share the check)
+        from flatread.errors import TruncatedFileError  # noqa: PLC0415
+
+        body = b"Symbol,Volume\r\nA,1\r\nB,2\r"
+        for read in (
+            CsvFile(_Volume, final_line_ending=True).rows,
+            fr.Reader(_Volume, fr.Csv(final_line_ending=True)).rows,
+        ):
+            with pytest.raises(TruncatedFileError, match="between the CR and the LF"):
+                read(body)
 
 
 class TestASwitchLeftUnset:

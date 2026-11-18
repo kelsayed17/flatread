@@ -15,7 +15,7 @@ import polars as pl
 
 from flatread.archives import _INFLATED_MAX, _UNZIP_ERRORS, _Inflating, _unzipped
 from flatread.core import _NUL, _THOUSANDS, _UNIT, Column, _check_above, _check_ending, _decoded, _stacked
-from flatread.delimited import _BOM
+from flatread.delimited import _BOM, _underflows
 from flatread.errors import (
     ControlTotalError,
     CorruptArchiveError,
@@ -28,7 +28,18 @@ from flatread.errors import (
     UnknownLayoutError,
 )
 from flatread.next._headers import _LACKED, _laid_out
-from flatread.next._model import Cells, Grid, HeaderRule, Lines, ReadContext, Records, Source, Stream, Table
+from flatread.next._model import (
+    Cells,
+    Grid,
+    HeaderRule,
+    Lines,
+    ReadContext,
+    Records,
+    Source,
+    Stream,
+    Table,
+    TableFinder,
+)
 
 if typing.TYPE_CHECKING:
     from lxml import etree
@@ -37,13 +48,18 @@ if typing.TYPE_CHECKING:
     from flatread.pdf import PdfLine
 
 __all__ = [
+    "Beside",
     "Csv",
     "Cut",
     "Derived",
     "Found",
+    "Given",
     "Header",
+    "Headerless",
     "Layout",
     "Long",
+    "Noted",
+    "Numbered",
     "Observations",
     "Padded",
     "Pdf",
@@ -209,12 +225,25 @@ class Csv:
     not close its cell as text, and a cell left open at the end runs to it (``csv``'s ``strict`` off), for a file whose
     prose notes misquote (``"ts." Holdings o"``); a cell quoted cleanly still holds its separator. Raises
     ``LayoutError`` when built for a separator or quote that is not one character, ends a line, or is the other.
+
+    *closing* is a separator closing a line, past its last cell: ``"always"``, every line's, the header's too (a line
+    without it raises ``RaggedRowError``, naming it, and so does a quoted cell spanning lines, whose first line ends
+    inside it); ``"sometimes"``, a line's that may write one (a separator just before a line ending is dropped,
+    wherever it stands, so a row whose real last cell is empty is one short and raises). 7.x's ``_closing_separator``.
+
+    A CSV writes each cell exactly (:attr:`exact`): a number padded with whitespace (`` 5``) is refused and a text
+    cell of spaces is that text, unless a :class:`Padded` cleaner strips them. One byte order mark opens the body or
+    none; a second raises ``EncodingError``.
     """
+
+    #: The engine reads its cells as written: no number trimmed, no text of spaces taken for no value.
+    exact: typing.ClassVar[bool] = True
 
     separator: str = ","
     quote: str | None = '"'
     final_line_ending: bool | None = None
     misquoted: bool = False
+    closing: typing.Literal["always", "sometimes"] | None = None
 
     def __post_init__(self) -> None:
         for what, character in (("separator", self.separator), ("quote", self.quote)):
@@ -228,7 +257,7 @@ class Csv:
     def grid(self, stream: Stream, read: ReadContext) -> Lines:
         """Return the file's rows of cells: each line's (a quoted cell may span lines), its raw text and line number."""
         del read
-        body = stream.read()
+        body = self._closed(stream.read())
         text = self._text(body)
         if self.misquoted:
             return self._whole(text, body, parse=False)
@@ -237,6 +266,20 @@ class Csv:
             return parsed
         split = self._spanning(body, text) if parsed == "spans" else self._split(text)
         return self._whole(text, body) if split is None else split
+
+    def _closed(self, body: bytes) -> bytes:
+        """Return *body* without the separator closing its lines (*closing*), refusing a line without one (always)."""
+        if self.closing is None:
+            return body
+        sep = re.escape(self.separator.encode())
+        if self.closing == "always":
+            unclosed = re.search(rb"(?<!" + sep + rb")(?:\r\n|(?<!\r)\n)", body)
+            last = body.rsplit(b"\n", 1)[-1].removesuffix(b"\r")
+            if unclosed is not None or (last and not last.endswith(self.separator.encode())):
+                line = body.count(b"\n", 0, unclosed.start()) + 1 if unclosed is not None else body.count(b"\n") + 1
+                msg = f"line {line} does not end with its closing separator {self.separator!r}"
+                raise RaggedRowError(msg, row=line)
+        return re.sub(sep + rb"(?=\r?\n|\Z)", b"", body)
 
     def _text(self, body: bytes) -> str:
         """Return *body*'s text, or raise for a body empty, cut (by *final_line_ending*) or not UTF-8.
@@ -253,6 +296,10 @@ class Csv:
         except UnicodeDecodeError as e:
             msg = f"the body is not UTF-8: {e}"
             raise EncodingError(msg) from e
+        # polars' parser drops a byte order mark too: a second would leave the first label's text unread.
+        if text.startswith("\ufeff"):
+            msg = "the body opens with two byte order marks: the second, U+FEFF, is the first cell's text"
+            raise EncodingError(msg)
         return text
 
     def typed(  # noqa: PLR0911 (a None for each doubt)
@@ -261,14 +308,18 @@ class Csv:
         """Return the table of a file that is its header of *dtypes*' labels and rows as wide, read typed in one pass.
 
         polars' parser reads each column as its dtype in *dtypes* (``Int64``, ``Float64``, else ``String``), each of
-        *null_values* no value, so the engine has the text columns alone to type. ``None`` where the body may be
-        anything else: another header, a row of another width (counted from its separators outside quoted cells), a
-        quote out of place (as :meth:`_spanning` finds one), a line break polars does not break at, or a cell its
-        parser refuses as its dtype; :meth:`grid`'s reading then reads it, and names what is wrong. A body that is
-        empty, cut, not UTF-8 or opening blank raises as :meth:`grid` raises. Every number polars' parser takes, its
-        cast from text takes as the same value, so the table types as the grid's would; its rows are numbered by
-        place, which only a refusal names, and the engine's refusal of it reads the body again by :meth:`grid`.
+        *null_values* no value, so the engine has the text columns alone to type; where a cell may open with a space
+        or a tab (:meth:`_may_pad`), which the parser would take before a number, every cell is read as text and the
+        numbers cast, as the grid's are. ``None`` where the body
+        may be anything else: another header, a row of another width (counted from its separators outside quoted
+        cells), a quote out of place (as :meth:`_spanning` finds one), a line break polars does not break at, a cell
+        the cast refuses (a number padded with whitespace) or a float that underflows (``1e-400`` as 0.0);
+        :meth:`grid`'s reading then reads it, and names what is wrong. A body that is empty, cut, not UTF-8 or opening
+        blank raises as :meth:`grid` raises. The cast is the grid's, so the table types as the grid's would; its rows
+        are numbered by place, which only a refusal names, and the engine's refusal of it reads the body again by
+        :meth:`grid`.
         """
+        body = self._closed(body)
         text = self._text(body)
         if len(self.separator.encode()) != 1 or not _breaks_as_polars(text):
             return None
@@ -282,7 +333,14 @@ class Csv:
             return None
         if _unique(header) != labels:
             return None
-        schema = {label: dtype if dtype in (pl.Int64, pl.Float64) else pl.String for label, dtype in dtypes.items()}
+        # polars' parser takes a number after spaces or a tab (`` 5``), which its cast refuses, as the grid's reading
+        # does: a body where a cell may open so has every cell read as text, its numbers then cast.
+        # A quoted body's row check refuses a cell opening so (:meth:`_rows_of`); an unquoted one is searched for one.
+        padded = quote is None and self._may_pad(body)
+        schema = {
+            label: dtype if dtype in (pl.Int64, pl.Float64) and not padded else pl.String
+            for label, dtype in dtypes.items()
+        }
 
         def parsed() -> pl.DataFrame | None:
             try:
@@ -317,8 +375,30 @@ class Csv:
             )
         if frame is None or frame.height != breaks - 1:
             return None
+        # A cell its cast refuses (padded, empty but quoted) or a float that underflows (``1e-400`` as 0.0): the
+        # grid's reading names it.
+        numbers = {label: dtype for label, dtype in dtypes.items() if dtype in (pl.Int64, pl.Float64)}
+        if numbers and padded:
+            cast = frame.with_columns(pl.col(label).cast(dtype, strict=False) for label, dtype in numbers.items())
+            if any(cast[label].null_count() != frame[label].null_count() for label in numbers):
+                return None
+            frame = cast
+        if numbers and _underflows(body, frame, numbers):
+            return None
         frame = frame.with_columns(pl.col(pl.String).replace("", None))
         return Table(frame, pl.int_range(2, frame.height + 2, eager=True).alias("number"))
+
+    def _may_pad(self, body: bytes) -> bool:
+        """Return whether a cell of unquoted *body* may open with a space or a tab: after a separator or a line break.
+
+        A few substring searches in polars, over the body's bytes.
+        """
+        if body.removeprefix(_BOM).startswith((b" ", b"\t")):
+            return True
+        blanks = (b" ", b"\t") if b"\t" in body else (b" ",)  # a byte's search is memchr's: a tab is seldom there
+        found = pl.lit(pl.Series([body], dtype=pl.Binary))
+        pairs = [found.bin.contains(start + blank) for start in (self.separator.encode(), b"\n") for blank in blanks]
+        return bool(pl.select(pl.any_horizontal(pairs)).item())
 
     def _rows_of(self, text: str, quote: str, width: int) -> int | None:
         """Return how many rows *text* holds, where each is *width* cells quoted whole or holding no quote, or ``None``.
@@ -327,10 +407,12 @@ class Csv:
         any other cell holds none of them. One fullmatch of polars' regex engine, so a quote out of place, a row of
         another width or a quoted cell that does not close is ``None``, as :meth:`_spanning` finds each; so is a width
         whose pattern is past the engine's size, which the grid's reading reads. The rows are counted as the text's
-        line breaks, those inside its quoted cells too, and one more where its last line has none.
+        line breaks, those inside its quoted cells too, and one more where its last line has none. A cell opening with
+        a space or a tab, quoted or not, is ``None`` too: polars' parser would take a number after one, which the
+        grid's reading refuses.
         """
         q, sep = re.escape(quote), re.escape(self.separator)
-        cell = f"(?:{q}[^{q}]*(?:{q}{q}[^{q}]*)*{q}|[^{sep}\r\n{q}]*)"
+        cell = f"(?:{q}(?:[^{q} \t][^{q}]*)?(?:{q}{q}[^{q}]*)*{q}|(?:[^{sep}\r\n{q} \t][^{sep}\r\n{q}]*)?)"
         row = f"{cell}(?:{sep}{cell}){{{width - 1}}}"
         whole = pl.col("text")
         try:
@@ -545,7 +627,12 @@ class Sheet:
     :class:`Titled` title matches.
     """
 
+    #: A sheet stores date cells, so a date-and-time or time field may name no ``Format``: it reads them alone.
+    moments: typing.ClassVar[bool] = True
     sheet: str | None = None
+    #: Whether the sheet writes numbers as text too (``' 1.03'`` beside ``0.60``): a number field's text cell is then
+    #: read as its text's number, strictly (7.x's ``TextNumbersSheet``; with ``cells=[Padded()]``, its ``PaddedSheet``).
+    text_numbers: bool = False
 
     def typed(self, body: bytes, dtypes: Mapping[str, type[pl.DataType]], null_values: Sequence[str]) -> Table | None:  # noqa: PLR0911 (a None for each doubt)
         """Return the table of a sheet that is its header of *dtypes*' labels and full rows, read typed in one load.
@@ -1054,26 +1141,36 @@ class Header:
 
     A line's row is as wide as the header; a sheet's header runs to its last filled cell, and a row of the sheet must
     hold no cell right of it and some cell under it. The header is the struct's labels in order, unless a *header*
-    rule reads it (:class:`Headers`, :class:`Named`), as it does under every finder.
+    rule reads it (:class:`Headers`, :class:`Named`), as it does under every finder. A *header_row* past the first
+    (from 1) drops the rows above it unread (a title, a source): the grid's table starts there.
     """
 
+    header_row: int = 1
     stated: frozenset[str] = frozenset()
     vouches: bool = False
     header: HeaderRule | None = None
 
+    def __post_init__(self) -> None:
+        if self.header_row < 1:
+            msg = f"the header row {self.header_row} is no row of a grid, whose rows count from 1"
+            raise LayoutError(msg)
+
     def find(self, grid: Grid, read: ReadContext) -> Table:
-        """Return the grid's table."""
-        return _matched(_header_table(grid), self.header, read)
+        """Return the grid's table, from its header row down."""
+        if 1 < self.header_row > grid.height:
+            msg = f"the body has {grid.height} rows, and its header is row {self.header_row}"
+            raise UnknownLayoutError(msg)
+        return _matched(_header_table(grid.slice(self.header_row - 1)), self.header, read)
 
 
 @dataclasses.dataclass(frozen=True)
 class Preamble:
     """A table below a preamble of any length (a title, a source, notes, blank rows): its header found, not placed.
 
-    The header is the first row whose first cell is *label*, by default the struct's first column's; the rows above it
-    are dropped unread, and the table below it read as :class:`Header` reads one. A grid with no such row raises
-    ``UnknownLayoutError``. One stage for a CSV's and a sheet's (``PreambleCsv``, ``PreambleSheet``); a preamble whose
-    every row is known is a :class:`Titled`'s.
+    The header is the first row whose first cell is *label*, by default the first column's no stage states; the rows
+    above it are dropped unread, and the table below it read as :class:`Header` reads one. A grid with no such row
+    raises ``UnknownLayoutError``. One stage for a CSV's and a sheet's (``PreambleCsv``, ``PreambleSheet``); a preamble
+    whose every row is known is a :class:`Titled`'s.
     """
 
     label: str | None = None
@@ -1083,7 +1180,8 @@ class Preamble:
 
     def find(self, grid: Grid, read: ReadContext) -> Table:
         """Return the table under the first row opening with the header's first label."""
-        label = self.label if self.label is not None else next(iter(read.columns.values())).label
+        read_columns = [column for column in read.columns.values() if column.field not in read.stated]
+        label = self.label if self.label is not None else read_columns[0].label
         first = (grid.cells if isinstance(grid, Lines) else grid.text).get_column("0", default=None)
         found = None if first is None else (first == label).fill_null(value=False).arg_true()
         if found is None or not found.len():
@@ -1123,6 +1221,211 @@ class Trailer:
             msg = f"the trailer counts {match['count']} rows, and the body holds {table.cells.height}"
             raise ControlTotalError(msg)
         return table
+
+
+@dataclasses.dataclass(frozen=True)
+class Noted:
+    """A table with notes under it (a ``Source:`` line, a ``Notes:`` heading, disclosures), the notes dropped.
+
+    Its header is row *header_row* (from 1), and its rows run to the first row holding nothing past its first column
+    (*ends* ``"bare"``, NotedSheet's), or to the first whose first cell is no date cell (``"undated"``, a sheet's dated
+    rows, DatedSheet's: a row of empty values is still a row). Below it only the first column holds anything, the
+    notes; a cell past it there is a row the table lost, and raises, naming its row. The table is read as
+    :class:`Header` reads one, a *header* rule reading its header.
+    """
+
+    header_row: int = 1
+    ends: typing.Literal["bare", "undated"] = "bare"
+    stated: frozenset[str] = frozenset()
+    vouches: bool = False
+    header: HeaderRule | None = None
+
+    def __post_init__(self) -> None:
+        if self.header_row < 1:
+            msg = f"the header row {self.header_row} is no row of a grid, whose rows count from 1"
+            raise LayoutError(msg)
+        if self.ends not in ("bare", "undated"):
+            msg = f"a noted table ends at a bare row or an undated one, not {self.ends!r}"
+            raise LayoutError(msg)
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table above the notes, refusing a cell past the first column among them."""
+        if grid.height < self.header_row:
+            msg = f"the body has {grid.height} rows, and its header is row {self.header_row}"
+            raise UnknownLayoutError(msg)
+        below = grid.slice(self.header_row)
+        text = below.cells if isinstance(below, Lines) else below.text
+        ended = self._ended(below, text)
+        end = int(ended.arg_true()[0]) if ended.any() else below.height
+        notes = text.slice(end)
+        rest = notes.columns[1:]
+        if rest and (held := notes.select(pl.any_horizontal(pl.col(rest).str.strip_chars() != "")).to_series()).any():
+            row = int(below.numbers[end + int(held.arg_true()[0])])
+            ends = int(below.numbers[end])
+            msg = f"row {row} holds a cell past its first column under the table, ending at row {ends}: notes go there"
+            raise ReadError(msg, row=row)
+        return _matched(_header_table(grid.slice(self.header_row - 1, self.header_row + end)), self.header, read)
+
+    def _ended(self, below: Grid, text: pl.DataFrame) -> pl.Series:
+        """Return, for each row below the header, whether it is past the table's end."""
+        if self.ends == "undated":
+            if isinstance(below, Lines) or below.kinds is None:
+                msg = "a table of dated rows is a sheet's, whose cells say which are dates"
+                raise LayoutError(msg)
+            lead: pl.Series = below.kinds.get_column("0")
+            return lead.ne_missing("moment")
+        rest = [pl.col(name).is_null() | (pl.col(name).str.strip_chars() == "") for name in text.columns[1:]]
+        if not rest:
+            return pl.repeat(value=True, n=below.height, eager=True)
+        return text.select(pl.all_horizontal(rest)).to_series()
+
+
+@dataclasses.dataclass(frozen=True)
+class Headerless:
+    """A file of rows alone, no header: each row's cells are *fields*' columns, in order, every row as wide.
+
+    *fields* are the row struct's fields the cells hold; ``None`` takes every field no stage states, in the struct's
+    order. A line of another width raises ``RaggedRowError``, naming its row; a sheet's row may hold no cell right of
+    the table's last column, and its columns are the sheet's first.
+    """
+
+    fields: Sequence[str] | None = None
+    stated: frozenset[str] = frozenset()
+    vouches: bool = False
+
+    def __post_init__(self) -> None:
+        if self.fields is not None:
+            if not self.fields or len(set(self.fields)) != len(self.fields):
+                msg = f"a headerless file's cells are distinct fields, not {list(self.fields)!r}"
+                raise LayoutError(msg)
+            object.__setattr__(self, "fields", tuple(self.fields))
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return every row of the grid as a row, its cells under the fields' labels."""
+        fields = self.fields
+        if fields is None:
+            fields = [field for field in read.columns if field not in read.stated]
+        if stray := [field for field in fields if field not in read.columns]:
+            msg = f"the fields {stray} are no fields of the row"
+            raise LayoutError(msg)
+        labels = [read.columns[field].label for field in fields]
+        width = len(labels)
+        if isinstance(grid, Lines):
+            if (wrong := (grid.widths != width).arg_true()).len():
+                at = int(wrong[0])
+                msg = f"row {grid.numbers[at]} has {grid.widths[at]} fields, not the file's {width}"
+                raise RaggedRowError(msg, row=int(grid.numbers[at]))
+            cells = grid.cells.select(grid.cells.columns[:width])
+            return Table(cells.rename(dict(zip(cells.columns, labels, strict=True))), grid.numbers)
+        past = grid.text.columns[width:]
+        if past and (held := grid.text.select(pl.any_horizontal(pl.col(past).is_not_null())).to_series()).any():
+            row = int(grid.numbers[int(held.arg_true()[0])])
+            msg = f"row {row} holds a cell right of the table's last column, column {width}"
+            raise RaggedRowError(msg, row=row)
+        if grid.text.width < width:  # a sheet whose last columns hold nothing: fastexcel loads none of them
+            filler = [str(at) for at in range(grid.text.width, width)]
+
+            def widened(frame: pl.DataFrame | None, dtype: pl.DataType | type[pl.DataType]) -> pl.DataFrame | None:
+                return None if frame is None else frame.with_columns(pl.lit(None, dtype).alias(n) for n in filler)
+
+            text, kinds, floats, moments = (
+                widened(frame, dtype)
+                for frame, dtype in zip((grid.text, grid.kinds, grid.floats, grid.moments), _LACKED, strict=True)
+            )
+            text = typing.cast("pl.DataFrame", text)
+            grid = dataclasses.replace(grid, text=text, kinds=kinds, floats=floats, moments=moments)
+        return _named(grid, [str(at) for at in range(width)], labels)
+
+
+@dataclasses.dataclass(frozen=True)
+class Given:
+    """Fields the reader knows for every row of the file it reads (the table a file is of), stated, never read.
+
+    *values* are each field's text, typed as the field; *table* finds the table, whose header lacks them.
+    """
+
+    values: Mapping[str, str | None]
+    table: TableFinder = dataclasses.field(default_factory=Header)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "values", dict(self.values))
+
+    @property
+    def stated(self) -> frozenset[str]:
+        """The given fields, and those the table's own finder states."""
+        return self.table.stated | self.values.keys()
+
+    @property
+    def vouches(self) -> bool:
+        """Whether the table's own finder vouches for a table of no rows."""
+        return self.table.vouches
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table its finder finds, the given fields stated."""
+        if stray := self.values.keys() - read.columns.keys():
+            msg = f"the given fields {sorted(stray)} are no fields of the row"
+            raise LayoutError(msg)
+        read.stated.update(self.values)
+        return self.table.find(grid, read)
+
+
+@dataclasses.dataclass(frozen=True)
+class Beside:
+    """A sheet's table with more beside it (a second list, a note, a work column): only the table's columns are read.
+
+    They are the sheet's first columns (``A`` on), one for each of the struct's fields *table* does not state, unless
+    *at* names them: the table's own columns, from 0 (``A`` is 0), in its fields' order, so a table may start right of
+    others or skip a spacer. Every other column is dropped before *table* (:class:`Header` by default, or
+    :class:`Noted` for a table with notes under it) finds the table in what is left. A grid narrower than its table's
+    columns raises ``UnknownLayoutError``.
+    """
+
+    at: Sequence[int] | None = None
+    table: TableFinder = dataclasses.field(default_factory=Header)
+
+    def __post_init__(self) -> None:
+        if self.at is not None:
+            if not self.at or any(place < 0 for place in self.at) or len(set(self.at)) != len(self.at):
+                msg = f"a table's columns are distinct places from 0, not {list(self.at)!r}"
+                raise LayoutError(msg)
+            object.__setattr__(self, "at", tuple(self.at))
+
+    @property
+    def stated(self) -> frozenset[str]:
+        """The fields the table's own finder states."""
+        return self.table.stated
+
+    @property
+    def vouches(self) -> bool:
+        """Whether the table's own finder vouches for a table of no rows."""
+        return self.table.vouches
+
+    def find(self, grid: Grid, read: ReadContext) -> Table:
+        """Return the table found in the grid's table columns alone."""
+        if isinstance(grid, Lines):
+            msg = "a table beside others is a sheet's, whose columns stand apart"
+            raise LayoutError(msg)
+        places = list(range(len(read.columns.keys() - self.stated)) if self.at is None else self.at)
+        if wanting := [place for place in places if place >= grid.text.width]:
+            msg = f"the sheet has {grid.text.width} columns, and the table's column {wanting[0]} is not one of them"
+            raise UnknownLayoutError(msg)
+        kept = [str(place) for place in places]
+        names = {name: str(at) for at, name in enumerate(kept)}
+
+        def cut(frame: pl.DataFrame | None) -> pl.DataFrame | None:
+            return None if frame is None else frame.select(kept).rename(names)
+
+        text = typing.cast("pl.DataFrame", cut(grid.text))
+        raw = text.select(pl.concat_str(pl.all().fill_null(""), separator="\t").str.strip_chars_end("\t")).to_series()
+        cells = dataclasses.replace(
+            grid,
+            text=text,
+            raw=raw.alias("raw"),
+            kinds=cut(grid.kinds),
+            floats=cut(grid.floats),
+            moments=cut(grid.moments),
+        )
+        return self.table.find(cells, read)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1499,6 +1802,43 @@ def _laid_empty(read: ReadContext) -> Table:
 # --- Shapes ---
 
 
+@dataclasses.dataclass(frozen=True)
+class Numbered:
+    """A field no cell holds, each row's place in the table (from *start*), set beside the table's own columns.
+
+    The column takes the field's place among the struct's columns, so the table's columns stay in the struct's order.
+    """
+
+    field: str
+    start: int = 1
+
+    def shape(self, table: Table, columns: Sequence[Column], read: ReadContext) -> Table:
+        """Return *table* with the field's column of row places."""
+        labels = [column.label for column in columns if column.field not in read.stated]
+        named = [column for column in columns if column.field == self.field]
+        if not named:
+            msg = f"the numbered field {self.field!r} is no field of the row"
+            raise LayoutError(msg)
+        label = named[0].label
+        if label in table.cells.columns:
+            msg = f"the numbered field {self.field!r} is a column of the table too: {label!r}"
+            raise LayoutError(msg)
+        height = table.cells.height
+        places = pl.int_range(self.start, self.start + height, dtype=pl.Int64, eager=True)
+        given = (
+            places.cast(pl.String),
+            pl.repeat("number", height, dtype=pl.String, eager=True),
+            places.cast(pl.Float64),
+            pl.repeat(None, height, dtype=pl.Datetime("us"), eager=True),
+        )
+        order = [name for name in labels if name in {*table.cells.columns, label}]
+        frames = [
+            None if frame is None else frame.with_columns(column.alias(label)).select(order)
+            for frame, column in zip(table.frames(), given, strict=True)
+        ]
+        return table.with_frames(frames, table.numbers)
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Long:
     """A wide table read long: a row per cell under a key's header, the struct's last fields its keys and value.
@@ -1512,7 +1852,8 @@ class Long:
     with no text heads a spacer, a column holding nothing, where *spacers* is set; no two headings give one key, and
     none is written twice, unless *repeats*: then a key field no group names is its heading's place among the keys,
     from 1. An empty value cell is a row whose value is ``None`` (*empty_cells* ``"keep"``), or no row (``"drop"``).
-    Rows come record by record, a record's keys in header order; a table of a header and no rows is refused where
+    Rows come record by record, a record's keys in header order, or key by key (*by_key*: a series' rows together,
+    in the table's order); a table of a header and no rows is refused where
     *needs_rows* is set, though the reader takes a table of none (one of rows with no value is still an answer). A
     sheet's cells keep their kinds.
     """
@@ -1526,6 +1867,7 @@ class Long:
     beside: Collection[str] = ()
     repeats: bool = False
     needs_rows: bool = False
+    by_key: bool = False
 
     def __post_init__(self) -> None:
         if self.key_count < 1:
@@ -1671,8 +2013,9 @@ class Long:
                     index=["_row", *index], on=list(keyed), variable_name="_key", value_name=value.label
                 )
                 # unpivot writes key by key; row r's key j is at j * height + r, so rows come record by record.
-                height, at = frame.height, pl.int_range(frame.height * len(keyed))
-                cells = cells.select(pl.all().gather((at % len(keyed)) * height + at // len(keyed)))
+                if not self.by_key:
+                    height, at = frame.height, pl.int_range(frame.height * len(keyed))
+                    cells = cells.select(pl.all().gather((at % len(keyed)) * height + at // len(keyed)))
             out = [
                 pl.col(by_label[column.label]).alias(column.label)
                 if column.label in by_label

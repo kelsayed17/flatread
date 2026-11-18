@@ -417,6 +417,237 @@ def test_a_sheet_s_moment_cell_is_its_value_and_its_text_is_read_by_its_format()
     ]
 
 
+def test_a_sheet_s_moment_field_of_no_format_reads_its_moment_cells_alone() -> None:
+    class Stamp(msgspec.Struct, frozen=True):
+        at: dt.datetime
+        until: dt.time | None
+
+    reader = fr.Reader(Stamp, fr.Sheet())
+    body = workbook({"S": [["at", "until"], [dt.date(2026, 1, 2), dt.time(16)], [dt.date(2026, 1, 3), None]]})
+    assert reader.rows(body) == [Stamp(dt.datetime(2026, 1, 2), dt.time(16)), Stamp(dt.datetime(2026, 1, 3), None)]
+    with pytest.raises(ReadError, match="'at' cell '2026-01-03 09:30' is not a date cell: its field names no Format"):
+        reader.frame(workbook({"S": [["at", "until"], ["2026-01-03 09:30", None]]}))
+
+    class Keyed(msgspec.Struct, frozen=True):
+        until: dt.time
+        at: dt.datetime
+        value: float
+
+    long = fr.Reader(Keyed, fr.Sheet(), shape=fr.Long(keys=re.compile(".+")))
+    with pytest.raises(ReadError, match="no Format"):  # a long table's key is its header's text
+        long.frame(workbook({"S": [["until", "2026-01-02"], [dt.time(16), 1.5]]}))
+
+
+def test_a_sheet_s_number_cell_under_a_formatted_date_is_its_digits_in_that_format() -> None:
+    class Expiry(msgspec.Struct, frozen=True):
+        month: Annotated[dt.date, Format("%Y%m")]
+
+    reader = fr.Reader(Expiry, fr.Sheet())
+    assert reader.rows(workbook({"S": [["month"], [198803], ["198804"]]})) == [
+        Expiry(dt.date(1988, 3, 1)),
+        Expiry(dt.date(1988, 4, 1)),
+    ]
+    with pytest.raises(ReadError, match=r"'month' cell '1988\.5'"):
+        reader.frame(workbook({"S": [["month"], [1988.5]]}))
+    with pytest.raises(ReadError, match="'month' cell 'true' is not a date cell or text"):
+        reader.frame(workbook({"S": [["month"], [True]]}))
+
+
+def test_a_sheet_s_number_cell_that_is_a_word_for_none_holds_none() -> None:
+    class Surprise(msgspec.Struct, frozen=True):
+        mps: float | None
+
+    xlsx = workbook({"S": [["mps"], [0.5], [float("nan")]]})  # a number cell, its text NaN
+    assert fr.Reader(Surprise, fr.Sheet(), null_values=["NaN"]).rows(xlsx) == [Surprise(0.5), Surprise(None)]
+
+
+class _Charted(msgspec.Struct, frozen=True):
+    month: str
+    rate: float | None
+    count: int | None
+
+
+@pytest.mark.parametrize(
+    ("cell", "words"),
+    [
+        ("1e3", "'rate' cell '1e3' is not a number"),
+        ("nan", "'rate' cell 'nan' is not a number"),
+        ("+5", "'rate' cell '\\+5' is not a number"),
+        (True, "'rate' cell 'true' is not a number cell"),
+    ],
+)
+def test_a_sheet_of_text_numbers_reads_a_text_cell_as_its_number_strictly(cell: Cell, words: str) -> None:
+    reader = fr.Reader(_Charted, fr.Sheet(text_numbers=True), cells=[fr.Padded()], null_values=["NA"])
+    body = workbook(
+        {
+            "S": [
+                ["month", "rate", "count"],
+                [" 1988m1", " 1.03", "9007199254740993"],
+                ["1988m2", 0.6, 7],
+                ["1988m3", "  NA", None],
+            ]
+        }
+    )
+    assert reader.rows(body) == [
+        _Charted("1988m1", 1.03, 9007199254740993),
+        _Charted("1988m2", 0.6, 7),
+        _Charted("1988m3", None, None),
+    ]
+    with pytest.raises(ReadError, match=f"{words}: row 2"):
+        reader.frame(workbook({"S": [["month", "rate", "count"], ["1988m1", cell, 1]]}))
+    with pytest.raises(ReadError, match=r"'count' cell '1\.5' is not a whole number: row 2"):
+        reader.frame(workbook({"S": [["month", "rate", "count"], ["1988m1", 1.0, "1.5"]]}))
+    with pytest.raises(ReadError, match=r"'rate' cell '1\.03' is not a number cell: row 2"):  # not without text_numbers
+        fr.Reader(_Charted, fr.Sheet()).frame(workbook({"S": [["month", "rate", "count"], ["1988m1", "1.03", 1]]}))
+
+
+class _Erratum(msgspec.Struct, frozen=True):
+    week: dt.date
+    series: str
+    value: float
+
+
+def test_a_noted_table_ends_at_its_notes_and_refuses_a_row_among_them() -> None:
+    reader = fr.Reader(_Erratum, fr.Sheet(), table=fr.Noted(header_row=3))
+    rows = [["Appendix E"], ["As of 2026-11-18"], ["week", "series", "value"], [dt.date(2026, 1, 2), "WCESTUS1", 1.5]]
+    notes = [[None], ["Source: EIA"], ["Notes:"]]
+    assert reader.rows(workbook({"S": [*rows, *notes]})) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+    lost = workbook({"S": [*rows, *notes, [dt.date(2026, 1, 9), "WCESTUS1", 2.5]]})
+    with pytest.raises(ReadError, match="row 8 holds a cell past its first column under the table, ending at row 5"):
+        reader.frame(lost)
+    csv = b"week,series,value\n2026-01-02,WCESTUS1,1.5\n\nSource: EIA\n"
+    assert fr.Reader(_Erratum, fr.Csv(), table=fr.Noted()).rows(csv) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+
+
+def test_a_noted_table_s_header_is_a_row_of_the_grid() -> None:
+    blank: typing.Any = "blank"
+    with pytest.raises(LayoutError, match="the header row 0 is no row"):
+        fr.Noted(header_row=0)
+    with pytest.raises(LayoutError, match="a bare row or an undated one"):
+        fr.Noted(ends=blank)
+    with pytest.raises(UnknownLayoutError, match="the body has 2 rows, and its header is row 3"):
+        fr.Reader(_Erratum, fr.Csv(), table=fr.Noted(header_row=3)).frame(b"a\nb\n")
+
+    class Single(msgspec.Struct, frozen=True):
+        name: str
+
+    with pytest.raises(ReadError):  # a row of one column holds nothing past it: every row is a note
+        fr.Reader(Single, fr.Csv(), table=fr.Noted()).frame(b"name\na\n")
+
+
+def test_a_dated_table_runs_while_its_first_cell_is_a_date_cell() -> None:
+    class Level(msgspec.Struct, frozen=True):
+        day: dt.date
+        level: float | None
+
+    reader = fr.Reader(Level, fr.Sheet(), table=fr.Noted(ends="undated"))
+    body = workbook({"S": [["day", "level"], [dt.date(2026, 1, 2), 1.0], [dt.date(2026, 1, 3), None], ["Source: Fed"]]})
+    assert reader.rows(body) == [Level(dt.date(2026, 1, 2), 1.0), Level(dt.date(2026, 1, 3), None)]
+    with pytest.raises(ReadError, match="row 3 holds a cell past its first column under the table, ending at row 3"):
+        reader.frame(workbook({"S": [["day", "level"], [dt.date(2026, 1, 2), 1.0], ["2026-01-03", 2.0]]}))
+    with pytest.raises(LayoutError, match="a sheet's"):
+        fr.Reader(Level, fr.Csv(), table=fr.Noted(ends="undated")).frame(b"day,level\n2026-01-02,1\n")
+
+
+def test_a_table_beside_others_reads_its_own_columns_alone() -> None:
+    reader = fr.Reader(_Erratum, fr.Sheet(), table=fr.Beside())
+    rows = [["week", "series", "value", None, "Notes"], [dt.date(2026, 1, 2), "WCESTUS1", 1.5, None, True]]
+    assert reader.rows(workbook({"S": rows})) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+    with pytest.raises(ReadError, match="row 3 is empty"):  # a cell beside a table is no row of it
+        reader.frame(workbook({"S": [*rows, [None, None, None, None, "Revised"]]}))
+    placed = fr.Reader(_Erratum, fr.Sheet(), table=fr.Beside(at=[1, 3, 4]))
+    shifted = [["key", "week", None, "series", "value"], [7, dt.date(2026, 1, 2), "x", "WCESTUS1", 1.5]]
+    assert placed.rows(workbook({"S": shifted})) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+    noted = fr.Reader(_Erratum, fr.Sheet(), table=fr.Beside(table=fr.Noted()))
+    body = workbook({"S": [*rows, ["Source: EIA", None, None, None, "more"]]})
+    assert noted.rows(body) == [_Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)]
+    titled = fr.Reader(_Erratum, fr.Sheet(), table=fr.Beside(table=fr.Header(header_row=2)))
+    assert titled.rows(workbook({"S": [["Weekly", None, None, None, "x"], *rows]})) == [
+        _Erratum(dt.date(2026, 1, 2), "WCESTUS1", 1.5)
+    ]
+    with pytest.raises(UnknownLayoutError, match="the body has 1 rows, and its header is row 2"):
+        titled.frame(workbook({"S": [["Weekly", None, "x"]]}))
+    with pytest.raises(UnknownLayoutError, match="the sheet has 3 columns, and the table's column 3"):
+        placed.frame(workbook({"S": [["key", "week", "series"]]}))
+    with pytest.raises(LayoutError, match="a sheet's"):
+        fr.Reader(_Erratum, fr.Csv(), table=fr.Beside()).frame(b"week,series,value\n")
+
+
+@pytest.mark.parametrize("at", [[], [-1], [0, 0]])
+def test_a_table_s_columns_are_distinct_places(at: list[int]) -> None:
+    with pytest.raises(LayoutError, match="distinct places from 0"):
+        fr.Beside(at=at)
+    with pytest.raises(LayoutError, match="the header row 0 is no row"):
+        fr.Header(header_row=0)
+
+
+class _Described(msgspec.Struct, frozen=True, gc=False):
+    table: str
+    column: int
+    series: str
+    unit: str
+
+
+_DESCRIBED = fr.Reader(
+    _Described,
+    fr.Csv(separator="\t", quote=None),
+    table=fr.Given({"table": "F101"}, table=fr.Headerless(fields=["series", "unit"])),
+    shape=fr.Numbered("column"),
+)
+
+
+def test_a_headerless_file_s_rows_are_its_fields_given_and_numbered() -> None:
+    described = [_Described("F101", 1, "FL1", "usd"), _Described("F101", 2, "FL2", "pct")]
+    assert _DESCRIBED.rows(b"FL1\tusd\nFL2\tpct\n") == described
+    with pytest.raises(RaggedRowError, match="row 2 has 3 fields, not the file's 2"):
+        _DESCRIBED.frame(b"FL1\tusd\nFL2\tpct\tx\n")
+    sheet = fr.Reader(_Described, fr.Sheet(), table=_DESCRIBED.table, shape=fr.Numbered("column"))
+    assert sheet.rows(workbook({"S": [["FL1", "usd"], ["FL2", "pct"]]})) == described
+    with pytest.raises(ReadError, match="the \\['unit'\\] columns have an empty cell"):
+        sheet.frame(workbook({"S": [["FL1", "usd"], ["FL2"]]}))
+    with pytest.raises(RaggedRowError, match="row 2 holds a cell right of the table's last column"):
+        sheet.frame(workbook({"S": [["FL1", "usd"], ["FL2", "pct", "x"]]}))
+
+
+class _GivenAt(msgspec.Struct, frozen=True, gc=False):
+    at: dt.datetime | None
+    series: str
+    unit: str | None
+
+
+def test_a_headerless_sheet_s_columns_are_its_fields_no_stage_states() -> None:
+    given = fr.Given({"at": None}, table=fr.Headerless())
+    assert given.stated == frozenset({"at"})
+    reader = fr.Reader(_GivenAt, fr.Sheet(), table=given)
+    rows = [_GivenAt(None, "FL1", None), _GivenAt(None, "FL2", None)]
+    assert reader.rows(workbook({"S": [["FL1"], ["FL2"]]})) == rows
+    with pytest.raises(LayoutError, match="is a column of the table too"):
+        fr.Reader(_Described, fr.Csv(), shape=fr.Numbered("column")).frame(b"table,column,series,unit\nF,1,FL1,usd\n")
+
+
+def test_a_csv_header_opening_with_a_space_is_refused() -> None:
+    class Named(msgspec.Struct, frozen=True):
+        name: str
+        n: int
+
+    with pytest.raises(ReadError):
+        fr.Reader(Named, fr.Csv()).frame(b" name,n\na,1\n")
+
+
+@pytest.mark.parametrize(
+    ("build", "message"),
+    [
+        (lambda: fr.Headerless(fields=[]), "distinct fields"),
+        (lambda: fr.Reader(_Described, fr.Csv(), table=fr.Headerless(fields=["nope"])).frame(b"a\n"), "no fields"),
+        (lambda: fr.Reader(_Described, fr.Csv(), table=fr.Given({"nope": "x"})).frame(b"a\n"), "given fields"),
+        (lambda: fr.Reader(_Described, fr.Csv(), shape=fr.Numbered("nope")).frame(b"table,column\n"), "no field"),
+    ],
+)
+def test_a_headerless_given_or_numbered_field_is_the_row_s(build: typing.Callable[[], object], message: str) -> None:
+    with pytest.raises(LayoutError, match=message):
+        build()
+
+
 def test_a_sheet_s_header_runs_to_its_last_filled_cell() -> None:
     with pytest.raises(EmptyBodyError):
         _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"]]}))
@@ -904,7 +1135,7 @@ def test_an_xls_sheet_is_read_by_its_grid_where_its_one_load_finds_another_heade
 
 def test_a_csv_s_rows_too_wide_for_one_pattern_are_left_to_the_grid() -> None:
     """A width whose row pattern is past the regex engine's size is the grid's to read: no count, and no error."""
-    for width, rows in ((1_000, 1), (3_000, None)):
+    for width, rows in ((700, 1), (1_000, None)):
         assert fr.Csv()._rows_of('"x"' + ",x" * (width - 1) + "\n", '"', width) == rows
 
 
@@ -1293,7 +1524,6 @@ class TestCut:
             ("header", b"Name,N\na,1,\n"),
             ("header", b"Name,N,\na,1\n"),
             ("header", b"Name,N\na\n"),
-            ("header", b"Name,N\n  ,  \na, 2\n"),
             ("header_row", b"Title\n\nName,N\na,1\n"),
             ("blank ended", b"Name,N\na,1\n\nNotes,here\n"),
             ("blank ended", b"Name,N\na,1\n,,\nx,2\n"),
@@ -1305,6 +1535,13 @@ class TestCut:
     def test_a_csv_grid_is_cut_as_7x_cuts_it(self, piece: str, body: bytes) -> None:
         old, cut = self._pieces()[piece]
         assert fr.Reader(self.Count, fr.Csv(), table=cut).rows(body) == old.rows(body)  # ty: ignore[unresolved-attribute] (a 7.x reader)
+
+    def test_a_csv_grid_is_exact_and_padded_cells_read_as_7x_csv_text_with_padded(self) -> None:
+        body = b"Name,N\n  ,  \na, 2\n"
+        old, cut = self._pieces()["header"]
+        with pytest.raises(ReadError, match="' 2' is not a whole number: row 3"):
+            fr.Reader(self.Count, fr.Csv(), table=cut).rows(body)
+        assert fr.Reader(self.Count, fr.Csv(), table=cut, cells=[fr.Padded()]).rows(body) == old.rows(body)  # ty: ignore[unresolved-attribute] (a 7.x reader)
 
     def test_a_sheet_grid_is_cut_as_sheet_text_cuts_it_its_cells_kinds_kept(self) -> None:
         from flatread.sheets import SheetText  # noqa: PLC0415 (the 7.x reader it replaces)
@@ -1521,6 +1758,15 @@ class TestLong:
         long = fr.Long(keys=re.compile(r"(?P<year>\d{4})"), key_count=2, repeats=True)
         rows = fr.Reader(self.Placed, fr.Csv(), shape=long).rows(b"Name,2001,2001\na,1,2\n")
         assert rows == [self.Placed("a", 2001, 1, 1.0), self.Placed("a", 2001, 2, 2.0)]
+
+    def test_a_long_table_read_by_key_holds_a_key_s_rows_together(self) -> None:
+        long = fr.Long(keys=re.compile(r"(?P<year>\d{4})"), key_count=2, repeats=True, by_key=True)
+        rows = fr.Reader(self.Placed, fr.Csv(), shape=long).rows(b"Name,2001,2002\na,1,2\nb,3,4\n")
+        assert [(row.name, row.year) for row in rows] == [("a", 2001), ("b", 2001), ("a", 2002), ("b", 2002)]
+
+    def test_a_preamble_s_header_opens_with_the_first_column_no_stage_states(self) -> None:
+        reader = fr.Reader(_Described, fr.Csv(), table=fr.Given({"table": "F101"}, table=fr.Preamble()))
+        assert reader.rows(b"Title\ncolumn,series,unit\n1,FL1,usd\n") == [_Described("F101", 1, "FL1", "usd")]
 
     @pytest.mark.parametrize(
         ("row", "long", "body", "error", "words"),
@@ -2282,3 +2528,106 @@ class TestHtmlRecords:
         body = b'<table><tr><th>File</th></tr><tr><td><a href="/a">A</a></td></tr></table>'
         grid = fr.Html().grid(io.BytesIO(body), fr.ReadContext(body, columns=columns))
         assert grid.text.rows() == [("A",)]
+
+
+class TestACsvCellIsReadExactly:
+    """A CSV writes each cell exactly, as 7.x's CsvFile reads it: no number trimmed, no text of spaces made none."""
+
+    class Row(msgspec.Struct, frozen=True):
+        n: Annotated[int | None, Label("n")]
+        x: Annotated[float | None, Label("x")]
+        name: Annotated[str | None, Label("name")]
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"n,x,name\n5,1.5,a\n",
+            b"n,x,name\n 5,1.5,a\n",
+            b"n,x,name\n5 ,1.5,a\n",
+            b"n,x,name\n5,\t1.5,a\n",
+            b'n,x,name\n 5,1.5,"a"\n',
+            b'n,x,name\n" 5",1.5,"a"\n',
+            b'n,x,name\n5,1.5," a, b"\n',
+            b"n,x,name\n5,1e-400,a\n",
+            b"n,x,name\n5,0e-400,a\n",
+            b"n,x,name\n5,1.5, \n",
+            b"n,x,name\n5,1.5, a \n",
+            b"n,x,name\n ,  ,a\n",
+            b"\xef\xbb\xbfn,x,name\n5,1.5,a\n",
+            b"\xef\xbb\xbf\xef\xbb\xbfn,x,name\n5,1.5,a\n",
+            b'n,x,name\n"5",1.5,"a\nb"\n 6,2,c\n',
+        ],
+    )
+    def test_as_7x_csv_file_reads_it(self, body: bytes) -> None:
+        from flatread.delimited import CsvFile  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        def outcome(read: typing.Callable[[bytes], list[TestACsvCellIsReadExactly.Row]]) -> object:
+            try:
+                return read(body)
+            except ReadError:
+                return ReadError
+
+        assert outcome(fr.Reader(self.Row, fr.Csv()).rows) == outcome(CsvFile(self.Row).rows)
+
+    def test_a_padded_number_is_refused_by_its_cell_and_padded_reads_it(self) -> None:
+        body = b"n,x,name\n5,1.5,a\n 6,2.5,b\n"
+        with pytest.raises(ReadError, match=r"the 'n' cell ' 6' is not a whole number: row 3"):
+            fr.Reader(self.Row, fr.Csv()).rows(body)
+        assert fr.Reader(self.Row, fr.Csv(), cells=[fr.Padded()]).rows(body)[1] == self.Row(6, 2.5, "b")
+
+    def test_an_underflowing_float_is_refused_in_every_format(self) -> None:
+        with pytest.raises(ReadError, match=r"'1e-400' is not a number a float holds: it underflows to 0.0: row 2"):
+            fr.Reader(self.Row, fr.Csv(), cells=[fr.Padded()]).rows(b"n,x,name\n5,1e-400,a\n")
+
+    def test_a_second_byte_order_mark_is_refused(self) -> None:
+        with pytest.raises(EncodingError, match="two byte order marks"):
+            fr.Reader(self.Row, fr.Csv()).rows(b"\xef\xbb\xbf\xef\xbb\xbfn,x,name\n5,1.5,a\n")
+
+
+class _Volume(msgspec.Struct, frozen=True):
+    symbol: Annotated[str, Label("Symbol")]
+    volume: Annotated[int, Label("Volume")]
+
+
+class TestAClosingSeparator:
+    """A separator closing every line or some, as 7.x's ``_closing_separator`` read them."""
+
+    @staticmethod
+    def _old(closing: Literal["always", "sometimes"]) -> object:
+        from flatread.delimited import CsvFile  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Closed(CsvFile[_Volume]):
+            _closing_separator = closing
+
+        return Closed(_Volume, separator="|")
+
+    @pytest.mark.parametrize(
+        ("closing", "body"),
+        [
+            ("always", b"Symbol|Volume|\nA|1|\nB|2|\n"),
+            ("always", b"Symbol|Volume|\r\nA|1|\r\nB|2|\r\n"),
+            ("always", b"Symbol|Volume|\nA|1|\nB|2|"),
+            ("always", b"Symbol|Volume|\nA|1|\nB|2\n"),
+            ("always", b"Symbol|Volume\nA|1|\n"),
+            ("always", b"Symbol|Volume|\nA|1|x\n"),
+            ("always", b"Symbol|Volume|\nA|1|\n\nB|2|\n"),
+            ("always", b"Symbol||Volume|\nA||1|\n"),
+            ("sometimes", b"Symbol|Volume\nA|1|\nB|2\n"),
+            ("sometimes", b"Symbol|Volume|\nA|1\n"),
+            ("sometimes", b"Symbol|Volume\nA|\n"),
+        ],
+    )
+    def test_as_7x_reads_it(self, closing: Literal["always", "sometimes"], body: bytes) -> None:
+        def outcome(read: typing.Callable[[bytes], list[_Volume]]) -> object:
+            try:
+                return read(body)
+            except ReadError:
+                return ReadError
+
+        new = fr.Reader(_Volume, fr.Csv(separator="|", quote=None, closing=closing))
+        assert outcome(new.rows) == outcome(self._old(closing).rows)  # ty: ignore[unresolved-attribute] (a 7.x reader)
+
+    def test_a_line_without_it_is_named(self) -> None:
+        reader = fr.Reader(_Volume, fr.Csv(separator="|", quote=None, closing="always"))
+        with pytest.raises(RaggedRowError, match=r"line 3 does not end with its closing separator '\|'"):
+            reader.rows(b"Symbol|Volume|\nA|1|\nB|2\n")

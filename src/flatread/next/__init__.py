@@ -30,13 +30,18 @@ from flatread.next._pages import Html, HtmlRecords, HtmlRows
 from flatread.next._reader import Reader
 from flatread.next._reports import Keyed, Report, Text
 from flatread.next._stages import (
+    Beside,
     Csv,
     Cut,
     Derived,
     Found,
+    Given,
     Header,
+    Headerless,
     Layout,
     Long,
+    Noted,
+    Numbered,
     Observations,
     Padded,
     Pdf,
@@ -52,6 +57,7 @@ from flatread.next._stages import (
 
 __all__ = [
     "AsWritten",
+    "Beside",
     "Cells",
     "Cleaner",
     "Csv",
@@ -60,9 +66,11 @@ __all__ = [
     "Engine",
     "Format",
     "Found",
+    "Given",
     "Grid",
     "Header",
     "HeaderRule",
+    "Headerless",
     "Headers",
     "Html",
     "HtmlRecords",
@@ -73,6 +81,8 @@ __all__ = [
     "Lines",
     "Long",
     "Named",
+    "Noted",
+    "Numbered",
     "Observations",
     "Padded",
     "Pdf",

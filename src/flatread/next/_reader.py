@@ -52,7 +52,15 @@ class Reader[RowT: msgspec.Struct]:
         self.cells = tuple(cells)
         self.source = source
         self.empty = self.table.vouches if empty is None else empty
-        self.engine = Engine(row, null_values=null_values, as_written=as_written, rows_required=not self.empty)
+        self.engine = Engine(
+            row,
+            null_values=null_values,
+            as_written=as_written,
+            rows_required=not self.empty,
+            exact=getattr(format, "exact", False),
+            moments=getattr(format, "moments", False),
+            text_numbers=getattr(format, "text_numbers", False),
+        )
         self._null_values = list(null_values)
         header = getattr(
             self.table, "header", None

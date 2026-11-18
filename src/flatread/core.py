@@ -1244,3 +1244,7 @@ def _check_ending(body: bytes, *, final_line_ending: bool) -> None:
         written = "always ends its last line" if final_line_ending else "never ends its last line"
         msg = f"the body's end is not the file's, which {written} with a line ending: it was cut"
         raise TruncatedFileError(msg)
+    # A body of CRLF lines that ends in a CR alone was cut between the two (a CR-ended body is one line ending each).
+    if body.endswith(b"\r") and b"\r\n" in body:
+        msg = "the body ends inside its last CRLF line ending, between the CR and the LF: it was cut"
+        raise TruncatedFileError(msg)

@@ -4,8 +4,10 @@ The engine is built once per reader, from its row struct: each field's column (i
 fields that must hold a value, the defaults. It holds no read's state: a read hands it the table and the read's
 :class:`ReadContext`, and it returns the frame. A text cell is typed by the rules 7.x's text readers share (the same
 functions: a whole number or a number trimmed, ``true`` or ``false`` or a ``Flag``'s words, a date by its ``Format``,
-exactly); a cell its format stored as a number, a boolean or a moment (a sheet's) is taken as that value, and a cell
-of another kind than its field reads is refused, so a sheet's number never becomes text without a word.
+exactly), but in a format that writes each cell exactly (a CSV's, as 7.x's ``CsvFile`` reads it) a padded number is
+refused and a text cell of spaces kept. A cell its format stored as a number, a boolean or a moment (a sheet's) is
+taken as that value, and a cell of another kind than its field reads is refused, so a sheet's number never becomes
+text without a word.
 """
 
 import dataclasses
@@ -54,6 +56,9 @@ class AsWritten:
 
 #: A bare date field's format: ISO 8601's, exactly.
 _ISO_DATE: typing.Final = Format("%Y-%m-%d")
+#: A number written as text, as a sheet of ``text_numbers`` writes one: an int's, and a float's (7.x's patterns).
+_WHOLE_TEXT: typing.Final = r"^-?[0-9]+$"
+_DECIMAL_TEXT: typing.Final = r"^-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$"
 
 
 class Engine[RowT: msgspec.Struct]:
@@ -61,15 +66,22 @@ class Engine[RowT: msgspec.Struct]:
 
     *null_values* are the file's words for no value; a field of *as_written* keeps its text exactly as the file
     writes it, empty text and whitespace included; *rows_required* is whether a table of no rows is refused.
+    *exact* is whether the format writes each cell exactly as its value (a CSV's, as 7.x's ``CsvFile`` reads it): a
+    number cell padded with whitespace (`` 5``) is refused, not trimmed, and a text cell of spaces is that text, not
+    no value; a :class:`~flatread.next.Padded` cleaner strips them first. In every format a float cell whose digits
+    are not all zero but which reads as ``0.0`` (``1e-400``, an underflow) is refused.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 (a field's rules each format sets)
         self,
         row: type[RowT],
         *,
         null_values: Collection[str] = (),
         as_written: Collection[str] = (),
         rows_required: bool = True,
+        exact: bool = False,
+        moments: bool = False,
+        text_numbers: bool = False,
     ) -> None:
         if keyword := [p.name for p in inspect.signature(row).parameters.values() if p.kind is p.KEYWORD_ONLY]:
             msg = f"the fields {keyword} of {row.__name__} are keyword-only, and a reader builds its rows by position"
@@ -81,7 +93,7 @@ class Engine[RowT: msgspec.Struct]:
         seen: dict[str, int] = {}
         self.columns = []
         for field in fields:
-            column = _column(row, field)
+            column = _column(row, field, moments=moments)
             seen[column.label] = count = seen.get(column.label, -1) + 1
             self.columns.append(column._replace(label=f"{column.label}{_NUL}{count}") if count else column)
         if stray := set(as_written) - {column.field for column in self.columns}:
@@ -92,6 +104,8 @@ class Engine[RowT: msgspec.Struct]:
         self._null_values = list(null_values)
         self._as_written = frozenset(as_written)
         self._rows_required = rows_required
+        self._exact = exact
+        self._text_numbers = text_numbers
         self._numbers_as_text = frozenset(
             field.name for field in fields if any(isinstance(meta, AsWritten) for meta in _metadata(field.type))
         )
@@ -171,6 +185,8 @@ class Engine[RowT: msgspec.Struct]:
             (
                 pl.col(column.label)
                 if column.field in self._as_written
+                else pl.col(column.label).replace(["", *self._null_values], None)
+                if self._exact and column.scalar is str
                 else pl.when(pl.col(f"{column.field}\0s") != "")
                 .then(pl.col(column.label))
                 .replace(["", *self._null_values], None)
@@ -181,32 +197,38 @@ class Engine[RowT: msgspec.Struct]:
             table.cells.lazy()
             .with_columns(stripped)
             .with_columns(blanked)
-            .select(expr for column in plain for expr in self._plain(column))
+            .select(expr for column in plain for expr in self._plain(column, exact=self._exact))
             .collect()
         )
         refused = typed.select(
-            (pl.col(f"{column.field}\0b").is_not_null() & pl.col(column.field).is_null()).any() for column in plain
+            (pl.col(f"{column.field}\0b").is_not_null() & pl.col(column.field).is_null()).any()
+            | _any_underflowed(column, pl.col(f"{column.field}\0b"), pl.col(column.field))
+            for column in plain
         ).row(0)
         return {column.field: typed[column.field] for column, bad in zip(plain, refused, strict=True) if not bad}
 
     @staticmethod
-    def _plain(column: Column) -> list[pl.Expr]:
-        """Return the expressions of a plain column's value, from its blanked text, and that text, kept to check it."""
+    def _plain(column: Column, *, exact: bool) -> list[pl.Expr]:
+        """Return the expressions of a plain column's value, from its blanked text, and that text, kept to check it.
+
+        A number is cast from its text stripped, but in an *exact* format, where padding leaves it no number.
+        """
         text = pl.col(f"{column.field}\0b")
         if column.scalar is str:
             value = text
         elif column.scalar is bool:
             value = text.replace_strict(_BOOLEANS, default=None, return_dtype=pl.Boolean)
         else:
-            stripped = pl.col(f"{column.field}\0s")
-            value = pl.when(text.is_not_null()).then(stripped.cast(_DTYPES[column.scalar], strict=False))
+            number = text if exact else pl.col(f"{column.field}\0s")
+            value = pl.when(text.is_not_null()).then(number.cast(_DTYPES[column.scalar], strict=False))
         return [value.alias(column.field), text]
 
     def _blanked(self, column: Column, text: pl.Series, cleaners: Sequence[Cleaner]) -> pl.Series:
         """Return *column*'s text cells, a blank one no value, cleaned, and one of the null words no value."""
         if column.field in self._as_written:
             return text
-        text = text.to_frame().select(pl.when(pl.first().str.strip_chars() != "").then(pl.first())).to_series()
+        if not (self._exact and column.scalar is str):  # a CSV's text cell of spaces is that text
+            text = text.to_frame().select(pl.when(pl.first().str.strip_chars() != "").then(pl.first())).to_series()
         for cleaner in cleaners:
             text = cleaner.clean(text, column)
         return text.replace(["", *self._null_values], None)
@@ -233,12 +255,28 @@ class Engine[RowT: msgspec.Struct]:
         return joined["value"].alias(values.name)
 
     def _from_text(self, column: Column, text: pl.Series, numbers: int | pl.Series) -> pl.Series:
-        """Return *column*'s values from its text cells: the rules every text format shares."""
-        return _typed(column._replace(label=_shown(column.label)), text, f"{_shown(column.label)!r} cell", numbers)
+        """Return *column*'s values from its text cells: the rules every text format shares.
 
-    def _typed(  # noqa: PLR0911 (one answer a scalar)
-        self, column: Column, table: Table, cleaners: Sequence[Cleaner], numbers: pl.Series
-    ) -> pl.Series:
+        In an exact format a number cell padded with whitespace is refused; in any, a float that underflows to 0.0.
+        """
+        if column.written is None and column.scalar in _MOMENTS - {dt.date}:  # a sheet's moment field, as text here
+            _refuse(text.is_not_null(), text, column, "date cell: its field names no Format for text", numbers)
+            return pl.repeat(None, text.len(), dtype=_temporal(column.scalar, None), eager=True).alias(column.field)
+        number = column.written is None and column.flag is None and column.scalar in (int, float)
+        what = "whole number" if column.scalar is int else "number"
+        if number and self._exact:
+            _refuse(text.is_not_null() & (text != text.str.strip_chars()), text, column, what, numbers)
+        values = _typed(column._replace(label=_shown(column.label)), text, f"{_shown(column.label)!r} cell", numbers)
+        if (
+            number
+            and column.scalar is float
+            and pl.select(_any_underflowed(column, pl.lit(text), pl.lit(values))).item()
+        ):
+            under = (values == 0) & text.str.contains(_DIGIT)
+            _refuse(under, text, column, "number a float holds: it underflows to 0.0", numbers)
+        return values
+
+    def _typed(self, column: Column, table: Table, cleaners: Sequence[Cleaner], numbers: pl.Series) -> pl.Series:
         if table.kinds is None or column.label in table.written:
             return self._from_cells(column, table.cells[column.label], cleaners, numbers)
         text = self._blanked(column, table.cells[column.label], cleaners)
@@ -253,23 +291,7 @@ class Engine[RowT: msgspec.Struct]:
             _refuse(text.is_not_null() & ~is_text, text, column, "text cell: mark the field AsWritten()", numbers)
             return text.alias(column.field)
         if column.scalar in (int, float):
-            _refuse(
-                text.is_not_null() & (kinds != "number").fill_null(value=False), text, column, "number cell", numbers
-            )
-            if column.scalar is int:
-                _refuse(floats != floats.floor(), text, column, "whole number", numbers)
-                _refuse(
-                    ~floats.is_between(*_INT_RANGE, closed="left"), text, column, "whole number of 64 bits", numbers
-                )
-                _refuse(
-                    floats.abs() >= _EXACT_INT,
-                    text,
-                    column,
-                    "whole number a number cell holds exactly (below 2**53)",
-                    numbers,
-                )
-                return floats.cast(pl.Int64, strict=True).alias(column.field)
-            return floats.alias(column.field)
+            return self._number(column, text, kinds, floats, numbers)
         if column.scalar is bool:
             stored = (kinds == "bool").fill_null(value=False)
             _refuse(text.is_not_null() & ~stored & ~is_text, text, column, "boolean or text cell", numbers)
@@ -283,6 +305,12 @@ class Engine[RowT: msgspec.Struct]:
             return native.zip_with(stored, values).alias(column.field)
         # A date or time: a moment cell is its value; a text cell is read by its field's format.
         stored = text.is_not_null() & (kinds == "moment").fill_null(value=False)
+        if column.written not in (None, _ISO_DATE):  # a number cell's digits, text in its own Format (%Y%m: 198803)
+            is_text = is_text | (kinds == "number").fill_null(value=False)
+        if column.written is None and column.scalar is not dt.date:  # no Format: a moment cell alone
+            _refuse(
+                text.is_not_null() & ~stored, text, column, "date cell: its field names no Format for text", numbers
+            )
         _refuse(text.is_not_null() & ~stored & ~is_text, text, column, "date cell or text", numbers)
         written = column.written or _ISO_DATE
         dtype = _temporal(column.scalar, written)
@@ -296,6 +324,41 @@ class Engine[RowT: msgspec.Struct]:
             else moments
         )
         return parsed.zip_with(~stored, native.cast(dtype)).alias(column.field)
+
+    def _number(
+        self, column: Column, text: pl.Series, kinds: pl.Series, floats: pl.Series, numbers: pl.Series
+    ) -> pl.Series:
+        """Return a number field's values from a sheet's cells: its number cells, and its text ones if it writes them.
+
+        A number cell that is one of the file's words for none (a stored NaN, written ``NaN``) holds none. Where the
+        format reads numbers written as text (``Sheet(text_numbers=True)``), a text cell is its text's number, strictly:
+        an int's is digits after an optional ``-``, of 64 bits, read digit for digit; a float's a decimal (``-1.03``,
+        ``.5``; no exponent, ``nan`` or ``inf``).
+        """
+        stored = (kinds == "number").fill_null(value=False)
+        written = text.is_not_null() & ~stored & (kinds.is_null() | (kinds == "text")) if self._text_numbers else None
+        other = text.is_not_null() & ~stored if written is None else text.is_not_null() & ~stored & ~written
+        _refuse(other, text, column, "number cell", numbers)
+        floats = pl.select(pl.when(text.is_not_null() & stored).then(floats)).to_series().alias(floats.name)
+        whole = column.scalar is int
+        if written is not None:
+            pattern = _WHOLE_TEXT if whole else _DECIMAL_TEXT
+            _refuse(written & ~text.str.contains(pattern), text, column, "whole number" if whole else "number", numbers)
+        if not whole:
+            if written is None:
+                return floats.alias(column.field)
+            return floats.fill_null(text.cast(pl.Float64, strict=False)).alias(column.field)
+        _refuse(floats != floats.floor(), text, column, "whole number", numbers)
+        _refuse(~floats.is_between(*_INT_RANGE, closed="left"), text, column, "whole number of 64 bits", numbers)
+        _refuse(
+            floats.abs() >= _EXACT_INT, text, column, "whole number a number cell holds exactly (below 2**53)", numbers
+        )
+        values = floats.cast(pl.Int64, strict=True)
+        if written is None:
+            return values.alias(column.field)
+        digits = pl.select(pl.when(written).then(text.cast(pl.Int64, strict=False))).to_series()
+        _refuse(written & digits.is_null(), text, column, "whole number of 64 bits", numbers)
+        return values.fill_null(digits).alias(column.field)
 
     # --- checks ---
 
@@ -347,8 +410,12 @@ def _shown(label: str) -> str:
     return label.partition(_NUL)[0]
 
 
-def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Column:
-    """Return *field*'s column: its label (its own name, where it names no ``Label``), type and markers."""
+def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo, *, moments: bool = False) -> Column:
+    """Return *field*'s column: its label (its own name, where it names no ``Label``), type and markers.
+
+    A date-and-time or time field names the ``Format`` its text is written in, unless the format stores *moments*
+    (a sheet's date cells): then a field of none reads a moment cell alone, and refuses a text one.
+    """
     metadata = _metadata(field.type)
     for marker in (Span, Joined, Cell):
         if _marker(metadata, marker) is not None:
@@ -363,7 +430,7 @@ def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Colu
     written = _marker(metadata, Format)
     if written is None and scalar is dt.date:
         written = _ISO_DATE  # flatread.next: a bare date is ISO 8601's, exactly
-    if written is None and scalar in _MOMENTS - {dt.date}:
+    if written is None and scalar in _MOMENTS - {dt.date} and not moments:
         msg = f"the field {field.name!r} needs the Format its text is written in"
         raise LayoutError(msg)
     column = Column(
@@ -399,6 +466,21 @@ def _booleans(text: pl.Series, column: Column, numbers: int | pl.Series) -> pl.S
 _INT_RANGE: typing.Final = (-(2.0**63), 2.0**63)
 #: The bound below which a sheet's number cell, a double, holds a whole number exactly (``flatread.sheets._EXACT_INT``).
 _EXACT_INT: typing.Final = 2.0**53
+
+
+#: A number's text whose digits before any exponent are not all zero.
+_DIGIT: typing.Final = r"^[^eE]*[1-9]"
+
+
+def _any_underflowed(column: Column, text: pl.Expr, value: pl.Expr) -> pl.Expr:
+    """Return whether a float *column*'s *value* is 0.0 where its *text*'s digits before any exponent are not all zero.
+
+    polars reads ``1e-400``, past a float's least, as ``0.0``: a value the file did not write. Only the zeros' text is
+    looked at.
+    """
+    if column.scalar is not float or column.written is not None or column.flag is not None:
+        return pl.lit(value=False)
+    return text.filter(value == 0).str.contains(_DIGIT).any()
 
 
 def _refuse(wrong: pl.Series, text: pl.Series, column: Column, what: str, numbers: int | pl.Series) -> None:

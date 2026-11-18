@@ -4,6 +4,53 @@ Each release's changes, newest first, and what a reader declared for the release
 6.0.0 have no entry here; their tags and commit messages describe them. What a patch and a minor release may change is
 in the README, under "Versions".
 
+## Unreleased
+
+`flatread.next` reads a CSV's cells as 7.x's `CsvFile` reads them, where it read them as a text table's:
+
+- A number cell padded with whitespace (` 5`, `5 `, a tab) is refused, naming its cell and row, where it was trimmed;
+  a `Padded()` cleaner reads it, as 7.x's `PaddedCsv` did. A text cell of spaces is that text, not no value. Both the
+  typed fast path and the grid read this way, where polars' parser took ` 5` as 5: an unquoted body where a cell may
+  open with a space or a tab is read as text and its numbers cast, and a quoted body's row check gives way to the grid
+  on such a cell. That check's pattern is larger, so a quoted CSV of about 1,000 columns or more (was about 3,000) is
+  read by the grid.
+- A float cell that underflows (`1e-400`, which polars reads as `0.0`) is refused in every format, where the fast
+  path and the grid read `0.0`.
+- A body opening with two byte order marks raises `EncodingError`, where polars dropped the second too.
+- `Csv(closing="always" | "sometimes")` reads a separator closing every line, or some, as 7.x's `_closing_separator`
+  did; a line without it under `"always"` raises `RaggedRowError`, naming the line. `Headers(blank=[""])` stood in for
+  it, and took a blank column anywhere in the header.
+
+A `flatread.next` sheet's date-and-time or time field may name no `Format`, as a 7.x `SheetFile`'s may: it reads the
+sheet's date cells alone, and refuses a text cell, naming it. A text format's such field still needs its `Format`.
+A sheet's number cell is read as 7.x reads it in two more places: under a date field with a `Format` of its own, its
+digits are text in that format (`198803` for `%Y%m`), and one that is a word for none (a stored `NaN` under
+`null_values=["NaN"]`) holds none, where both were refused.
+
+`Sheet(text_numbers=True)` reads a sheet that writes its numbers as text as well as in number cells, as 7.x's
+`TextNumbersSheet` does: a number field's text cell is its text's number, strictly (an int's digits after an optional
+`-`, of 64 bits, digit for digit; a float's a plain decimal, no exponent, `nan` or `inf`), and any other text refused,
+naming it. With `cells=[Padded()]` it reads what 7.x's `PaddedSheet` and `TextNumbersSheet` read together.
+
+`Noted(header_row=..., ends="bare" | "undated")` finds a table with notes under it, as 7.x's `NotedSheet` and
+`DatedSheet` do: its rows end at the first holding nothing past its first column, or at the first whose first cell is
+no date cell (a sheet's alone), and a cell past the first column among the notes below raises, naming its row.
+
+`Header(header_row=...)` drops the rows above a header row unread, as 7.x's `header_row` does. `Beside(at=..., table=...)` reads a sheet's table with more beside it, as 7.x's `BesideSheet` does: only the table's
+columns are kept (the first, one a field, or those `at` names), and `table` finds the table in them, so
+`Beside(table=Noted())` reads a table with notes under it and more beside it.
+
+`Headerless(fields=...)` reads a file of rows with no header, each row's cells the fields' columns in order;
+`Given(values, table=...)` states fields the reader knows for every row of a file (the table it is of); and the
+`Numbered(field)` shape sets each row's place in the table as a field no cell holds.
+
+`Long(by_key=True)` writes a long table key by key, a series' rows together, as 7.x's `_by_key` does; and
+`Preamble()`'s header opens with the first column no stage states, so it composes with `Given`.
+
+In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
+In both, a body of CRLF lines that ends in a CR alone raises `TruncatedFileError`: it was cut between the CR and the
+LF, and `final_line_ending=True` took the CR for a whole line ending.
+
 ## 0.5.0
 
 Numbering restarts at 0.5.0. Releases 1.0.0 through 7.2.0 came out within one week while the API was still being
