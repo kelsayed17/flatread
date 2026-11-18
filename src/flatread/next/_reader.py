@@ -2,12 +2,11 @@
 
 import contextlib
 import io
-from collections.abc import Collection, Generator, Mapping, Sequence
+from collections.abc import Collection, Generator, Sequence
 
 import msgspec
 import polars as pl
 
-from flatread import fields
 from flatread.core import Column, _panicked
 from flatread.errors import LayoutError, ReadError
 from flatread.next._engine import Engine
@@ -26,9 +25,7 @@ class Reader[RowT: msgspec.Struct]:
     cleans each column's text, in order (``[Padded()]``). The engine then types every cell by its field, strictly:
     *null_values* are the file's words for no value, and a field of *as_written* keeps its text exactly as written.
     *empty* is whether a table of no rows is an answer; ``None`` leaves it to the table stage (a trailer vouches for
-    one, a header does not). *labels* gives a field this file's label for it (a ``str`` or a ``Label``), in place of
-    its own, and *formats* the ``Format`` a moment type is written in where a field names none (``{dt.date: US}``): one
-    struct serves every file that writes its columns, each reader naming its file's words.
+    one, a header does not).
 
     A reader is immutable and holds no read's state: one serves every body and every thread.
     """
@@ -45,8 +42,6 @@ class Reader[RowT: msgspec.Struct]:
         null_values: Collection[str] = (),
         as_written: Collection[str] = (),
         empty: bool | None = None,
-        labels: Mapping[str, str | fields.Label] | None = None,
-        formats: Mapping[object, fields.Format] | None = None,
     ) -> None:
         from flatread.next._stages import Csv, Header, Sheet  # noqa: PLC0415 (the default finder, built on this module)
 
@@ -57,14 +52,7 @@ class Reader[RowT: msgspec.Struct]:
         self.cells = tuple(cells)
         self.source = source
         self.empty = self.table.vouches if empty is None else empty
-        self.engine = Engine(
-            row,
-            null_values=null_values,
-            as_written=as_written,
-            rows_required=not self.empty,
-            labels=labels,
-            formats=formats,
-        )
+        self.engine = Engine(row, null_values=null_values, as_written=as_written, rows_required=not self.empty)
         self._null_values = list(null_values)
         header = getattr(
             self.table, "header", None

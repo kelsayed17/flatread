@@ -55,9 +55,6 @@ Also in 0.5.0:
   as one text run, and fields sharing a cell each their own way. A format of its own subclasses either, overriding
   `tables`, `rows` (returning `HtmlRows`), `records`, `is_record` or `value`. A header cell no field reads is text,
   for a header rule to drop, or, with `unread_cells="value"`, one text run, for `Long` to type.
-- A `flatread.next` reader names its file's labels and date formats for a struct several files share, as 7.x's
-  `_label` and `_format` hooks do: `Reader(Row, Csv(), labels={"close": "Close"}, formats={dt.date: Format(...)})`.
-  A field's own `Format` stands over the reader's; a label naming no field, or a format of no moment type, is refused.
 
 ## 0.5.0
 

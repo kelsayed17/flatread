@@ -13,7 +13,7 @@ import datetime as dt
 import inspect
 import types
 import typing
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Sequence
 
 import msgspec
 import polars as pl
@@ -63,35 +63,25 @@ class Engine[RowT: msgspec.Struct]:
     writes it, empty text and whitespace included; *rows_required* is whether a table of no rows is refused.
     """
 
-    def __init__(  # noqa: PLR0913 (the engine's settings, each a reader's)
+    def __init__(
         self,
         row: type[RowT],
         *,
         null_values: Collection[str] = (),
         as_written: Collection[str] = (),
         rows_required: bool = True,
-        labels: Mapping[str, str | Label] | None = None,
-        formats: Mapping[object, Format] | None = None,
     ) -> None:
         if keyword := [p.name for p in inspect.signature(row).parameters.values() if p.kind is p.KEYWORD_ONLY]:
             msg = f"the fields {keyword} of {row.__name__} are keyword-only, and a reader builds its rows by position"
             raise LayoutError(msg)
         self.row = row
         fields = msgspec.structs.fields(row)
-        named: dict[str, str | Label] = dict(labels or {})
-        written: dict[object, Format] = dict(formats or {})
-        if stray := named.keys() - {field.name for field in fields}:
-            msg = f"labels names {sorted(stray)}, which are no fields of {row.__name__}"
-            raise LayoutError(msg)
-        if wrong := [scalar for scalar in written if scalar not in _MOMENTS]:
-            msg = f"formats names {wrong}, which are no date or time types: only a moment is written in a Format"
-            raise LayoutError(msg)
         # A label two fields share is two columns, by place (a header writes ``%`` twice): the later ones are named
         # as a finder names a repeated heading's later columns, by the label, a NUL and their count.
         seen: dict[str, int] = {}
         self.columns = []
         for field in fields:
-            column = _column(row, field, named.get(field.name), written)
+            column = _column(row, field)
             seen[column.label] = count = seen.get(column.label, -1) + 1
             self.columns.append(column._replace(label=f"{column.label}{_NUL}{count}") if count else column)
         if stray := set(as_written) - {column.field for column in self.columns}:
@@ -357,31 +347,20 @@ def _shown(label: str) -> str:
     return label.partition(_NUL)[0]
 
 
-def _column(
-    row: type[msgspec.Struct],
-    field: msgspec.structs.FieldInfo,
-    label: str | Label | None = None,
-    formats: Mapping[object, Format] | None = None,
-) -> Column:
-    """Return *field*'s column: its label (its own name, where it names no ``Label``), type and markers.
-
-    A reader's *label* for the field stands in for its ``Label``, and its *formats* give a moment field that names no
-    ``Format`` the one its type is written in.
-    """
+def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Column:
+    """Return *field*'s column: its label (its own name, where it names no ``Label``), type and markers."""
     metadata = _metadata(field.type)
     for marker in (Span, Joined, Cell):
         if _marker(metadata, marker) is not None:
             msg = f"the field {row.__name__}.{field.name} is a {marker.__name__}'s, which flatread.next lacks"
             raise LayoutError(msg)
-    named = Label(label) if isinstance(label, str) else label if label is not None else _marker(metadata, Label)
+    named = _marker(metadata, Label)
     try:
         scalar = _scalar_type(field.type)
     except LayoutError as e:
         msg = f"the field {field.name!r}: {e}"
         raise LayoutError(msg) from e
     written = _marker(metadata, Format)
-    if written is None and formats is not None:
-        written = formats.get(scalar)
     if written is None and scalar is dt.date:
         written = _ISO_DATE  # flatread.next: a bare date is ISO 8601's, exactly
     if written is None and scalar in _MOMENTS - {dt.date}:
