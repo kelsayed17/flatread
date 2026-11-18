@@ -200,3 +200,17 @@ uv add "flatread[excel,xml,html,pdf] @ git+https://github.com/kelsayed17/flatrea
 
 Python 3.14; polars and msgspec, plus each extra's parsers: `excel` fastexcel and xlrd, `xml` lxml, `html` lxml and
 Scrapling, `pdf` pdfminer.six.
+
+## Versions
+
+flatread is at 0.x: its API is not yet stable. Pin a tag, as above, not a range.
+
+- **A patch release** (0.5.1) changes no name and reads no body to other rows than it did. It may refuse a body the
+  release before read wrong, a defect it fixes, and its `CHANGELOG.md` entry says which.
+- **A minor release** (0.6.0) may rename, remove or change any part of the API, and what a reader reads or refuses.
+  Its `CHANGELOG.md` entry names each change and what a reader declared for the release before must change.
+- **`flatread.next`** is a preview within that: any minor release may change it.
+- **1.0.0** comes when `flatread.next`'s readers replace the class-per-quirk ones; from then on a release that changes
+  what a reader declared for the one before must read is a major one.
+
+A tag never moves once pushed, and every release has a tag and a `CHANGELOG.md` entry.

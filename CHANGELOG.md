@@ -1,7 +1,8 @@
 # Changelog
 
 Each release's changes, newest first, and what a reader declared for the release before must change. Releases before
-6.0.0 have no entry here; their tags and commit messages describe them.
+6.0.0 have no entry here; their tags and commit messages describe them. What a patch and a minor release may change is
+in the README, under "Versions".
 
 ## Unreleased
 
@@ -12,6 +13,8 @@ Each release's changes, newest first, and what a reader declared for the release
   field). This holds for `SheetFile`, the sheet readers built on it, and `flatread.next`'s `Sheet`.
 - `flatread.next`'s `Csv` reads a cell holding a vertical tab, a form feed, a line or paragraph separator, or a lone CR
   as one cell, as polars and `CsvFile` do. Before, it broke the row there and raised `RaggedRowError`.
+- The README states the versioning policy (a "Versions" section): what a 0.x patch and minor release may change, and
+  what 1.0.0 waits for.
 - Property tests (`tests/test_properties.py`, hypothesis) read generated tables back exactly, and damaged ones and
   bytes of no format as rows or a `ReadError`, through the CSV, sheet, XML and HTML readers of both APIs, and hold
   the two CSV readers to the same rows. They found the two defects above.
