@@ -26,6 +26,7 @@ from flatread.next._model import (
     Table,
     TableFinder,
 )
+from flatread.next._pages import Html, HtmlRecords, HtmlRows
 from flatread.next._reader import Reader
 from flatread.next._reports import Keyed, Report, Text
 from flatread.next._stages import (
@@ -63,6 +64,9 @@ __all__ = [
     "Header",
     "HeaderRule",
     "Headers",
+    "Html",
+    "HtmlRecords",
+    "HtmlRows",
     "Keyed",
     "Kind",
     "Layout",

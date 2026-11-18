@@ -267,6 +267,8 @@ _ANY: dict[str, Callable[[bytes], object]] = {
     ).rows,
     "XmlFile": XmlFile(_Record, root="t", record="r").rows,
     "HtmlFile": HtmlFile(_Record).rows,
+    "flatread.next Html": fr.Reader(_Record, fr.Html()).rows,
+    "flatread.next HtmlRecords": fr.Reader(_Record, fr.HtmlRecords(record="tr"), empty=True).rows,
 }
 
 
@@ -277,13 +279,15 @@ def test_bytes_of_no_format_read_or_raise_read_error(reader: str, body: bytes) -
     _reads_or_refuses(_ANY[reader], body)
 
 
-@pytest.mark.parametrize("reader", ["XmlFile", "HtmlFile"])
+@pytest.mark.parametrize("reader", ["XmlFile", "HtmlFile", "flatread.next Html", "flatread.next HtmlRecords"])
 @_SETTINGS
 @given(names=st.lists(_NAMES, min_size=1, max_size=5), data=st.data())
 def test_damaged_markup_reads_or_raises_read_error(reader: str, names: list[str], data: st.DataObject) -> None:
     escaped = [name.replace("&", "&amp;").replace("<", "&lt;") for name in names]
     if reader == "XmlFile":
         body = "<t>" + "".join(f"<r><name>{n}</name><count>1</count></r>" for n in escaped) + "</t>"
+    elif reader == "flatread.next HtmlRecords":
+        body = "<table>" + "".join(f"<tr><name>{n}</name><count>1</count></tr>" for n in escaped) + "</table>"
     else:
         rows = "".join(f"<tr><td>{n}</td><td>1</td></tr>" for n in escaped)
         body = f"<table><tr><th>name</th><th>count</th></tr>{rows}</table>"

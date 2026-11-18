@@ -16,6 +16,7 @@ import polars as pl
 import pytest
 
 from flatread import next as fr
+from flatread.core import Column
 from flatread.errors import (
     ControlTotalError,
     CorruptArchiveError,
@@ -28,16 +29,19 @@ from flatread.errors import (
     UnknownLayoutError,
 )
 from flatread.fields import Cell as At
-from flatread.fields import Flag, Format, Joined, Label, Span
+from flatread.fields import Flag, Format, Joined, Label, Link, Span
 from flatread.fields import Shape as Shaped
 from flatread.next._stages import _breaks_as_polars
 from flatread.pdf import PdfLine
+from tests import test_pages as _page_tests
 from tests.support.pdf import pdf
 from tests.support.xlsx import Cell, workbook
 from tests.test_hardening_archives import _HOSTILE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from flatread.pages import Element
 
 
 class _Price(msgspec.Struct, frozen=True):
@@ -1969,3 +1973,312 @@ class TestARepeatedLabel:
     def test_a_header_read_by_name_tells_no_two_fields_apart_by_one_label(self) -> None:
         with pytest.raises(LayoutError, match="two fields share a label"):
             fr.Reader(self.Change, fr.Csv(), table=fr.Header(header=fr.Named()))
+
+
+class TestHtml:
+    """HtmlFile's table as Html, each held to the 7.x reader on its tests' pages."""
+
+    _HOLDINGS = fr.Reader(_page_tests._Holding, fr.Html())
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            _page_tests._page(_page_tests._ROW, (" 2 ", "\n 04/25/2025 ", "A <b>Muni</b>\n<div>Bond</div>", "  ", "N")),
+            _page_tests._page(_page_tests._ROW).replace(b"<tbody>", b"<tbody><tr></tr>"),
+            _page_tests._page(_page_tests._ROW).replace(b"</tbody>", b"</tbody><tfoot><tr><td>total</td></tr></tfoot>"),
+        ],
+        ids=["clean", "a row of no cells", "a footer"],
+    )
+    def test_a_table_reads_as_html_file_reads_it(self, body: bytes) -> None:
+        assert self._HOLDINGS.rows(body) == _page_tests._HOLDINGS.rows(body)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b" \n",
+            b"<p>no table</p>",
+            _page_tests._page(_page_tests._ROW, tables=2),
+            b"<table></table>",
+            _page_tests._page(header=("#", "Day")),
+            _page_tests._page(),
+            _page_tests._page(_page_tests._ROW[:4]),
+            _page_tests._page(_page_tests._ROW, header=("#", "#", "Asset Name", "Rate", "Held")),
+            _page_tests._page(("<table><tr><td>1</td></tr></table>", *_page_tests._ROW[1:])),
+            _page_tests._page(_page_tests._ROW, ("1.5", *_page_tests._ROW[1:])),
+            _page_tests._page(_page_tests._ROW, ("1<sup>2</sup>", *_page_tests._ROW[1:])),
+            _page_tests._page(_page_tests._ROW, (_page_tests._ROW[0], " ", *_page_tests._ROW[2:])),
+            _page_tests._page(_page_tests._ROW).replace(b"</table>", b""),
+        ],
+        ids=[
+            "empty",
+            "no table",
+            "two tables",
+            "no row",
+            "another header",
+            "no rows",
+            "ragged",
+            "repeated",
+            "nested",
+            "a fraction",
+            "two runs",
+            "a blank date",
+            "cut",
+        ],
+    )
+    def test_a_page_of_another_shape_raises_as_html_file_raises(self, body: bytes) -> None:
+        with pytest.raises(ReadError) as caught:
+            _page_tests._HOLDINGS.rows(body)
+        with pytest.raises(type(caught.value), match=f"^{re.escape(str(caught.value))}$"):
+            self._HOLDINGS.rows(body)
+
+    def test_a_format_narrows_its_selector(self) -> None:
+        body = _page_tests._page(_page_tests._ROW, tables=2).replace(b"<table>", b'<table class="etf">', 1)
+        assert len(fr.Reader(_page_tests._Holding, fr.Html(table="table.etf")).rows(body)) == 1
+
+    def test_a_reader_that_takes_no_rows_reads_no_table_as_none(self) -> None:
+        reader = fr.Reader(_page_tests._Holding, fr.Html(), empty=True)
+        frame = reader.frame(b"<p>none</p>")
+        assert frame.is_empty()
+        assert frame.columns == list(_page_tests._Holding.__struct_fields__)
+        assert reader.rows(_page_tests._page()) == []
+
+    def test_fields_sharing_a_cell_each_read_it_their_own_way(self) -> None:
+        files = fr.Reader(_page_tests._File, fr.Html())
+        page = _page_tests.TestAnHtmlFilesLinks()._page
+        for cell in ('<a href="/a.zip">A <b>file</b></a>', "A", '<a href="/a">A</a><a href="/b">B</a>', "<a>A</a>"):
+            try:
+                expected: object = _page_tests.TestAnHtmlFilesLinks._FILES.rows(page(cell))
+            except ReadError as e:
+                expected = str(e)
+            try:
+                got: object = files.rows(page(cell))
+            except ReadError as e:
+                got = str(e)
+            assert got == expected
+
+    def test_a_label_written_twice_is_two_fields_by_place(self) -> None:
+        head = b"<tr><th>LONG</th><th>%</th><th>SHORT</th><th>%</th></tr>"
+        body = b"<table>" + head + b"<tr><td>4</td><td>0.5</td><td>2</td><td>0.25</td></tr></table>"
+        assert fr.Reader(_page_tests._Shares, fr.Html()).rows(body) == [_page_tests._Shares(4, 0.5, 2, 0.25)]
+
+    def test_a_wide_table_reads_long_each_value_one_text_run(self) -> None:
+        class Rate(msgspec.Struct, frozen=True, gc=False):
+            day: Annotated[dt.date, Label("Date"), Format("%m/%d/%Y")]
+            fund: str
+            rate: float | None
+
+        reader = fr.Reader(Rate, fr.Html(unread_cells="value"), shape=fr.Long(keys=re.compile("[A-Z]+")))
+        page = _page_tests._page(("04/24/2025", "4.5", ""), header=("Date", "IBIT", "GBTC"))
+        assert reader.rows(page) == [Rate(dt.date(2025, 4, 24), "IBIT", 4.5), Rate(dt.date(2025, 4, 24), "GBTC", None)]
+        split = _page_tests._page(("04/24/2025", "4.<b>5</b>", ""), header=("Date", "IBIT", "GBTC"))
+        with pytest.raises(ReadError, match=r"^row 1: its 'IBIT' cell holds the text runs \['4\.', '5'\], not one$"):
+            reader.rows(split)
+        as_text = fr.Reader(Rate, fr.Html(), shape=fr.Long(keys=re.compile("[A-Z]+")))
+        assert as_text.rows(split)[0].rate == 4.5
+
+    def test_a_cell_no_field_reads_is_dropped_by_a_header_rule(self) -> None:
+        header = (*_page_tests._HEADER, "Follow")
+        rule = fr.Header(header=fr.Headers(blank=["Follow"]))
+        reader = fr.Reader(_page_tests._Holding, fr.Html(), table=rule)
+        assert reader.rows(_page_tests._page((*_page_tests._ROW, " "), header=header))[0].name == "Acme"
+        with pytest.raises(ReadError, match=r"^the 'Follow' column holds 'x', and it never holds a value: row 1$"):
+            reader.rows(_page_tests._page((*_page_tests._ROW, "x"), header=header))
+
+    def test_a_header_read_by_name_finds_a_label_s_alternative(self) -> None:
+        class Named(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name", ("Asset",))]
+            rate: Annotated[float, Label("Rate")]
+
+        reader = fr.Reader(Named, fr.Html(), table=fr.Header(header=fr.Named()))
+        body = _page_tests._page(("4.5", "Acme"), header=("Rate", "Asset"))
+        assert reader.rows(body) == [Named("Acme", 4.5)]
+        with pytest.raises(ReadError, match=r"^row 1: its 'Rate' cell holds the text runs"):
+            reader.rows(_page_tests._page(("4<b>5</b>", "Acme"), header=("Rate", "Asset")))
+
+    def test_a_format_lays_out_a_table_of_its_own_by_subclassing(self) -> None:
+        class Dated(msgspec.Struct, frozen=True, gc=False):
+            day: Annotated[dt.date, Format("%m/%d/%Y")]
+            name: Annotated[str, Label("Asset Name")]
+            rate: Annotated[float, Label("Rate")]
+
+        @dataclasses.dataclass(frozen=True, kw_only=True)
+        class Titled(fr.Html):
+            @typing.override
+            def tables(self, doc: Element) -> list[Element]:
+                return [table for table in super().tables(doc) if table.css("caption")]
+
+            @typing.override
+            def rows(self, table: Element) -> fr.HtmlRows:
+                from flatread.pages import cell_text, table_cells  # noqa: PLC0415 (the helpers a format reads with)
+
+                (caption,) = table.css("caption")
+                header = ["Asset Name", "Rate"]
+                found, numbers = table_cells(table, header)
+                return fr.HtmlRows(header, found, numbers, stated={"day": cell_text(caption)})
+
+            @typing.override
+            def value(self, cell: Element, column: Column, read: fr.ReadContext) -> str:
+                text = super().value(cell, column, read)
+                if column.field == "rate" and not text.endswith("%"):
+                    msg = f"{text!r} is no percent"
+                    raise ValueError(msg)
+                return text.removesuffix("%")
+
+        reader = fr.Reader(Dated, Titled())
+        body = (
+            b"<table><tr><td>x</td></tr></table><table><caption>04/24/2025</caption>"
+            b"<tr><th>Asset</th><th>Pct</th></tr><tr><td>Acme</td><td>4.5%</td></tr></table>"
+        )
+        assert reader.rows(body) == [Dated(dt.date(2025, 4, 24), "Acme", 4.5)]
+        with pytest.raises(ReadError, match=r"^row 1: its 'Rate' cell '4\.5' is no percent$"):
+            reader.rows(body.replace(b"4.5%", b"4.5"))
+
+    def test_a_cell_read_as_no_text_names_no_label_when_it_has_none(self) -> None:
+        class Bare(msgspec.Struct, frozen=True, gc=False):
+            count: Annotated[int, Label("")]
+
+        with pytest.raises(ReadError, match=r"^row 1: its cell holds the text runs \['1', '2'\], not one$"):
+            fr.Reader(Bare, fr.Html()).rows(b"<table><tr><th></th></tr><tr><td>1<b>2</b></td></tr></table>")
+
+    def test_a_reader_declared_wrong_raises_as_one(self) -> None:
+        @dataclasses.dataclass(frozen=True, kw_only=True)
+        class Wrong(fr.Html):
+            @typing.override
+            def value(self, cell: Element, column: Column, read: fr.ReadContext) -> str:
+                msg = "declared wrong"
+                raise LayoutError(msg)
+
+        with pytest.raises(LayoutError, match=r"^declared wrong$"):
+            fr.Reader(_page_tests._Holding, Wrong()).rows(_page_tests._page(_page_tests._ROW))
+
+    def test_an_unknown_way_of_reading_a_cell_is_refused_when_built(self) -> None:
+        with pytest.raises(LayoutError, match="as text or as a value"):
+            fr.Html(unread_cells="number")  # ty: ignore[invalid-argument-type] (the refused value)
+
+
+class TestHtmlRecords:
+    """HtmlRecords' records as fr.HtmlRecords, each held to the 7.x reader on its tests' pages."""
+
+    _MEETINGS = fr.Reader(
+        _page_tests._Meeting,
+        fr.HtmlRecords(record="div.meeting", heading="h4", heading_pattern=re.compile(r"(?P<year>\d{4}) meetings")),
+    )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            _page_tests._meetings(
+                "<h4>2026 meetings</h4>",
+                _page_tests._meeting("January"),
+                "<section><h4>2025 meetings</h4>",
+                _page_tests._meeting("March"),
+                _page_tests._meeting("May"),
+                "</section>",
+            ),
+            b" ",
+            b"<h4>2026 meetings</h4>",
+            _page_tests._meetings(_page_tests._meeting("May")),
+            _page_tests._meetings("<h4>Search</h4>", _page_tests._meeting("May")),
+            _page_tests._meetings("<h4>2026 meetings</h4>", _page_tests._meeting("May"), "<h4>2025 meetings</h4>"),
+            _page_tests._meetings("<h4>2026 meetings</h4>", '<div class="meeting"></div>'),
+            _page_tests._meetings(
+                "<h4>2026 meetings</h4>",
+                '<div class="meeting"><div class="month">May</div><a href="/a">a</a><a href="/b">b</a></div>',
+            ),
+            _page_tests._meetings("<h4>2026 meetings</h4>", _page_tests._meeting("May"), "<h4>2026 meetings</h4>"),
+        ],
+        ids=[
+            "headed",
+            "empty",
+            "no record",
+            "no heading",
+            "another heading",
+            "heads none",
+            "no cell",
+            "two links",
+            "twin",
+        ],
+    )
+    def test_records_read_as_html_records_reads_them(self, body: bytes) -> None:
+        try:
+            expected: object = _page_tests._Meetings(_page_tests._Meeting).rows(body)
+        except ReadError as e:
+            expected = (type(e), str(e))
+        try:
+            got: object = self._MEETINGS.rows(body)
+        except ReadError as e:
+            got = (type(e), str(e))
+        assert got == expected
+
+    def test_a_record_reads_its_own_link(self) -> None:
+        reader = fr.Reader(
+            _page_tests._Meeting,
+            fr.HtmlRecords(record="a.meeting", heading="h4", heading_pattern=re.compile(r"(?P<year>\d{4}) meetings")),
+        )
+        body = _page_tests._meetings("<h4>2026 meetings</h4>", _page_tests._meeting("June", "/june.htm"))
+        assert reader.rows(body) == [_page_tests._Meeting(2026, "June", "/june.htm")]
+
+    def test_records_without_headings_and_an_optional_element(self) -> None:
+        class Month(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label(".month")]
+            pdf: Annotated[str | None, Label('a[href$=".pdf" i]'), Link()]
+
+        body = _page_tests._meetings(
+            _page_tests._meeting("July"),
+            '<div class="meeting"><div class="month">May</div><a href="/m.PDF">p</a></div>',
+        )
+        reader = fr.Reader(Month, fr.HtmlRecords(record="div.meeting"))
+        assert reader.rows(body) == [Month("July", None), Month("May", "/m.PDF")]
+
+    def test_a_format_leaves_records_out_and_reads_its_own_way(self) -> None:
+        from flatread.pages import cell_text  # noqa: PLC0415 (the helper a format reads with)
+
+        @dataclasses.dataclass(frozen=True, kw_only=True)
+        class NoMay(fr.HtmlRecords):
+            @typing.override
+            def is_record(self, element: Element) -> bool:
+                return cell_text(element) != "May"
+
+            @typing.override
+            def value(self, cell: Element, column: Column, read: fr.ReadContext) -> str:
+                return super().value(cell, column, read).upper()
+
+        stage = NoMay(record="div.meeting", heading="h4", heading_pattern=re.compile(r"(?P<year>\d{4}) meetings"))
+        body = _page_tests._meetings(
+            "<h4>2026 meetings</h4>", _page_tests._meeting("May"), _page_tests._meeting("June")
+        )
+        assert fr.Reader(_page_tests._Meeting, stage).rows(body) == [_page_tests._Meeting(2026, "JUNE", None)]
+
+    def test_an_optional_group_states_no_value(self) -> None:
+        class Maybe(msgspec.Struct, frozen=True, gc=False):
+            year: int | None
+            month: Annotated[str, Label(".month")]
+
+        stage = fr.HtmlRecords(
+            record="div.meeting", heading="h4", heading_pattern=re.compile(r"(?:(?P<year>\d{4}) )?meetings")
+        )
+        body = _page_tests._meetings(
+            "<h4>meetings</h4>", _page_tests._meeting("May"), "<h4>2026 meetings</h4>", _page_tests._meeting("June")
+        )
+        assert fr.Reader(Maybe, stage).rows(body) == [Maybe(None, "May"), Maybe(2026, "June")]
+
+    def test_fields_sharing_the_record_each_read_it_their_own_way(self) -> None:
+        class Anchor(msgspec.Struct, frozen=True, gc=False):
+            text: Annotated[str, Label("")]
+            link: Annotated[str, Label(""), Link()]
+
+        reader = fr.Reader(Anchor, fr.HtmlRecords(record="a"))
+        assert reader.rows(b'<a href="/x">X <b>y</b></a>') == [Anchor("Xy", "/x")]
+
+    def test_a_reader_that_takes_no_rows_reads_no_record_as_none(self) -> None:
+        stage = fr.HtmlRecords(
+            record="div.meeting", heading="h4", heading_pattern=re.compile(r"(?P<year>\d{4}) meetings")
+        )
+        reader = fr.Reader(_page_tests._Meeting, stage, empty=True)
+        assert reader.rows(b"<p>none</p>") == []
+
+    def test_a_stage_read_with_no_struct_reads_each_cell_as_its_text(self) -> None:
+        columns = {"title": Column("title", "File", str, None, None, None)}
+        body = b'<table><tr><th>File</th></tr><tr><td><a href="/a">A</a></td></tr></table>'
+        grid = fr.Html().grid(io.BytesIO(body), fr.ReadContext(body, columns=columns))
+        assert grid.text.rows() == [("A",)]

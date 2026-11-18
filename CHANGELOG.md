@@ -27,6 +27,12 @@ in the README, under "Versions".
   and overriding `check`), and the `Keyed` shape a report's runs of values long, a row per key.
 - `flatread.next` reads a label two fields share by place, as 7.x does (a header that writes `%` twice); a header
   read by name refuses one, which it cannot tell apart.
+- `flatread.next` reads HTML pages, as `HtmlFile` and `HtmlRecords` do: the `Html` format reads a page's one table
+  (`table=` its selector), and `HtmlRecords` records that are elements (`record=`, under `heading=` headings matching
+  `heading_pattern`). Each cell is read by its field: a `Link` field's as its link's `href`, a field that is no text's
+  as one text run, and fields sharing a cell each their own way. A format of its own subclasses either, overriding
+  `tables`, `rows` (returning `HtmlRows`), `records`, `is_record` or `value`. A header cell no field reads is text,
+  for a header rule to drop, or, with `unread_cells="value"`, one text run, for `Long` to type.
 
 ## 0.5.0
 
