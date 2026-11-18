@@ -165,6 +165,10 @@ _DECIMAL_TEXT: Final = r"^-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$"
 
 #: The whole numbers an ``int`` field holds, 64 bits' (a float load reads ``1e20`` as one), as floats: low, high.
 _INT_RANGE: Final = (-(2.0**63), 2.0**63)
+#: The bound below which a number cell's whole number is the one written: a cell is a double, so ``9007199254740993``
+#: (2**53 + 1) written in its XML loads as 2**53. One at the bound or past it in an ``int`` field is refused, not read
+#: as some other number.
+_EXACT_INT: Final = 2.0**53
 
 
 #: The date fastexcel reads Excel's serial 60 as, 1900-02-29 in Excel's 1900 date system, a day no calendar has: the
@@ -173,8 +177,8 @@ _LEAP_DAY: Final = dt.date(1900, 2, 28)
 
 
 def _whole(numbers: pl.Series) -> pl.Series:
-    """Return whether each of *numbers*, floats, is a whole number an ``int`` field holds: 64 bits' (none is NaN)."""
-    return (numbers == numbers.floor()) & numbers.is_between(*_INT_RANGE, closed="left")
+    """Return whether each of *numbers*, floats, is a whole number an ``int`` field reads exactly: below 2**53."""
+    return (numbers == numbers.floor()) & (numbers.abs() < _EXACT_INT)
 
 
 def _refuse(text: pl.Series, wrong: pl.Series, what: str, row_one: int) -> None:
@@ -1268,6 +1272,7 @@ class SheetFile[RowT: msgspec.Struct](File[RowT]):
                 [
                     (wrong | (number != number.floor()), "whole number"),
                     (~number.is_between(*_INT_RANGE, closed="left"), "whole number of 64 bits"),
+                    (number.abs() >= _EXACT_INT, "whole number a number cell holds exactly (below 2**53)"),
                 ]
                 if column.scalar is int
                 else [(wrong, "number")]

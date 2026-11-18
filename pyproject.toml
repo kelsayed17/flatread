@@ -71,6 +71,7 @@ dev = [
     "deptry>=0.25.1",  # [tool.deptry]: the dependencies against what src/ imports
     "import-linter>=2.15",  # [tool.importlinter]: the module layers
     "typos>=1.51.1",
+    "hypothesis>=6.170",  # tests/test_properties.py: a read of any body returns its rows or raises ReadError
 ]
 
 [tool.uv]

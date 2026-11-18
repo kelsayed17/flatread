@@ -251,6 +251,13 @@ class Engine[RowT: msgspec.Struct]:
                 _refuse(
                     ~floats.is_between(*_INT_RANGE, closed="left"), text, column, "whole number of 64 bits", numbers
                 )
+                _refuse(
+                    floats.abs() >= _EXACT_INT,
+                    text,
+                    column,
+                    "whole number a number cell holds exactly (below 2**53)",
+                    numbers,
+                )
                 return floats.cast(pl.Int64, strict=True).alias(column.field)
             return floats.alias(column.field)
         if column.scalar is bool:
@@ -377,6 +384,8 @@ def _booleans(text: pl.Series, column: Column, numbers: int | pl.Series) -> pl.S
 
 #: The whole numbers an ``int`` field holds, 64 bits' (a float load reads ``1e20`` as one), as floats: low, high.
 _INT_RANGE: typing.Final = (-(2.0**63), 2.0**63)
+#: The bound below which a sheet's number cell, a double, holds a whole number exactly (``flatread.sheets._EXACT_INT``).
+_EXACT_INT: typing.Final = 2.0**53
 
 
 def _refuse(wrong: pl.Series, text: pl.Series, column: Column, what: str, numbers: int | pl.Series) -> None:

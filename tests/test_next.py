@@ -937,3 +937,34 @@ class TestWhereAReadWentWrong:
 
 class _WhereDay(msgspec.Struct, frozen=True, gc=False):
     day: Annotated[dt.date, Label("Day"), Format("%m/%d/%Y")]
+
+
+class TestFoundByProperties:
+    """Defects tests/test_properties.py found, each kept as a case of its own."""
+
+    def test_a_csv_cell_holding_a_vertical_tab_or_a_line_separator_is_one_cell(self) -> None:
+        # str.splitlines breaks at both, which a CSV row runs on past; until 2026-11-18 the row read as ragged.
+        reader = fr.Reader(_WhereName, fr.Csv())
+        assert reader.rows("Name\na\x0bb\nc\u2028d\n".encode()) == [_WhereName("a\x0bb"), _WhereName("c\u2028d")]
+
+    def test_a_csv_cell_holding_a_lone_cr_keeps_it(self) -> None:
+        reader = fr.Reader(_WhereName, fr.Csv())
+        assert reader.rows(b'Name\na\rb\n"c\rd"\n') == [_WhereName("a\rb"), _WhereName("c\rd")]
+        with pytest.raises(ReadError) as caught:
+            fr.Reader(_WhereDay, fr.Csv()).rows(b"Day\n1/2\r/2026\n")
+        assert caught.value.row == 2
+
+    def test_a_sheets_number_cell_at_2_to_the_53_is_no_int(self) -> None:
+        class Count(msgspec.Struct, frozen=True, gc=False):
+            count: Annotated[int, Label("Count")]
+
+        reader = fr.Reader(Count, fr.Sheet(sheet="S"))
+        assert reader.rows(workbook({"S": [["Count"], [2**53 - 1]]})) == [Count(2**53 - 1)]
+        with pytest.raises(
+            ReadError, match=r"not a whole number a number cell holds exactly \(below 2\*\*53\): row 2$"
+        ):
+            reader.rows(workbook({"S": [["Count"], [2**53 + 1]]}))
+
+
+class _WhereName(msgspec.Struct, frozen=True, gc=False):
+    name: Annotated[str, Label("Name")]

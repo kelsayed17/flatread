@@ -212,12 +212,18 @@ def test_a_number_cell_past_64_bits_is_no_int(null_values: list[str]) -> None:
         SheetFile(_Count, sheet="S", null_values=null_values).rows(_sheet(1, 1e20))
 
 
-def test_the_last_whole_number_of_64_bits_reads() -> None:
-    """2^63 - 1024, the largest float under 2^63, and -2^63 are whole numbers of 64 bits."""
-    assert [row.count for row in SheetFile(_Count, sheet="S").rows(_sheet(2.0**63 - 1024, -(2.0**63)))] == [
-        2**63 - 1024,
-        -(2**63),
-    ]
+@pytest.mark.parametrize("null_values", [[], ["."]], ids=["one load", "two loads"])
+def test_a_number_cell_reads_whole_numbers_below_2_to_the_53_only(null_values: list[str]) -> None:
+    """A number cell is a double: 2**53 + 1 written in its XML loads as 2**53, so neither is read as an int.
+
+    Until 2026-11-18 a whole double up to 2**63 read: ``9007199254740993`` read as ``9007199254740992``, a digit changed
+    and no error.
+    """
+    reader = SheetFile(_Count, sheet="S", null_values=null_values)
+    assert [row.count for row in reader.rows(_sheet(2**53 - 1, -(2**53 - 1)))] == [2**53 - 1, -(2**53 - 1)]
+    for written in (2**53, 2**53 + 1, -(2**53), 2.0**63 - 1024):
+        with pytest.raises(ReadError, match=r"is not a whole number a number cell holds exactly \(below 2\*\*53\)"):
+            reader.rows(_sheet(written))
 
 
 # --- 5. OneSheet and PreambleSheet composed with a zip ---

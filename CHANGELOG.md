@@ -5,6 +5,16 @@ Each release's changes, newest first, and what a reader declared for the release
 
 ## Unreleased
 
+- **A sheet's number cell in an `int` field must hold a whole number below 2\*\*53**, and one at or past it raises
+  `ReadError`. A number cell is a double, so `9007199254740993` written in a workbook loaded as `9007199254740992`
+  and read with no error; 7.x and 0.5.0 read every whole double up to 2\*\*63. Excel holds 15 digits, so no workbook
+  Excel writes holds such a number; a reader of one that does must read the column as text (`AsWritten`, or a `str`
+  field). This holds for `SheetFile`, the sheet readers built on it, and `flatread.next`'s `Sheet`.
+- `flatread.next`'s `Csv` reads a cell holding a vertical tab, a form feed, a line or paragraph separator, or a lone CR
+  as one cell, as polars and `CsvFile` do. Before, it broke the row there and raised `RaggedRowError`.
+- Property tests (`tests/test_properties.py`, hypothesis) read generated tables back exactly, and damaged ones and
+  bytes of no format as rows or a `ReadError`, through the CSV, sheet, XML and HTML readers of both APIs, and hold
+  the two CSV readers to the same rows. They found the two defects above.
 - A workbook whose zip lists a member's name twice raises `CorruptArchiveError`, as every other zip a reader opens
   does. Before, a sheet reader opened it.
 - Importing `flatread.pdf` no longer changes pdfminer for any other caller: outside a flatread read, its stream decoders

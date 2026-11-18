@@ -81,6 +81,8 @@ def records_of(text: pl.DataFrame) -> Cells:
 #: The line breaks ``str.splitlines`` breaks at but a CSV row does not end at, and a NUL: a body holding one, or a
 #: lone CR, is not split fast.
 _OTHER_BREAKS = "\x00\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+#: A CR that ends no CRLF: polars reads it as a cell's text.
+_LONE_CR = re.compile(r"\r(?!\n)")
 
 
 def _breaks_as_polars(text: str) -> bool:
@@ -377,7 +379,13 @@ class Csv:
         cells; elsewhere (a line break ``str.splitlines`` alone breaks at, or a first row narrower
         than the widest, which the parser refuses) ``csv``'s rows are the cells.
         """
-        lines = text.splitlines(keepends=True)
+        # Lines end at LF alone (a CRLF's CR stays, which csv reads as the row's end): str.splitlines also breaks at a
+        # lone CR, a form feed, a vertical tab and the rest of _OTHER_BREAKS, which a CSV row runs on past.
+        # A lone CR is a cell's text, as polars reads it, which csv refuses in an unquoted cell: it reads a stand-in.
+        lone = _LONE_CR.search(text) is not None
+        stand_in = next(chr(c) for c in range(0xE000, 0xF900) if chr(c) not in text) if lone else ""
+        split = (_LONE_CR.sub(stand_in, text) if lone else text).split("\n")
+        lines = [line + "\n" for line in split[:-1]] + ([split[-1]] if split[-1] else [])
         quoting = csv.QUOTE_NONE if self.quote is None else csv.QUOTE_MINIMAL
         reader = csv.reader(lines, delimiter=self.separator, quotechar=self.quote or '"', quoting=quoting, strict=True)
         parsed = parse and _breaks_as_polars(text) and len(self.separator.encode()) == 1
@@ -390,13 +398,15 @@ class Csv:
                 widths.append(len(cells) or 1)
                 ends.append(reader.line_num)
                 if not parsed:
-                    rows.append([cell or None for cell in cells] or [None])
+                    rows.append([(cell.replace(stand_in, "\r") if lone else cell) or None for cell in cells] or [None])
         except csv.Error as e:
             # A quoted cell open at the body's end was cut; any other quote out of place is a malformed row.
             msg = f"row {len(widths) + 1}: {e}"
             raise (TruncatedFileError if "unexpected end of data" in str(e) else ReadError)(msg) from e
         starts = [1, *(end + 1 for end in ends[:-1])]
         raw = ["".join(lines[start - 1 : end]).rstrip("\r\n") for start, end in zip(starts, ends, strict=True)]
+        if lone:
+            raw = [line.replace(stand_in, "\r") for line in raw]
         if not parsed:
             return lines_of(rows, raw, starts)
         try:
