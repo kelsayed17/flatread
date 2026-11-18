@@ -10,6 +10,7 @@ import csv
 import io
 import math
 import os
+import re
 import zipfile
 from typing import TYPE_CHECKING, Annotated
 
@@ -90,6 +91,17 @@ def _same(read: list[_Row], written: list[_Row]) -> bool:
         and (a.share == b.share or (a.share is not None and b.share is not None and math.isclose(a.share, b.share)))
         for a, b in zip(read, written, strict=True)
     )
+
+
+@_SETTINGS
+@given(rows=_ROWS, order=st.permutations(range(len(_LABELS))))
+def test_a_csv_named_in_any_order_reads_back_the_rows_written(rows: list[_Row], order: list[int]) -> None:
+    # The same file, its columns in another order: Named reads it as the struct's.
+    lines = list(csv.reader(io.StringIO(_csv(rows).decode())))
+    out = io.StringIO()
+    csv.writer(out, lineterminator="\n").writerows([line[at] for at in order] for line in lines)
+    named = fr.Reader(_Row, fr.Csv(), table=fr.Header(header=fr.Named()))
+    assert _same(named.rows(out.getvalue().encode()), rows)
 
 
 _READERS: dict[str, Callable[[bytes], object]] = {
@@ -187,16 +199,76 @@ def test_a_workbook_with_a_damaged_part_reads_or_raises_read_error(
     _reads_or_refuses(_SHEETS[reader], out.getvalue())
 
 
+class _Long(msgspec.Struct, frozen=True, gc=False):
+    name: Annotated[str, Label("Name")]
+    field: str
+    value: str | None
+
+
+_CUTS: dict[str, Callable[[bytes], object]] = {
+    "flatread.next Cut": fr.Reader(_Row, fr.Csv(), table=fr.Cut(ends="blank", header=fr.Named())).rows,
+    "flatread.next Cut, misquoted and found": fr.Reader(
+        _Row, fr.Csv(misquoted=True), table=fr.Cut(filled=(2, 1), full_rows=True), empty=True
+    ).rows,
+    "flatread.next Found": fr.Reader(
+        _Row, fr.Csv(), table=fr.Found(key="name", section="# ", section_field="held")
+    ).rows,
+    "flatread.next Found, open and read long": fr.Reader(
+        _Long, fr.Csv(), table=fr.Found(key="name", open=True), shape=fr.Long(keys=re.compile(".+"))
+    ).rows,
+    "flatread.next Cut on a sheet": fr.Reader(
+        _Row, fr.Sheet(sheet="S"), table=fr.Cut(header=fr.Headers(lacking=[(), ("held",)]))
+    ).rows,
+}
+
+
+@pytest.mark.parametrize("reader", _CUTS)
+@_SETTINGS
+@given(rows=_ROWS, data=st.data())
+def test_a_damaged_grid_reads_or_raises_read_error(reader: str, rows: list[_Row], data: st.DataObject) -> None:
+    body = (
+        _csv(rows)
+        if "sheet" not in reader
+        else workbook({"S": [_LABELS, *([row.name, row.count, row.share, row.held] for row in rows)]})
+    )
+    _reads_or_refuses(_CUTS[reader], _damaged(body, data))
+
+
 class _Record(msgspec.Struct, frozen=True, gc=False):
     name: Annotated[str, Label("name")]
     count: Annotated[int | None, Label("count")]
 
 
+class _Keyed(msgspec.Struct, frozen=True, gc=False):
+    name: str
+    year: int
+    count: int | None
+
+
 _ANY: dict[str, Callable[[bytes], object]] = {
     **_READERS,
     **_SHEETS,
+    **_CUTS,
+    "flatread.next Report": fr.Reader(
+        _Record,
+        fr.Text(),
+        table=fr.Report(
+            line=re.compile(r"(?P<name>\S+) +(?P<count>\S*)"),
+            header_lines=[re.compile("NAME +COUNT")],
+            framing=[re.compile("-+")],
+        ),
+        empty=True,
+    ).rows,
+    "flatread.next Report, keyed": fr.Reader(
+        _Keyed,
+        fr.Text(splitlines=True),
+        table=fr.Report(line=re.compile(r"(?P<name>\S+) +(?P<count>.*)"), framing=[re.compile(r"NAME +(?P<year>.*)")]),
+        shape=fr.Keyed(key_field="year"),
+    ).rows,
     "XmlFile": XmlFile(_Record, root="t", record="r").rows,
     "HtmlFile": HtmlFile(_Record).rows,
+    "flatread.next Html": fr.Reader(_Record, fr.Html()).rows,
+    "flatread.next HtmlRecords": fr.Reader(_Record, fr.HtmlRecords(record="tr"), empty=True).rows,
 }
 
 
@@ -207,13 +279,15 @@ def test_bytes_of_no_format_read_or_raise_read_error(reader: str, body: bytes) -
     _reads_or_refuses(_ANY[reader], body)
 
 
-@pytest.mark.parametrize("reader", ["XmlFile", "HtmlFile"])
+@pytest.mark.parametrize("reader", ["XmlFile", "HtmlFile", "flatread.next Html", "flatread.next HtmlRecords"])
 @_SETTINGS
 @given(names=st.lists(_NAMES, min_size=1, max_size=5), data=st.data())
 def test_damaged_markup_reads_or_raises_read_error(reader: str, names: list[str], data: st.DataObject) -> None:
     escaped = [name.replace("&", "&amp;").replace("<", "&lt;") for name in names]
     if reader == "XmlFile":
         body = "<t>" + "".join(f"<r><name>{n}</name><count>1</count></r>" for n in escaped) + "</t>"
+    elif reader == "flatread.next HtmlRecords":
+        body = "<table>" + "".join(f"<tr><name>{n}</name><count>1</count></tr>" for n in escaped) + "</table>"
     else:
         rows = "".join(f"<tr><td>{n}</td><td>1</td></tr>" for n in escaped)
         body = f"<table><tr><th>name</th><th>count</th></tr>{rows}</table>"

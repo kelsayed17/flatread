@@ -5,6 +5,7 @@ import datetime as dt
 import io
 import pickle
 import re
+import types
 import typing
 import zipfile
 from pathlib import Path
@@ -15,6 +16,7 @@ import polars as pl
 import pytest
 
 from flatread import next as fr
+from flatread.core import Column
 from flatread.errors import (
     ControlTotalError,
     CorruptArchiveError,
@@ -27,16 +29,19 @@ from flatread.errors import (
     UnknownLayoutError,
 )
 from flatread.fields import Cell as At
-from flatread.fields import Flag, Format, Joined, Label, Span
+from flatread.fields import Flag, Format, Joined, Label, Link, Span
 from flatread.fields import Shape as Shaped
 from flatread.next._stages import _breaks_as_polars
 from flatread.pdf import PdfLine
+from tests import test_pages as _page_tests
 from tests.support.pdf import pdf
 from tests.support.xlsx import Cell, workbook
 from tests.test_hardening_archives import _HOSTILE
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from flatread.pages import Element
 
 
 class _Price(msgspec.Struct, frozen=True):
@@ -1093,3 +1098,1187 @@ class TestPreamble:
         with pytest.raises(UnknownLayoutError, match=r"^row 2 is blank, not the header$") as caught:
             reader.rows(b"Report\n\nName,N\na,1\n")
         assert caught.value.row == 2
+
+
+class TestHeaderRules:
+    """A finder's header rule: a file under several headers (HeadersCsv), or one named in any order (NamedCsv)."""
+
+    class Holding(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        n: Annotated[int, Label("N")]
+        shares: Annotated[int | None, Label("Shares")] = None
+
+    @staticmethod
+    def _published() -> fr.Reader[TestHeaderRules.Holding]:
+        rule = fr.Headers(lacking=((), ("shares",)), blank=("Filler",), unread=("notes",))
+        return fr.Reader(TestHeaderRules.Holding, fr.Csv(), table=fr.Header(header=rule))
+
+    @staticmethod
+    def _named(required: Sequence[str] = ()) -> fr.Reader[TestHeaderRules.Holding]:
+        return fr.Reader(TestHeaderRules.Holding, fr.Csv(), table=fr.Header(header=fr.Named(required=required)))
+
+    @pytest.mark.parametrize(
+        "body",
+        [b"Name,N,Shares\na,1,2\n", b"Name,N\na,1\n", b"Name,Filler,N,Filler\na,,1,\n", b"notes,Name,N\nhi,a,1\n"],
+        ids=["whole", "lacking", "blank columns", "an unread column"],
+    )
+    def test_a_published_header_reads_as_headers_csv_reads_it(self, body: bytes) -> None:
+        from flatread.delimited import HeadersCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Published(HeadersCsv[TestHeaderRules.Holding]):
+            _headers_lacking = ((), ("shares",))
+            _blank_columns = ("Filler", "Filler")
+            _unread = ("notes",)
+
+        assert self._published().rows(body) == Published(self.Holding).rows(body)
+
+    @pytest.mark.parametrize("body", [b"N,Name\n1,a\n", b"Name\na\n", b"Name,N,Shares,X\na,1,2,3\n"])
+    def test_a_header_none_of_the_files_is_refused(self, body: bytes) -> None:
+        with pytest.raises(UnknownLayoutError, match=r"^the header \[.*\] is none of the file's \[\['Name', 'N', 'S"):
+            self._published().rows(body)
+
+    @pytest.mark.parametrize("held", ["x", " "])
+    def test_a_blank_column_holding_anything_is_refused_by_its_row(self, held: str) -> None:
+        # A space too, as HeadersCsv refuses it: a blank column holds nothing.
+        with pytest.raises(
+            ReadError, match=rf"^the 'Filler' column holds '{held}', and it never holds a value: row 3$"
+        ) as e:
+            self._published().rows(f"Name,Filler,N\na,,1\nb,{held},2\n".encode())
+        assert (e.value.row, e.value.label) == (3, "Filler")
+
+    def test_a_header_the_file_is_not_published_under_is_refused_though_it_is_the_whole(self) -> None:
+        reader = fr.Reader(self.Holding, fr.Csv(), table=fr.Header(header=fr.Headers(lacking=[("shares",)])))
+        assert reader.rows(b"Name,N\na,1\n") == [self.Holding("a", 1)]
+        with pytest.raises(UnknownLayoutError, match="is none of the file's"):
+            reader.rows(b"Name,N,Shares\na,1,2\n")
+
+    @pytest.mark.parametrize("body", [b"N,Name\n1,a\n", b"Shares,notes,N,Name\n3,hi,1,a\n", b"Name,N,Filler\na,1,\n"])
+    def test_a_named_header_reads_as_named_csv_reads_it(self, body: bytes) -> None:
+        from flatread.delimited import NamedCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Named(NamedCsv[TestHeaderRules.Holding]):
+            _blank_columns = ("Filler",)
+            _unread = ("notes",)
+
+        reader = fr.Reader(self.Holding, fr.Csv(), table=fr.Header(header=fr.Named(blank=["Filler"], unread=["notes"])))
+        assert reader.rows(body) == Named(self.Holding).rows(body)
+
+    @pytest.mark.parametrize(
+        ("body", "words"),
+        [
+            (b"Name\na\n", r"lacks \['N'\], which every one names"),
+            (b"Name,N,Bogus,Nope\na,1,2,3\n", r"names \['Bogus', 'Nope'\], which are no field's labels"),
+            (b"Name,N,N\na,1,2\n", r"names \['N'\] twice"),
+        ],
+        ids=["a required column lacked", "a cell no label names", "a label twice"],
+    )
+    def test_a_named_header_is_refused_for(self, body: bytes, words: str) -> None:
+        with pytest.raises(UnknownLayoutError, match=words):
+            self._named().rows(body)
+
+    def test_a_required_field_that_may_be_empty_is_in_every_header(self) -> None:
+        reader = self._named(required=["shares"])
+        assert reader.rows(b"Shares,N,Name\n,1,a\n") == [self.Holding("a", 1)]
+        with pytest.raises(UnknownLayoutError, match=r"lacks \['Shares'\]"):
+            reader.rows(b"N,Name\n1,a\n")
+
+    def test_a_header_writes_a_label_as_its_alternative_or_folded(self) -> None:
+        class Filed(msgspec.Struct, frozen=True, gc=False):
+            number: Annotated[str, Label("file_number", alternatives=("file_no",))]
+            form: Annotated[str, Label("form")]
+
+        reader = fr.Reader(Filed, fr.Csv(), table=fr.Header(header=fr.Named(heading=str.lower)))
+        assert reader.rows(b"FORM,File_No\n10-K,001\n") == [Filed("001", "10-K")]
+        assert reader.rows(b"file_number,form\n002,8-K\n") == [Filed("002", "8-K")]
+
+    def test_a_sheet_reads_under_either_rule(self) -> None:
+        named = fr.Reader(self.Holding, fr.Sheet(sheet="S"), table=fr.Header(header=fr.Named()))
+        assert named.rows(workbook({"S": [["Shares", "N", "Name"], [3, 1, "a"]]})) == [self.Holding("a", 1, 3)]
+        published = fr.Reader(self.Holding, fr.Sheet(sheet="S"), table=fr.Header(header=fr.Headers([(), ("shares",)])))
+        assert published.rows(workbook({"S": [["Name", "N"], ["a", 1]]})) == [self.Holding("a", 1)]
+
+    def test_every_finder_takes_a_rule(self) -> None:
+        rule = fr.Named()
+        trailer = fr.Trailer(re.compile(r"(?P<count>\d+) rows"), header=rule)
+        titled = fr.Titled([re.compile("Report")], header=rule)
+        for table, body in [
+            (fr.Preamble(label="N", header=rule), b"Title\nN,Name\n1,a\n"),
+            (trailer, b"N,Name\n1,a\n1 rows\n"),
+            (titled, b"Report\nN,Name\n1,a\n"),
+        ]:
+            assert fr.Reader(self.Holding, fr.Csv(), table=table).rows(body) == [self.Holding("a", 1)]
+
+    def test_a_stated_field_is_in_no_header(self) -> None:
+        class Stamped(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name")]
+            on: str
+
+        table = fr.Trailer(re.compile(r"as of (?P<on>\S+)"), header=fr.Headers())
+        assert fr.Reader(Stamped, fr.Csv(), table=table).rows(b"Name\na\nas of 2026\n") == [Stamped("a", "2026")]
+        named = fr.Trailer(re.compile(r"as of (?P<on>\S+)"), header=fr.Named())
+        with pytest.raises(UnknownLayoutError, match=r"names \['on'\]"):
+            fr.Reader(Stamped, fr.Csv(), table=named).rows(b"Name,on\na,x\nas of 2026\n")
+
+    @pytest.mark.parametrize(
+        ("rule", "words"),
+        [
+            (fr.Headers(lacking=()), "lacking is empty"),
+            (fr.Headers(lacking=[("nope",)]), r"lack \['nope'\], which are no fields"),
+            (fr.Headers(lacking=[("n",)]), r"lacking \['n'\] could never be read"),
+            (fr.Named(required=["nope"]), r"required fields \['nope'\] are no fields"),
+        ],
+    )
+    def test_a_rule_that_could_never_read_its_struct_is_refused_when_built(
+        self, rule: fr.HeaderRule, words: str
+    ) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Reader(self.Holding, fr.Csv(), table=fr.Header(header=rule))
+
+    def test_a_word_two_fields_share_and_an_alternative_no_named_header_reads_are_refused_when_built(self) -> None:
+        class Shared(msgspec.Struct, frozen=True):
+            a: Annotated[str, Label("a", alternatives=("b",))]
+            b: str
+
+        with pytest.raises(LayoutError, match="two fields share a label"):
+            fr.Reader(Shared, fr.Csv(), table=fr.Header(header=fr.Named()))
+        with pytest.raises(LayoutError, match="only a header read by name takes"):
+            fr.Reader(Shared, fr.Csv(), table=fr.Header(header=fr.Headers()))
+
+    def test_a_rule_and_a_shape_are_refused_together(self) -> None:
+        with pytest.raises(LayoutError, match="a reader takes one"):
+            fr.Reader(
+                self.Holding, fr.Csv(), table=fr.Header(header=fr.Named()), shape=fr.Long(keys=re.compile(r"\d+"))
+            )
+
+
+class TestCut:
+    """One finder for an irregular grid, a CSV's or a sheet's (CsvText, SheetText and GridFile's pieces): cut."""
+
+    class Count(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        n: Annotated[int | None, Label("N")]
+
+    @staticmethod
+    def _pieces() -> dict[str, tuple[object, fr.Cut]]:
+        from flatread.delimited import CsvText  # noqa: PLC0415 (the 7.x readers it replaces)
+        from flatread.grids import BesideGrid, BlankEnded, FilledHeader, TitledGrid  # noqa: PLC0415
+
+        row = TestCut.Count
+
+        class Blank(BlankEnded[row], CsvText[row]):
+            pass
+
+        class Titled(TitledGrid[row], CsvText[row]):
+            _title = "Table 2"
+
+        class Filled(FilledHeader[row], CsvText[row]):
+            pass
+
+        class Beside(BesideGrid[row], CsvText[row]):
+            _band = (1, 3)
+
+        return {
+            "header": (CsvText(row), fr.Cut()),
+            "header_row": (CsvText(row, header_row=3), fr.Cut(header_row=3)),
+            "blank ended": (Blank(row), fr.Cut(ends="blank")),
+            "titled": (Titled(row), fr.Cut(title="Table 2")),
+            "filled": (Filled(row), fr.Cut(filled=(2, 3))),
+            "beside": (Beside(row), fr.Cut(band=(1, 3))),
+        }
+
+    @pytest.mark.parametrize(
+        ("piece", "body"),
+        [
+            ("header", b"Name,N\na,1\n,\nb,\n"),
+            ("header", b"Name,N\na,1,\n"),
+            ("header", b"Name,N,\na,1\n"),
+            ("header", b"Name,N\na\n"),
+            ("header", b"Name,N\n  ,  \na, 2\n"),
+            ("header_row", b"Title\n\nName,N\na,1\n"),
+            ("blank ended", b"Name,N\na,1\n\nNotes,here\n"),
+            ("blank ended", b"Name,N\na,1\n,,\nx,2\n"),
+            ("titled", b"Table 1\nX,Y\n1,2\n\nTable 2\n\nName,N\na,1\n"),
+            ("filled", b"Title\nName,N\na,1\n"),
+            ("beside", b"x,Name,N,y\n,a,1,z\n"),
+        ],
+    )
+    def test_a_csv_grid_is_cut_as_7x_cuts_it(self, piece: str, body: bytes) -> None:
+        old, cut = self._pieces()[piece]
+        assert fr.Reader(self.Count, fr.Csv(), table=cut).rows(body) == old.rows(body)  # ty: ignore[unresolved-attribute] (a 7.x reader)
+
+    def test_a_sheet_grid_is_cut_as_sheet_text_cuts_it_its_cells_kinds_kept(self) -> None:
+        from flatread.sheets import SheetText  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        for rows in [
+            [["T"], ["Name", "N"], ["a", 1], [None, None], ["b", 2.0]],
+            [[None, "T"], [None, "Name", "N"], [None, "a", 3]],
+        ]:
+            body = workbook({"S": rows})
+            reader = fr.Reader(self.Count, fr.Sheet(sheet="S"), table=fr.Cut(header_row=2))
+            assert reader.rows(body) == SheetText(self.Count, sheet="S", header_row=2).rows(body)
+
+    def test_a_null_word_is_an_empty_cell_and_a_row_of_them_no_row(self) -> None:
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Cut(), null_values=["NA"])
+        assert reader.rows(b"Name,N\na,NA\nNA,NA\nb,2\n") == [self.Count("a", None), self.Count("b", 2)]
+
+    @pytest.mark.parametrize(
+        ("cut", "body", "error", "words"),
+        [
+            (fr.Cut(), b"Name,N\na,1\nb,2,x\n", ReadError, r"^row 3 holds a cell past the header \['Name', 'N'\],"),
+            (
+                fr.Cut(header_row=3),
+                b"Title\nName,N\n",
+                UnknownLayoutError,
+                r"^the body has 2 rows, and its header is row 3$",
+            ),
+            (
+                fr.Cut(title="Table 2"),
+                b"Table 2,x\nName,N\n",
+                UnknownLayoutError,
+                r"^no row is the title 'Table 2' alone$",
+            ),
+            (
+                fr.Cut(title="Table 2"),
+                b"Table 2\n\n",
+                UnknownLayoutError,
+                r"^the title 'Table 2' has no table below it$",
+            ),
+            (
+                fr.Cut(filled=(2, 3)),
+                b"No trades\n",
+                EmptyBodyError,
+                r"^the grid holds no table: no row of it fills 2 cells",
+            ),
+            (fr.Cut(), b",,Name\na,b,c\n", UnknownLayoutError, r"leaves two cells empty"),
+            (fr.Cut(), b",,\na,b,c\n", ReadError, r"^row 2 holds a cell past the header \[\],"),
+            (
+                fr.Cut(full_rows=True),
+                b"Name,N\na,1\n\nb\n",
+                RaggedRowError,
+                r"^row 4 has 1 fields, not the widest row's 2$",
+            ),
+        ],
+        ids=[
+            "past the header",
+            "no header row",
+            "no title alone",
+            "nothing under the title",
+            "no table",
+            "two empty",
+            "an empty header",
+            "short",
+        ],
+    )
+    def test_a_grid_cut_raises(self, cut: fr.Cut, body: bytes, error: type[ReadError], words: str) -> None:
+        with pytest.raises(error, match=words):
+            fr.Reader(self.Count, fr.Csv(), table=cut).rows(body)
+
+    def test_full_rows_reads_a_grid_whose_rows_are_full_and_blank_lines(self) -> None:
+        reader = fr.Reader(self.Count, fr.Csv(), table=fr.Cut(full_rows=True))
+        assert reader.rows(b"Name,N\na,1\n\nb,2\n") == [self.Count("a", 1), self.Count("b", 2)]
+
+    def test_a_header_row_of_no_labels_over_no_cells_is_no_header_of_the_struct(self) -> None:
+        with pytest.raises(UnknownLayoutError, match=r"^the header \[\] is not \['Name', 'N'\]$"):
+            fr.Reader(self.Count, fr.Csv(), table=fr.Cut()).rows(b",,\n,,\n")
+
+    def test_a_grid_of_no_table_is_no_rows_where_the_reader_takes_one(self) -> None:
+        assert fr.Reader(self.Count, fr.Csv(), table=fr.Cut(filled=(2, 3)), empty=True).rows(b"No trades\n") == []
+
+    def test_a_title_in_a_grid_of_no_columns_is_not_found(self) -> None:
+        with pytest.raises(UnknownLayoutError, match="no row is the title"):
+            fr.Reader(self.Count, fr.Sheet(sheet="S"), table=fr.Cut(title="T")).rows(workbook({"S": []}))
+
+    def test_a_title_alone_in_a_grid_of_one_column_is_found(self) -> None:
+        class Name(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name")]
+
+        assert fr.Reader(Name, fr.Csv(), table=fr.Cut(title="T")).rows(b"T\nName\na\n") == [Name("a")]
+
+    def test_a_header_over_rows_reads_long_as_long_file_reads_it(self) -> None:
+        from flatread.delimited import CsvText  # noqa: PLC0415 (the 7.x reader it replaces)
+        from flatread.layout import LongFile  # noqa: PLC0415
+
+        class Rate(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name")]
+            key: str
+            value: float | None
+
+        keys = re.compile(r"Rates\x1f\d{4}")
+
+        class Old(LongFile[Rate], CsvText[Rate]):
+            _above = 1
+            _keys = keys
+
+        body = b",Rates,\nName,2024,2025\na,1,2\nb,,3\n"
+        reader = fr.Reader(Rate, fr.Csv(), table=fr.Cut(header_row=2, above=1), shape=fr.Long(keys=keys))
+        assert reader.rows(body) == Old(Rate, header_row=2).rows(body)
+        with pytest.raises(UnknownLayoutError, match="heads two columns alike"):
+            reader.rows(b",Rates,\nName,2024,2024\na,1,2\n")
+
+    def test_a_header_rule_reads_a_cut_header(self) -> None:
+        cut = fr.Cut(header=fr.Headers(unread=["notes"]))
+        assert fr.Reader(self.Count, fr.Csv(), table=cut).rows(b"Name,notes,N\na,x,1\n") == [self.Count("a", 1)]
+
+    @pytest.mark.parametrize(
+        ("keywords", "words"),
+        [
+            ({"header_row": 0}, "is no row of a grid"),
+            ({"title": "T", "header_row": 2}, "one of the three"),
+            ({"title": "T", "filled": (2, 3)}, "one of the three"),
+            ({"above": 1, "title": "T"}, "above takes a header_row"),
+            ({"above": 2, "header_row": 2}, "do not fit above"),
+            ({"band": (-1, None)}, "is no columns of a grid"),
+            ({"band": (2, 2)}, "is no columns of a grid"),
+            ({"filled": (0, 3)}, "is no header's"),
+            ({"ends": "notes"}, "not 'notes'"),
+        ],
+    )
+    def test_a_cut_no_grid_has_is_refused_when_built(self, keywords: Mapping[str, typing.Any], words: str) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Cut(**keywords)
+
+
+def test_a_misquoted_csv_reads_a_stray_quote_as_text_as_csv_text_does() -> None:
+    from flatread.delimited import CsvText  # noqa: PLC0415 (the 7.x reader it replaces)
+
+    class Note(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        note: Annotated[str | None, Label("Note")]
+
+    class Misquoted(CsvText[Note]):
+        _misquoted = True
+
+    body = b'Name,Note\na,"ts." Holdings o"\nb,"x, y"\n'
+    reader = fr.Reader(Note, fr.Csv(misquoted=True), table=fr.Cut())
+    assert reader.rows(body) == Misquoted(Note).rows(body) == [Note("a", 'ts. Holdings o"'), Note("b", "x, y")]
+    assert fr.Reader(Note, fr.Csv(misquoted=True)).rows(b'Name,Note\na,b"c\n') == [Note("a", 'b"c')]
+    with pytest.raises(ReadError):
+        fr.Reader(Note, fr.Csv(), table=fr.Cut()).rows(body)
+
+
+class TestLong:
+    """LongFile's switches as Long's: several keys, spacers, scattered and beside columns, repeats, needs_rows."""
+
+    class One(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        year: int
+        value: float | None
+
+    class Two(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        measure: str
+        year: int
+        value: float | None
+
+    class Noted(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        note: Annotated[str | None, Label("Note")]
+        year: int
+        value: float | None
+
+    class Placed(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("Name")]
+        year: int
+        n: int
+        value: float | None
+
+    _YEAR: typing.ClassVar = re.compile(r"\d{4}")
+    _MEASURE: typing.ClassVar = re.compile(r"(?P<measure>[a-z_]+)_(?P<year>\d{4})")
+
+    @staticmethod
+    def _old(row: type[msgspec.Struct], keys: re.Pattern[str], switches: Mapping[str, object]) -> typing.Any:  # noqa: ANN401 (a 7.x reader)
+        from flatread.delimited import CsvText  # noqa: PLC0415 (the 7.x reader it replaces)
+        from flatread.layout import LongFile  # noqa: PLC0415
+
+        bases = (LongFile[row], CsvText[row])  # ty: ignore[invalid-type-form] (a reader of the case's row)
+        old = types.new_class("Old", bases, exec_body=lambda body: body.update({"_keys": keys, **switches}))
+        return old(row)
+
+    @pytest.mark.parametrize(
+        ("row", "switches", "long", "body"),
+        [
+            (
+                Two,
+                {"_key_count": 2},
+                fr.Long(keys=_MEASURE, key_count=2),
+                b"Name,mv_2003,mv_2004,debt_2003\na,1,2,3\nb,,5,\n",
+            ),
+            (One, {"_spacer_columns": True}, fr.Long(keys=_YEAR, spacers=True), b"Name,2001,,2002\na,1,,2\n"),
+            (One, {"_scattered": True}, fr.Long(keys=_YEAR, scattered=True), b"2001,Name,2002\n1,a,2\n"),
+            (Noted, {"_beside": ("note",)}, fr.Long(keys=_YEAR, beside=["note"]), b"Name,2001,Note,2002\na,1,hi,2\n"),
+            (Noted, {"_beside": ("note",)}, fr.Long(keys=_YEAR, beside=["note"]), b"Name,2001,2002\na,1,2\n"),
+            (One, {"_empty_cells": "drop"}, fr.Long(keys=_YEAR, empty_cells="drop"), b"Name,2001,2002\na,1,\nb,,\n"),
+        ],
+        ids=["several keys", "spacers", "scattered", "beside", "beside lacked", "drop"],
+    )
+    def test_a_long_table_reads_as_long_file_reads_it(
+        self, row: type[msgspec.Struct], switches: Mapping[str, object], long: fr.Long, body: bytes
+    ) -> None:
+        reader = fr.Reader(row, fr.Csv(), table=fr.Cut(), shape=long)
+        assert reader.rows(body) == self._old(row, long.keys, switches).rows(body)
+
+    def test_a_key_written_twice_is_two_keys_by_their_place_where_headings_repeat(self) -> None:
+        long = fr.Long(keys=re.compile(r"(?P<year>\d{4})"), key_count=2, repeats=True)
+        rows = fr.Reader(self.Placed, fr.Csv(), shape=long).rows(b"Name,2001,2001\na,1,2\n")
+        assert rows == [self.Placed("a", 2001, 1, 1.0), self.Placed("a", 2001, 2, 2.0)]
+
+    @pytest.mark.parametrize(
+        ("row", "long", "body", "error", "words"),
+        [
+            (Two, fr.Long(keys=_MEASURE, key_count=2), b"Name,mv_2003,mv_2003\na,1,2\n", UnknownLayoutError, "twice"),
+            (Two, fr.Long(keys=_MEASURE, key_count=2), b"Name,mv_x\na,1\n", UnknownLayoutError, "are not keys"),
+            (
+                One,
+                fr.Long(keys=_YEAR, spacers=True),
+                b"Name,2001,,2002\na,1,x,2\n",
+                ReadError,
+                r"^a column with no heading holds a cell: row 2$",
+            ),
+            (One, fr.Long(keys=_YEAR, scattered=True), b"Name,2001,Name\na,1,b\n", UnknownLayoutError, "no one 'Name'"),
+            (
+                Noted,
+                fr.Long(keys=_YEAR, beside=["note"]),
+                b"Name,Note,2001,Note\na,x,1,y\n",
+                UnknownLayoutError,
+                "has 2 'Note' columns",
+            ),
+            (
+                One,
+                fr.Long(keys=_YEAR, needs_rows=True),
+                b"Name,2001\n",
+                EmptyBodyError,
+                r"^the body is a header and no",
+            ),
+            (
+                Two,
+                fr.Long(keys=re.compile(r"(?P<measure>[a-z]*)_(?P<year>\d{4})"), key_count=2),
+                b"Name,_2001\na,1\n",
+                UnknownLayoutError,
+                r"name no measure, which every row holds",
+            ),
+        ],
+        ids=[
+            "a key twice",
+            "no key",
+            "a spacer holding a cell",
+            "scattered twice",
+            "beside twice",
+            "no rows",
+            "no text",
+        ],
+    )
+    def test_a_long_table_is_refused_for(
+        self, row: type[msgspec.Struct], long: fr.Long, body: bytes, error: type[ReadError], words: str
+    ) -> None:
+        with pytest.raises(error, match=words):
+            fr.Reader(row, fr.Csv(), shape=long, empty=True).rows(body)
+
+    def test_a_table_of_no_rows_is_one_where_needs_rows_is_unset(self) -> None:
+        assert fr.Reader(self.One, fr.Csv(), shape=fr.Long(keys=self._YEAR), empty=True).rows(b"Name,2001\n") == []
+
+    def test_a_header_of_no_keys_is_a_table_of_no_rows(self) -> None:
+        reader = fr.Reader(self.One, fr.Csv(), shape=fr.Long(keys=self._YEAR), empty=True)
+        assert reader.rows(b"Name\na\n") == []
+
+    def test_a_sheet_s_key_is_its_header_text_typed_as_the_key_field(self) -> None:
+        from flatread.layout import LongFile  # noqa: PLC0415 (the 7.x reader it replaces)
+        from flatread.sheets import SheetFile  # noqa: PLC0415
+
+        class Old(LongFile[TestLong.One], SheetFile[TestLong.One]):
+            _keys = re.compile(r"\d{4}")
+
+        body = workbook({"S": [["Name", "2001", "2002"], ["a", 1, 2.5]]})
+        reader = fr.Reader(self.One, fr.Sheet(sheet="S"), shape=fr.Long(keys=self._YEAR))
+        expected = [self.One("a", 2001, 1.0), self.One("a", 2002, 2.5)]
+        assert reader.rows(body) == Old(self.One, sheet="S").rows(body) == expected
+
+    def test_a_long_shape_no_table_has_is_refused_when_built(self) -> None:
+        with pytest.raises(LayoutError, match="at least one key"):
+            fr.Long(keys=self._YEAR, key_count=0)
+        with pytest.raises(LayoutError, match="kept or dropped"):
+            fr.Long(keys=self._YEAR, empty_cells="skip")  # ty: ignore[invalid-argument-type] (refused)
+
+    @pytest.mark.parametrize(
+        ("row", "long", "words"),
+        [
+            (Noted, fr.Long(keys=_YEAR, beside=["nope"]), r"beside names \['nope'\]"),
+            (Two, fr.Long(keys=re.compile(r"(?P<year>\d{4})"), key_count=2), r"the key fields \['measure'\] are named"),
+        ],
+    )
+    def test_a_long_shape_its_row_does_not_fit_is_refused_when_read(
+        self, row: type[msgspec.Struct], long: fr.Long, words: str
+    ) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Reader(row, fr.Csv(), shape=long).rows(b"Name,2001\na,1\n")
+
+
+class TestFound:
+    """FoundTable's export as Found: its header found by the key field's words below any titles."""
+
+    class Filer(msgspec.Struct, frozen=True, gc=False):
+        cik: Annotated[str, Label("CIK", alternatives=("Cik",))]
+        name: Annotated[str | None, Label("Name")]
+        n: Annotated[int | None, Label("N")]
+
+    class Requested(msgspec.Struct, frozen=True, gc=False):
+        cik: Annotated[str, Label("CIK")]
+        kind: str | None
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b"Report\n\nName,CIK,N\na,1,2\n---,---,---\nb,3,\n",
+            b"Title\nCik,N\n1,2\n",
+            b"CIK,N\n",
+            b"Name,N\na,1\n",
+            b"CIK,Bogus\n1,2\n",
+            b"CIK,CIK\n1,2\n",
+            b"CIK,N\n1\n",
+            b"CIK,N,\n1,2,x\n",
+            b"CIK,N\n1,2,3\n",
+        ],
+        ids=["titles, rules", "an alternative", "no rows", "no key", "a stray", "twice", "short", "unlabeled", "past"],
+    )
+    def test_an_export_reads_or_raises_as_found_csv_does(self, body: bytes) -> None:
+        from flatread.found import FoundCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        outcomes = []
+        for read in (
+            fr.Reader(self.Filer, fr.Csv(), table=fr.Found(key="cik")).rows,
+            FoundCsv(self.Filer, key="cik").rows,
+        ):
+            try:
+                outcomes.append(read(body))
+            except ReadError as e:
+                outcomes.append(type(e))
+        assert outcomes[0] == outcomes[1]
+
+    def test_an_error_names_the_row_and_its_cells(self) -> None:
+        reader = fr.Reader(self.Filer, fr.Csv(), table=fr.Found(key="cik"))
+        with pytest.raises(RaggedRowError, match=r"^row 3 has 1 cells, not the header's 2: \['1'\]$"):
+            reader.rows(b"Title\nCIK,N\n1\n")
+        with pytest.raises(ReadError, match=r"^row 2 holds a value under no label: \['1', '2', 'x'\]$"):
+            reader.rows(b"CIK,N,\n1,2,x\n")
+
+    def test_a_section_line_states_its_field_for_the_rows_below_as_found_csv_does(self) -> None:
+        from flatread.found import FoundCsv  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Sectioned(FoundCsv[TestFound.Requested]):
+            _section_prefix = "Request Type: "
+            _section_field = "kind"
+
+        body = b"CIK\n1\nRequest Type: FOIA\n2\n3\nRequest Type: X ,\n4\n"
+        found = fr.Found(key="cik", section="Request Type: ", section_field="kind")
+        rows = fr.Reader(self.Requested, fr.Csv(), table=found).rows(body)
+        assert rows == Sectioned(self.Requested, key="cik").rows(body)
+        assert [row.kind for row in rows] == [None, "FOIA", "FOIA", "X"]
+
+    @pytest.mark.parametrize(("body", "read"), [(b",CIK,N\n1,a,2\n2,b,3\n", True), (b",CIK,N\nx,a,2\n", False)])
+    def test_an_unlabeled_first_column_of_whole_numbers_numbers_the_rows(self, body: bytes, *, read: bool) -> None:
+        reader = fr.Reader(self.Filer, fr.Csv(), table=fr.Found(key="cik", numbered_rows=True))
+        if read:
+            assert reader.rows(body) == [self.Filer("a", None, 2), self.Filer("b", None, 3)]
+        else:
+            with pytest.raises(ReadError, match="under no label"):
+                reader.rows(body)
+
+    def test_a_heading_folds_each_header_cell(self) -> None:
+        reader = fr.Reader(self.Filer, fr.Csv(), table=fr.Found(key="cik", heading=str.upper))
+        assert reader.rows(b"cik,n\n1,2\n") == [self.Filer("1", None, 2)]
+
+    def test_an_open_header_reads_each_cell_as_its_column_for_a_shape(self) -> None:
+        class Field(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name")]
+            field: str
+            value: str | None
+
+        long = fr.Long(keys=re.compile(r"[A-Z]\w*"))
+        reader = fr.Reader(Field, fr.Csv(), table=fr.Found(key="name", open=True), shape=long)
+        assert reader.rows(b"Roster\nName,Phone,,Fax\na,1,,2\n") == [
+            Field("a", "Phone", "1"),
+            Field("a", "Fax", "2"),
+        ]
+
+    def test_a_sheet_export_reads_as_found_sheet_reads_it(self) -> None:
+        from flatread.sheets import FoundSheet  # noqa: PLC0415 (the 7.x reader it replaces)
+
+        class Named(msgspec.Struct, frozen=True, gc=False):
+            cik: Annotated[str, Label("CIK")]
+            name: Annotated[str | None, Label("Name")]
+
+        body = workbook({"S": [["Title"], [None], ["Name", "CIK"], ["a", "x1"], [None, None], ["b", "x2"]]})
+        rows = fr.Reader(Named, fr.Sheet(), table=fr.Found(key="cik")).rows(body)
+        assert rows == FoundSheet(Named, key="cik").rows(body) == [Named("x1", "a"), Named("x2", "b")]
+
+    @pytest.mark.parametrize(
+        ("found", "words"),
+        [
+            (fr.Found(key="nope"), "is no field read from a column"),
+            (fr.Found(key="cik", section="Type: ", section_field="nope"), "is no field of the row"),
+        ],
+    )
+    def test_a_found_table_its_row_has_not_is_refused(self, found: fr.Found, words: str) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Reader(self.Filer, fr.Csv(), table=found).rows(b"CIK\n1\n")
+
+    def test_a_section_without_its_field_or_a_word_two_fields_share_is_refused(self) -> None:
+        with pytest.raises(LayoutError, match="go together"):
+            fr.Found(key="cik", section="Type: ")
+
+        class Shared(msgspec.Struct, frozen=True):
+            a: Annotated[str, Label("a", alternatives=("b",))]
+            b: str
+
+        with pytest.raises(LayoutError, match="two fields share a label"):
+            fr.Reader(Shared, fr.Csv(), table=fr.Found(key="a")).rows(b"a\nx\n")
+
+
+class TestReport:
+    """ReportFile's report as Text and Report, and KeyedReport's as Keyed: each held to the 7.x reader."""
+
+    @staticmethod
+    def _sales(**report: typing.Any) -> fr.Report:  # noqa: ANN401 (Report's switches)
+        from tests.test_flat import _Sales  # noqa: PLC0415 (the 7.x report it replaces)
+
+        sales = fr.Report(line=_Sales._line, header_lines=_Sales._header_lines, framing=_Sales._framing)
+        return dataclasses.replace(sales, **report)
+
+    def test_rows_are_read_among_their_framing_as_report_file_reads_them(self) -> None:
+        from tests.test_flat import _SALES, _Sale, _Sales  # noqa: PLC0415 (the 7.x report it replaces)
+
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(), null_values=["n.a."])
+        assert reader.rows(_SALES) == _Sales(_Sale, null_values=("n.a.",)).rows(_SALES)
+        assert len(reader.rows(_SALES)) == 3
+
+    def test_a_line_of_no_kind_raises_naming_it(self) -> None:
+        from tests.test_flat import _SALES, _Sale  # noqa: PLC0415 (the 7.x report)
+
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(), null_values=["n.a."])
+        with pytest.raises(
+            ReadError, match=r"^line 8 ' MILL n\.a\.' is neither a row nor a line framing the table$"
+        ) as e:
+            reader.rows(_SALES.replace(b" MILL           3   n.a.", b" MILL n.a."))
+        assert e.value.row == 8
+
+    def test_a_report_cut_short_of_its_last_line_raises(self) -> None:
+        from tests.test_flat import _SALES, _Ended, _Sale  # noqa: PLC0415 (the 7.x report)
+
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(last_line=_Ended._last_line), null_values=["n.a."])
+        ended = _SALES + b"  ***** END OF REPORT *****\n\n"
+        assert reader.rows(ended) == _Ended(_Sale, null_values=("n.a.",)).rows(ended)
+        with pytest.raises(TruncatedFileError, match=r"the report ends with ' PIER .*': it was cut"):
+            reader.rows(_SALES)
+
+    def test_a_report_of_no_rows_is_one_where_the_reader_takes_none(self) -> None:
+        from tests.test_flat import _SALES, _Sale, _Sales  # noqa: PLC0415 (the 7.x report)
+
+        framing = (*_Sales._framing, re.compile(r"NO SALES"))
+        report = fr.Report(line=_Sales._line, header_lines=_Sales._header_lines, framing=framing)
+        empty = _SALES.split(b"REGION NORTH")[0] + b"NO SALES\n"
+        assert fr.Reader(_Sale, fr.Text(), table=report, empty=True).rows(empty) == []
+        with pytest.raises(EmptyBodyError, match=r"^the report holds no rows$"):
+            fr.Reader(_Sale, fr.Text(), table=report).rows(empty)
+        with pytest.raises(UnknownLayoutError, match="no column header"):
+            fr.Reader(_Sale, fr.Text(), table=report, empty=True).rows(
+                b"SALES REPORT   DAY 11/06/2026   PAGE 1\nNO SALES\n"
+            )
+
+    def test_a_format_checks_its_lines_by_subclassing(self) -> None:
+        from tests.test_flat import _SALES, _Sale, _Sales  # noqa: PLC0415 (the 7.x report)
+
+        @dataclasses.dataclass(frozen=True, kw_only=True)
+        class Counted(fr.Report):
+            @typing.override
+            def check(self, read: Sequence[tuple[int, re.Match[str]]]) -> None:
+                super().check(read)
+                if (rows := sum(match.re is self.line for _, match in read)) != int(read[-1][1][1]):
+                    msg = f"the report counts {read[-1][1][1]} stores, and holds {rows}"
+                    raise ReadError(msg)
+
+        report = Counted(
+            line=_Sales._line,
+            header_lines=_Sales._header_lines,
+            framing=_Sales._framing,
+            last_line=re.compile(r"STORES +(\d+)"),
+        )
+        reader = fr.Reader(_Sale, fr.Text(), table=report, null_values=["n.a."])
+        assert len(reader.rows(_SALES + b"STORES 3\n")) == 3
+        with pytest.raises(ReadError, match="the report counts 4 stores, and holds 3"):
+            reader.rows(_SALES + b"STORES 4\n")
+
+    def test_thousands_cleans_a_report_s_numbers_naming_the_line(self) -> None:
+        from tests.test_flat import _SALES, _Sale  # noqa: PLC0415 (the 7.x report)
+
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(), cells=[fr.Thousands()], null_values=["n.a."])
+        assert reader.rows(_SALES.replace(b"MAIN ST       12", b"MAIN ST    1,200"))[0].units == 1200
+        with pytest.raises(ReadError, match=r"the 'units' cell '12,00' is not a whole number: row 7$"):
+            reader.rows(_SALES.replace(b"MAIN ST       12", b"MAIN ST    12,00"))
+
+    def test_a_preamble_is_dropped_to_the_header_s_first_run_as_report_file_drops_it(self) -> None:
+        from tests.test_flat import _Sale, _Sales  # noqa: PLC0415 (the 7.x report)
+
+        class Preambled(_Sales):
+            _preamble = True
+
+        body = (
+            b"anything, ( at all\n STORE      UNITS   UNIT\n             SOLD  PRICE\n"
+            b"SALES REPORT   DAY 11/06/2026   PAGE 1\nREGION NORTH\n MAIN ST       12   1.50\n"
+        )
+        reader = fr.Reader(_Sale, fr.Text(), table=self._sales(preamble=True))
+        assert reader.rows(body) == Preambled(_Sale).rows(body)
+        assert len(reader.rows(body)) == 1
+        with pytest.raises(UnknownLayoutError, match="holds no run of the header's lines"):
+            reader.rows(b"anything at all\n")
+
+    def test_a_blank_line_read_is_a_line_of_its_kind(self) -> None:
+        class Word(msgspec.Struct, frozen=True, gc=False):
+            word: str
+
+        report = fr.Report(line=re.compile(r"(?P<word>\w+)"), framing=[re.compile("")], blank_lines="read")
+        assert fr.Reader(Word, fr.Text(), table=report).rows(b"a\n\nb\n") == [Word("a"), Word("b")]
+        strict = fr.Report(line=re.compile(r"(?P<word>\w+)"), blank_lines="read")
+        with pytest.raises(ReadError, match=r"^line 2 '' is neither a row"):
+            fr.Reader(Word, fr.Text(), table=strict).rows(b"a\n\nb\n")
+
+    def test_text_lines_split_as_splitlines_splits_them_in_latin_1_too(self) -> None:
+        class Word(msgspec.Struct, frozen=True, gc=False):
+            word: str
+
+        report = fr.Report(line=re.compile(r"(?P<word>\w+)"))
+        reader = fr.Reader(Word, fr.Text(splitlines=True), table=report)
+        assert reader.rows(b"caf\xe9\x0cb\n") == [Word("café"), Word("b")]
+        with pytest.raises(ReadError, match="always ends its last line"):
+            fr.Reader(Word, fr.Text(final_line_ending=True), table=report).rows(b"a")
+        with pytest.raises(EmptyBodyError, match=r"^the body is empty$"):
+            reader.rows(b" \n")
+
+    @pytest.mark.parametrize(
+        ("report", "words"),
+        [
+            ({"line": "nope"}, "compiled from str"),
+            ({"line": re.compile("x"), "blank_lines": "skip"}, "not 'skip'"),
+            ({"line": re.compile("x"), "preamble": True}, "it names none"),
+        ],
+    )
+    def test_a_report_no_file_has_is_refused_when_built(self, report: Mapping[str, typing.Any], words: str) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Report(**report)
+
+    def test_a_report_whose_groups_are_not_its_fields_is_refused(self) -> None:
+        from tests.test_flat import _SALES, _Sale, _Sales  # noqa: PLC0415 (the 7.x report)
+
+        stray = self._sales(framing=(*_Sales._framing, re.compile(r"CLERK (?P<clerk>\w+)")))
+        both = self._sales(framing=(*_Sales._framing, re.compile(r"STORE (?P<store>\w+)")))
+        with pytest.raises(LayoutError, match=r"the report's groups \['clerk'\] name no field of the row"):
+            fr.Reader(_Sale, fr.Text(), table=stray).rows(_SALES)
+        with pytest.raises(LayoutError, match=r"the fields \['store'\] are both a row's cells and stated"):
+            fr.Reader(_Sale, fr.Text(), table=both).rows(_SALES)
+
+    def test_a_keyed_report_reads_long_as_keyed_report_reads_it(self) -> None:
+        from tests.test_flat import _HELD, _Held, _Shares  # noqa: PLC0415 (the 7.x report it replaces)
+
+        reader = fr.Reader(
+            _Shares,
+            fr.Text(),
+            table=fr.Report(line=_Held._line, framing=_Held._framing),
+            shape=fr.Keyed(key_field="month"),
+            null_values=["-"],
+        )
+        assert reader.rows(_HELD) == _Held(_Shares, null_values=("-",)).rows(_HELD)
+        with pytest.raises(RaggedRowError, match=r"^row 3 holds 3 values, not 4: 2 for each key above it$"):
+            reader.rows(_HELD.replace(b"4.5 -", b"4.5"))
+
+    def test_a_keyed_report_finds_its_keys_by_their_own_cell(self) -> None:
+        class Row(msgspec.Struct, frozen=True, gc=False):
+            name: str
+            year: int
+            value: str
+
+        report = fr.Report(
+            line=re.compile(r"(?P<name>[a-z]+)\s+(?P<value>.*)"), framing=[re.compile(r"Name\s+(?P<year>.*)")]
+        )
+        keyed = fr.Keyed(cell=re.compile(r"x\d+", re.IGNORECASE), key_cell=re.compile(r"\d+"))
+        reader = fr.Reader(Row, fr.Text(), table=report, shape=keyed)
+        assert reader.rows(b"Name 2020 2021\nabc X1 x2\n") == [Row("abc", 2020, "X1"), Row("abc", 2021, "x2")]
+
+    @pytest.mark.parametrize(
+        ("keyed", "words"),
+        [
+            ({"cell": re.compile(r"(?<=\s)\d+")}, "none polars' engine reads"),
+            ({"cell": re.compile(r"\d+", re.ASCII)}, "ASCII"),
+            ({"key_cell": re.compile(r"(?<=\s)\d+")}, "none polars' engine reads"),
+        ],
+    )
+    def test_a_keyed_pattern_polars_cannot_read_is_refused_when_built(
+        self, keyed: Mapping[str, typing.Any], words: str
+    ) -> None:
+        with pytest.raises(LayoutError, match=words):
+            fr.Keyed(**keyed)
+
+    def test_a_keyed_report_its_row_does_not_fit_is_refused(self) -> None:
+        class Row(msgspec.Struct, frozen=True, gc=False):
+            name: str
+            value: str
+
+        report = fr.Report(line=re.compile(r"(?P<name>[a-z]+)\s+(?P<value>.*)"))
+        for keyed, words in [
+            (fr.Keyed(key_field="nope"), "no field of the row"),
+            (fr.Keyed(key_field="value"), "a value field after it"),
+        ]:
+            with pytest.raises(LayoutError, match=words):
+                fr.Reader(Row, fr.Text(), table=report, shape=keyed).rows(b"a 1\n")
+        with pytest.raises(LayoutError, match="reads text lines, not a sheet's cells"):
+            fr.Reader(Row, fr.Sheet(sheet="S"), shape=fr.Keyed(key_field="name")).rows(
+                workbook({"S": [["name", "value"], ["a", "1"]]})
+            )
+
+
+class TestARepeatedLabel:
+    """A label two fields share is two columns, by place, as 7.x reads a header that writes ``%`` twice."""
+
+    class Change(msgspec.Struct, frozen=True, gc=False):
+        name: Annotated[str, Label("name")]
+        month: Annotated[float, Label("%")]
+        year: Annotated[float | None, Label("%")] = None
+
+    def test_a_csv_s_and_a_sheet_s_repeated_heading_is_each_field_s_by_place_as_7x_reads_it(self) -> None:
+        from flatread.delimited import CsvFile  # noqa: PLC0415 (the 7.x reader)
+        from flatread.sheets import SheetFile  # noqa: PLC0415
+
+        body = b"name,%,%\nx,1,2\n"
+        assert (
+            fr.Reader(self.Change, fr.Csv()).rows(body) == CsvFile(self.Change).rows(body) == [self.Change("x", 1, 2)]
+        )
+        sheet = workbook({"S": [["name", "%", "%"], ["x", 1, 2]]})
+        assert fr.Reader(self.Change, fr.Sheet(sheet="S")).rows(sheet) == SheetFile(self.Change, sheet="S").rows(sheet)
+        assert fr.Reader(self.Change, fr.Csv(), table=fr.Cut()).rows(body) == [self.Change("x", 1, 2)]
+
+    def test_a_published_header_lacking_one_of_them_reads_the_other(self) -> None:
+        rule = fr.Headers(lacking=[(), ("year",)])
+        reader = fr.Reader(self.Change, fr.Csv(), table=fr.Header(header=rule))
+        assert reader.rows(b"name,%\nx,1\n") == [self.Change("x", 1, None)]
+        assert reader.rows(b"name,%,%\nx,1,2\n") == [self.Change("x", 1, 2)]
+        with pytest.raises(
+            UnknownLayoutError, match=r"is none of the file's \[\['name', '%', '%'\], \['name', '%'\]\]"
+        ):
+            reader.rows(b"name,%,%,%\nx,1,2,3\n")
+
+    def test_an_error_shows_the_label_as_written(self) -> None:
+        with pytest.raises(ReadError, match=r"^the '%' cell 'z' is not a number: row 2$") as caught:
+            fr.Reader(self.Change, fr.Csv()).rows(b"name,%,%\nx,1,z\n")
+        assert caught.value.label == "%"
+        with pytest.raises(UnknownLayoutError, match=r"^the header \['name', '%'\] is not \['name', '%', '%'\]$"):
+            fr.Reader(self.Change, fr.Csv()).rows(b"name,%\nx,1\n")
+
+    def test_a_header_read_by_name_tells_no_two_fields_apart_by_one_label(self) -> None:
+        with pytest.raises(LayoutError, match="two fields share a label"):
+            fr.Reader(self.Change, fr.Csv(), table=fr.Header(header=fr.Named()))
+
+
+class TestHtml:
+    """HtmlFile's table as Html, each held to the 7.x reader on its tests' pages."""
+
+    _HOLDINGS = fr.Reader(_page_tests._Holding, fr.Html())
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            _page_tests._page(_page_tests._ROW, (" 2 ", "\n 04/25/2025 ", "A <b>Muni</b>\n<div>Bond</div>", "  ", "N")),
+            _page_tests._page(_page_tests._ROW).replace(b"<tbody>", b"<tbody><tr></tr>"),
+            _page_tests._page(_page_tests._ROW).replace(b"</tbody>", b"</tbody><tfoot><tr><td>total</td></tr></tfoot>"),
+        ],
+        ids=["clean", "a row of no cells", "a footer"],
+    )
+    def test_a_table_reads_as_html_file_reads_it(self, body: bytes) -> None:
+        assert self._HOLDINGS.rows(body) == _page_tests._HOLDINGS.rows(body)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            b" \n",
+            b"<p>no table</p>",
+            _page_tests._page(_page_tests._ROW, tables=2),
+            b"<table></table>",
+            _page_tests._page(header=("#", "Day")),
+            _page_tests._page(),
+            _page_tests._page(_page_tests._ROW[:4]),
+            _page_tests._page(_page_tests._ROW, header=("#", "#", "Asset Name", "Rate", "Held")),
+            _page_tests._page(("<table><tr><td>1</td></tr></table>", *_page_tests._ROW[1:])),
+            _page_tests._page(_page_tests._ROW, ("1.5", *_page_tests._ROW[1:])),
+            _page_tests._page(_page_tests._ROW, ("1<sup>2</sup>", *_page_tests._ROW[1:])),
+            _page_tests._page(_page_tests._ROW, (_page_tests._ROW[0], " ", *_page_tests._ROW[2:])),
+            _page_tests._page(_page_tests._ROW).replace(b"</table>", b""),
+        ],
+        ids=[
+            "empty",
+            "no table",
+            "two tables",
+            "no row",
+            "another header",
+            "no rows",
+            "ragged",
+            "repeated",
+            "nested",
+            "a fraction",
+            "two runs",
+            "a blank date",
+            "cut",
+        ],
+    )
+    def test_a_page_of_another_shape_raises_as_html_file_raises(self, body: bytes) -> None:
+        with pytest.raises(ReadError) as caught:
+            _page_tests._HOLDINGS.rows(body)
+        with pytest.raises(type(caught.value), match=f"^{re.escape(str(caught.value))}$"):
+            self._HOLDINGS.rows(body)
+
+    def test_a_format_narrows_its_selector(self) -> None:
+        body = _page_tests._page(_page_tests._ROW, tables=2).replace(b"<table>", b'<table class="etf">', 1)
+        assert len(fr.Reader(_page_tests._Holding, fr.Html(table="table.etf")).rows(body)) == 1
+
+    def test_a_reader_that_takes_no_rows_reads_no_table_as_none(self) -> None:
+        reader = fr.Reader(_page_tests._Holding, fr.Html(), empty=True)
+        frame = reader.frame(b"<p>none</p>")
+        assert frame.is_empty()
+        assert frame.columns == list(_page_tests._Holding.__struct_fields__)
+        assert reader.rows(_page_tests._page()) == []
+
+    def test_fields_sharing_a_cell_each_read_it_their_own_way(self) -> None:
+        files = fr.Reader(_page_tests._File, fr.Html())
+        page = _page_tests.TestAnHtmlFilesLinks()._page
+        for cell in ('<a href="/a.zip">A <b>file</b></a>', "A", '<a href="/a">A</a><a href="/b">B</a>', "<a>A</a>"):
+            try:
+                expected: object = _page_tests.TestAnHtmlFilesLinks._FILES.rows(page(cell))
+            except ReadError as e:
+                expected = str(e)
+            try:
+                got: object = files.rows(page(cell))
+            except ReadError as e:
+                got = str(e)
+            assert got == expected
+
+    def test_a_label_written_twice_is_two_fields_by_place(self) -> None:
+        head = b"<tr><th>LONG</th><th>%</th><th>SHORT</th><th>%</th></tr>"
+        body = b"<table>" + head + b"<tr><td>4</td><td>0.5</td><td>2</td><td>0.25</td></tr></table>"
+        assert fr.Reader(_page_tests._Shares, fr.Html()).rows(body) == [_page_tests._Shares(4, 0.5, 2, 0.25)]
+
+    def test_a_wide_table_reads_long_each_value_one_text_run(self) -> None:
+        class Rate(msgspec.Struct, frozen=True, gc=False):
+            day: Annotated[dt.date, Label("Date"), Format("%m/%d/%Y")]
+            fund: str
+            rate: float | None
+
+        reader = fr.Reader(Rate, fr.Html(unread_cells="value"), shape=fr.Long(keys=re.compile("[A-Z]+")))
+        page = _page_tests._page(("04/24/2025", "4.5", ""), header=("Date", "IBIT", "GBTC"))
+        assert reader.rows(page) == [Rate(dt.date(2025, 4, 24), "IBIT", 4.5), Rate(dt.date(2025, 4, 24), "GBTC", None)]
+        split = _page_tests._page(("04/24/2025", "4.<b>5</b>", ""), header=("Date", "IBIT", "GBTC"))
+        with pytest.raises(ReadError, match=r"^row 1: its 'IBIT' cell holds the text runs \['4\.', '5'\], not one$"):
+            reader.rows(split)
+        as_text = fr.Reader(Rate, fr.Html(), shape=fr.Long(keys=re.compile("[A-Z]+")))
+        assert as_text.rows(split)[0].rate == 4.5
+
+    def test_a_cell_no_field_reads_is_dropped_by_a_header_rule(self) -> None:
+        header = (*_page_tests._HEADER, "Follow")
+        rule = fr.Header(header=fr.Headers(blank=["Follow"]))
+        reader = fr.Reader(_page_tests._Holding, fr.Html(), table=rule)
+        assert reader.rows(_page_tests._page((*_page_tests._ROW, " "), header=header))[0].name == "Acme"
+        with pytest.raises(ReadError, match=r"^the 'Follow' column holds 'x', and it never holds a value: row 1$"):
+            reader.rows(_page_tests._page((*_page_tests._ROW, "x"), header=header))
+
+    def test_a_header_read_by_name_finds_a_label_s_alternative(self) -> None:
+        class Named(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label("Name", ("Asset",))]
+            rate: Annotated[float, Label("Rate")]
+
+        reader = fr.Reader(Named, fr.Html(), table=fr.Header(header=fr.Named()))
+        body = _page_tests._page(("4.5", "Acme"), header=("Rate", "Asset"))
+        assert reader.rows(body) == [Named("Acme", 4.5)]
+        with pytest.raises(ReadError, match=r"^row 1: its 'Rate' cell holds the text runs"):
+            reader.rows(_page_tests._page(("4<b>5</b>", "Acme"), header=("Rate", "Asset")))
+
+    def test_a_format_lays_out_a_table_of_its_own_by_subclassing(self) -> None:
+        class Dated(msgspec.Struct, frozen=True, gc=False):
+            day: Annotated[dt.date, Format("%m/%d/%Y")]
+            name: Annotated[str, Label("Asset Name")]
+            rate: Annotated[float, Label("Rate")]
+
+        @dataclasses.dataclass(frozen=True, kw_only=True)
+        class Titled(fr.Html):
+            @typing.override
+            def tables(self, doc: Element) -> list[Element]:
+                return [table for table in super().tables(doc) if table.css("caption")]
+
+            @typing.override
+            def rows(self, table: Element) -> fr.HtmlRows:
+                from flatread.pages import cell_text, table_cells  # noqa: PLC0415 (the helpers a format reads with)
+
+                (caption,) = table.css("caption")
+                header = ["Asset Name", "Rate"]
+                found, numbers = table_cells(table, header)
+                return fr.HtmlRows(header, found, numbers, stated={"day": cell_text(caption)})
+
+            @typing.override
+            def value(self, cell: Element, column: Column, read: fr.ReadContext) -> str:
+                text = super().value(cell, column, read)
+                if column.field == "rate" and not text.endswith("%"):
+                    msg = f"{text!r} is no percent"
+                    raise ValueError(msg)
+                return text.removesuffix("%")
+
+        reader = fr.Reader(Dated, Titled())
+        body = (
+            b"<table><tr><td>x</td></tr></table><table><caption>04/24/2025</caption>"
+            b"<tr><th>Asset</th><th>Pct</th></tr><tr><td>Acme</td><td>4.5%</td></tr></table>"
+        )
+        assert reader.rows(body) == [Dated(dt.date(2025, 4, 24), "Acme", 4.5)]
+        with pytest.raises(ReadError, match=r"^row 1: its 'Rate' cell '4\.5' is no percent$"):
+            reader.rows(body.replace(b"4.5%", b"4.5"))
+
+    def test_a_cell_read_as_no_text_names_no_label_when_it_has_none(self) -> None:
+        class Bare(msgspec.Struct, frozen=True, gc=False):
+            count: Annotated[int, Label("")]
+
+        with pytest.raises(ReadError, match=r"^row 1: its cell holds the text runs \['1', '2'\], not one$"):
+            fr.Reader(Bare, fr.Html()).rows(b"<table><tr><th></th></tr><tr><td>1<b>2</b></td></tr></table>")
+
+    def test_a_reader_declared_wrong_raises_as_one(self) -> None:
+        @dataclasses.dataclass(frozen=True, kw_only=True)
+        class Wrong(fr.Html):
+            @typing.override
+            def value(self, cell: Element, column: Column, read: fr.ReadContext) -> str:
+                msg = "declared wrong"
+                raise LayoutError(msg)
+
+        with pytest.raises(LayoutError, match=r"^declared wrong$"):
+            fr.Reader(_page_tests._Holding, Wrong()).rows(_page_tests._page(_page_tests._ROW))
+
+    def test_an_unknown_way_of_reading_a_cell_is_refused_when_built(self) -> None:
+        with pytest.raises(LayoutError, match="as text or as a value"):
+            fr.Html(unread_cells="number")  # ty: ignore[invalid-argument-type] (the refused value)
+
+
+class TestHtmlRecords:
+    """HtmlRecords' records as fr.HtmlRecords, each held to the 7.x reader on its tests' pages."""
+
+    _MEETINGS = fr.Reader(
+        _page_tests._Meeting,
+        fr.HtmlRecords(record="div.meeting", heading="h4", heading_pattern=re.compile(r"(?P<year>\d{4}) meetings")),
+    )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            _page_tests._meetings(
+                "<h4>2026 meetings</h4>",
+                _page_tests._meeting("January"),
+                "<section><h4>2025 meetings</h4>",
+                _page_tests._meeting("March"),
+                _page_tests._meeting("May"),
+                "</section>",
+            ),
+            b" ",
+            b"<h4>2026 meetings</h4>",
+            _page_tests._meetings(_page_tests._meeting("May")),
+            _page_tests._meetings("<h4>Search</h4>", _page_tests._meeting("May")),
+            _page_tests._meetings("<h4>2026 meetings</h4>", _page_tests._meeting("May"), "<h4>2025 meetings</h4>"),
+            _page_tests._meetings("<h4>2026 meetings</h4>", '<div class="meeting"></div>'),
+            _page_tests._meetings(
+                "<h4>2026 meetings</h4>",
+                '<div class="meeting"><div class="month">May</div><a href="/a">a</a><a href="/b">b</a></div>',
+            ),
+            _page_tests._meetings("<h4>2026 meetings</h4>", _page_tests._meeting("May"), "<h4>2026 meetings</h4>"),
+        ],
+        ids=[
+            "headed",
+            "empty",
+            "no record",
+            "no heading",
+            "another heading",
+            "heads none",
+            "no cell",
+            "two links",
+            "twin",
+        ],
+    )
+    def test_records_read_as_html_records_reads_them(self, body: bytes) -> None:
+        try:
+            expected: object = _page_tests._Meetings(_page_tests._Meeting).rows(body)
+        except ReadError as e:
+            expected = (type(e), str(e))
+        try:
+            got: object = self._MEETINGS.rows(body)
+        except ReadError as e:
+            got = (type(e), str(e))
+        assert got == expected
+
+    def test_a_record_reads_its_own_link(self) -> None:
+        reader = fr.Reader(
+            _page_tests._Meeting,
+            fr.HtmlRecords(record="a.meeting", heading="h4", heading_pattern=re.compile(r"(?P<year>\d{4}) meetings")),
+        )
+        body = _page_tests._meetings("<h4>2026 meetings</h4>", _page_tests._meeting("June", "/june.htm"))
+        assert reader.rows(body) == [_page_tests._Meeting(2026, "June", "/june.htm")]
+
+    def test_records_without_headings_and_an_optional_element(self) -> None:
+        class Month(msgspec.Struct, frozen=True, gc=False):
+            name: Annotated[str, Label(".month")]
+            pdf: Annotated[str | None, Label('a[href$=".pdf" i]'), Link()]
+
+        body = _page_tests._meetings(
+            _page_tests._meeting("July"),
+            '<div class="meeting"><div class="month">May</div><a href="/m.PDF">p</a></div>',
+        )
+        reader = fr.Reader(Month, fr.HtmlRecords(record="div.meeting"))
+        assert reader.rows(body) == [Month("July", None), Month("May", "/m.PDF")]
+
+    def test_a_format_leaves_records_out_and_reads_its_own_way(self) -> None:
+        from flatread.pages import cell_text  # noqa: PLC0415 (the helper a format reads with)
+
+        @dataclasses.dataclass(frozen=True, kw_only=True)
+        class NoMay(fr.HtmlRecords):
+            @typing.override
+            def is_record(self, element: Element) -> bool:
+                return cell_text(element) != "May"
+
+            @typing.override
+            def value(self, cell: Element, column: Column, read: fr.ReadContext) -> str:
+                return super().value(cell, column, read).upper()
+
+        stage = NoMay(record="div.meeting", heading="h4", heading_pattern=re.compile(r"(?P<year>\d{4}) meetings"))
+        body = _page_tests._meetings(
+            "<h4>2026 meetings</h4>", _page_tests._meeting("May"), _page_tests._meeting("June")
+        )
+        assert fr.Reader(_page_tests._Meeting, stage).rows(body) == [_page_tests._Meeting(2026, "JUNE", None)]
+
+    def test_an_optional_group_states_no_value(self) -> None:
+        class Maybe(msgspec.Struct, frozen=True, gc=False):
+            year: int | None
+            month: Annotated[str, Label(".month")]
+
+        stage = fr.HtmlRecords(
+            record="div.meeting", heading="h4", heading_pattern=re.compile(r"(?:(?P<year>\d{4}) )?meetings")
+        )
+        body = _page_tests._meetings(
+            "<h4>meetings</h4>", _page_tests._meeting("May"), "<h4>2026 meetings</h4>", _page_tests._meeting("June")
+        )
+        assert fr.Reader(Maybe, stage).rows(body) == [Maybe(None, "May"), Maybe(2026, "June")]
+
+    def test_fields_sharing_the_record_each_read_it_their_own_way(self) -> None:
+        class Anchor(msgspec.Struct, frozen=True, gc=False):
+            text: Annotated[str, Label("")]
+            link: Annotated[str, Label(""), Link()]
+
+        reader = fr.Reader(Anchor, fr.HtmlRecords(record="a"))
+        assert reader.rows(b'<a href="/x">X <b>y</b></a>') == [Anchor("Xy", "/x")]
+
+    def test_a_reader_that_takes_no_rows_reads_no_record_as_none(self) -> None:
+        stage = fr.HtmlRecords(
+            record="div.meeting", heading="h4", heading_pattern=re.compile(r"(?P<year>\d{4}) meetings")
+        )
+        reader = fr.Reader(_page_tests._Meeting, stage, empty=True)
+        assert reader.rows(b"<p>none</p>") == []
+
+    def test_a_stage_read_with_no_struct_reads_each_cell_as_its_text(self) -> None:
+        columns = {"title": Column("title", "File", str, None, None, None)}
+        body = b'<table><tr><th>File</th></tr><tr><td><a href="/a">A</a></td></tr></table>'
+        grid = fr.Html().grid(io.BytesIO(body), fr.ReadContext(body, columns=columns))
+        assert grid.text.rows() == [("A",)]

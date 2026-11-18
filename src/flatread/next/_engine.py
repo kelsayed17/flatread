@@ -22,6 +22,7 @@ from flatread.core import (
     _BOOLEANS,
     _DTYPES,
     _MOMENTS,
+    _NUL,
     Column,
     _bare,
     _check_markers,
@@ -75,7 +76,14 @@ class Engine[RowT: msgspec.Struct]:
             raise LayoutError(msg)
         self.row = row
         fields = msgspec.structs.fields(row)
-        self.columns = [_column(row, field) for field in fields]
+        # A label two fields share is two columns, by place (a header writes ``%`` twice): the later ones are named
+        # as a finder names a repeated heading's later columns, by the label, a NUL and their count.
+        seen: dict[str, int] = {}
+        self.columns = []
+        for field in fields:
+            column = _column(row, field)
+            seen[column.label] = count = seen.get(column.label, -1) + 1
+            self.columns.append(column._replace(label=f"{column.label}{_NUL}{count}") if count else column)
         if stray := set(as_written) - {column.field for column in self.columns}:
             msg = f"as_written names {sorted(stray)}, which are no fields of {row.__name__}"
             raise LayoutError(msg)
@@ -97,6 +105,8 @@ class Engine[RowT: msgspec.Struct]:
             for field in fields
             if types.NoneType not in typing.get_args(_bare(field.type)) and field.name not in self._defaults
         ]
+        #: The fields that hold a value on every row: none admits ``None`` or has a default.
+        self.required = frozenset(self._required)
         self._metas = {field.name: _metas(field.type) for field in fields}
         self.dtypes = {
             column.field: _DTYPES.get(column.scalar) or _temporal(column.scalar, column.written)
@@ -107,7 +117,7 @@ class Engine[RowT: msgspec.Struct]:
         """Return *table* typed as the row's fields, with what *read* states on every row, checked; or raise."""
         expected = [column.label for column in self.columns if column.field not in read.stated]
         if table.cells.columns != expected:
-            msg = f"the header {table.cells.columns} is not {expected}"
+            msg = f"the header {[_shown(c) for c in table.cells.columns]} is not {[_shown(c) for c in expected]}"
             raise UnknownLayoutError(msg)
         numbers = table.numbers
         # A column a format read typed (a CSV's numbers, by polars' parser) is its values.
@@ -224,12 +234,12 @@ class Engine[RowT: msgspec.Struct]:
 
     def _from_text(self, column: Column, text: pl.Series, numbers: int | pl.Series) -> pl.Series:
         """Return *column*'s values from its text cells: the rules every text format shares."""
-        return _typed(column, text, f"{column.label!r} cell", numbers)
+        return _typed(column._replace(label=_shown(column.label)), text, f"{_shown(column.label)!r} cell", numbers)
 
     def _typed(  # noqa: PLR0911 (one answer a scalar)
         self, column: Column, table: Table, cleaners: Sequence[Cleaner], numbers: pl.Series
     ) -> pl.Series:
-        if table.kinds is None:
+        if table.kinds is None or column.label in table.written:
             return self._from_cells(column, table.cells[column.label], cleaners, numbers)
         text = self._blanked(column, table.cells[column.label], cleaners)
         assert table.floats is not None  # noqa: S101 (a Cells grid has all three)
@@ -298,7 +308,7 @@ class Engine[RowT: msgspec.Struct]:
         if self._rows_required and frame.is_empty():
             msg = "the body is a header and no rows"
             raise EmptyBodyError(msg)
-        labels = {column.field: column.label for column in self.columns}
+        labels = {column.field: _shown(column.label) for column in self.columns}
         for name, dtype in frame.schema.items():
             if dtype == pl.Float64 and (found := _found(~frame[name].is_finite().fill_null(value=True), numbers)):
                 msg = f"the [{labels[name]!r}] column holds NaN or an infinity, which is no number here: row {found[1]}"
@@ -332,6 +342,11 @@ class Engine[RowT: msgspec.Struct]:
         return frame
 
 
+def _shown(label: str) -> str:
+    """Return the label a column is shown by: a repeated label's later column's name, without its NUL and count."""
+    return label.partition(_NUL)[0]
+
+
 def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Column:
     """Return *field*'s column: its label (its own name, where it names no ``Label``), type and markers."""
     metadata = _metadata(field.type)
@@ -340,9 +355,6 @@ def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Colu
             msg = f"the field {row.__name__}.{field.name} is a {marker.__name__}'s, which flatread.next lacks"
             raise LayoutError(msg)
     named = _marker(metadata, Label)
-    if named is not None and named.alternatives:
-        msg = f"the field {row.__name__}.{field.name} names Label alternatives, which flatread.next lacks"
-        raise LayoutError(msg)
     try:
         scalar = _scalar_type(field.type)
     except LayoutError as e:
@@ -361,6 +373,7 @@ def _column(row: type[msgspec.Struct], field: msgspec.structs.FieldInfo) -> Colu
         written,
         _marker(metadata, Flag),
         None,
+        aliases=() if named is None else tuple(named.alternatives),
         shape=_marker(metadata, Shape),
         literal=_literal(field.type),
     )
@@ -392,16 +405,16 @@ def _refuse(wrong: pl.Series, text: pl.Series, column: Column, what: str, number
     """Raise ``ReadError`` naming the first cell of *text* where *wrong* holds, which is not *what*."""
     if (found := _found(wrong.fill_null(value=False), numbers)) is not None:
         place, row = found
-        msg = f"the {column.label!r} cell {text[place]!r} is not a {what}: row {row}"
-        raise ReadError(msg, row=row, label=column.label)
+        msg = f"the {_shown(column.label)!r} cell {text[place]!r} is not a {what}: row {row}"
+        raise ReadError(msg, row=row, label=_shown(column.label))
 
 
 def _refuse_values(values: pl.Series, wrong: pl.Series, column: Column, what: str, numbers: pl.Series) -> None:
     """Raise ``ReadError`` naming the first value where *wrong* holds, which is not *what*, by its row."""
     if (found := _found(wrong.fill_null(value=False), numbers)) is not None:
         place, row = found
-        msg = f"the {column.label!r} cell {values[place]!r} is not {what}: row {row}"
-        raise ReadError(msg, row=row, label=column.label)
+        msg = f"the {_shown(column.label)!r} cell {values[place]!r} is not {what}: row {row}"
+        raise ReadError(msg, row=row, label=_shown(column.label))
 
 
 #: Each msgspec ``Meta`` bound, the polars test a value passes, and how a failure reads.

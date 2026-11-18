@@ -16,7 +16,7 @@ import contextlib
 import dataclasses
 import re
 import typing
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 import polars as pl
 
@@ -31,6 +31,7 @@ __all__ = [
     "Cleaner",
     "Format",
     "Grid",
+    "HeaderRule",
     "Kind",
     "Lines",
     "ReadContext",
@@ -136,7 +137,8 @@ class Table:
     """A file's table: its cells' text under its header's labels, each row's number, and its cells' kinds if known.
 
     *kinds*, *floats* and *moments* are a :class:`Cells` grid's, their columns named as *cells*' are: ``None`` for a
-    table of text alone.
+    table of text alone. *written* are the labels of columns a stage wrote as text in a table of kinds (a long table's
+    keys, from its header), typed by the rules for text, whatever their kinds.
     """
 
     cells: pl.DataFrame
@@ -144,6 +146,7 @@ class Table:
     kinds: pl.DataFrame | None = None
     floats: pl.DataFrame | None = None
     moments: pl.DataFrame | None = None
+    written: frozenset[str] = frozenset()
 
     def frames(self) -> list[pl.DataFrame | None]:
         """Return the table's frames, all of one shape: its text, kinds, floats and moments."""
@@ -153,7 +156,7 @@ class Table:
         """Return a table of *frames*, as :meth:`frames` orders them, and *numbers*."""
         cells, kinds, floats, moments = frames
         assert cells is not None  # noqa: S101 (a table always has its text)
-        return Table(cells, numbers, kinds, floats, moments)
+        return Table(cells, numbers, kinds, floats, moments, self.written & set(cells.columns))
 
 
 @dataclasses.dataclass
@@ -164,7 +167,10 @@ class ReadContext:
     *stated* holds the text of the fields a stage reads once for every row (a trailer's stamp), by field; *matches* the
     regex matches a stage found (``matches["trailer"]``); *member* the name of the zip member opened, if one was.
     *columns* are the row struct's columns, by field, and *row* the struct: a format with no header (a document's
-    records, an SDMX message's attributes) lays its cells out by them.
+    records, an SDMX message's attributes) lays its cells out by them. *required* are the fields that hold a value on
+    every row (none admits ``None`` or has a default), whose column every header names; *null_values* the reader's words
+    for no value, which a stage that tells an empty cell (a grid's cut) reads as one; *empty* whether a table of no
+    rows is an answer, as the reader was built.
     """
 
     body: bytes
@@ -173,6 +179,9 @@ class ReadContext:
     member: str | None = None
     columns: Mapping[str, Column] = dataclasses.field(default_factory=dict)
     row: type | None = None
+    required: frozenset[str] = frozenset()
+    null_values: frozenset[str] = frozenset()
+    empty: bool = False
 
 
 class Source(typing.Protocol):
@@ -216,6 +225,24 @@ class TableFinder(typing.Protocol):
 
     def find(self, grid: Grid, read: ReadContext) -> Table:
         """Return the table in *grid*, noting what it states on *read*, or raise ``ReadError``."""
+        ...
+
+
+class HeaderRule(typing.Protocol):
+    """How a header's labels name the struct's columns: which headers a file is published under, what they drop.
+
+    A table finder finds the header row and hands its table here, each column under its header cell (a repeated
+    cell's later columns apart, by a NUL and their count); the rule returns it under the struct's labels, in the
+    struct's order, a column the header lacks null, or raises ``UnknownLayoutError`` for a header it is not. A rule
+    (or a finder) that finds a column by its label sets ``by_name`` true, so a ``Label`` may name alternatives.
+    """
+
+    def check(self, columns: Sequence[Column], required: Collection[str]) -> None:
+        """Raise ``LayoutError`` if the rule could never read the struct of *columns*, *required* its fields'."""
+        ...
+
+    def match(self, table: Table, read: ReadContext) -> Table:
+        """Return *table* under the struct's labels, in order, a column its header lacks null; or raise."""
         ...
 
 

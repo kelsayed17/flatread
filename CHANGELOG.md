@@ -28,6 +28,58 @@ at or past 2\*\*53, and a workbook whose zip lists a name twice is refused. New:
 
 Also in 0.5.0:
 
+- `flatread.next` reads a header that is not the struct's labels in order: every table finder (`Header`, `Preamble`,
+  `Titled`, `Trailer`) takes a `header=` rule. `Headers(lacking=...)` reads a file published under several headers,
+  each the struct's labels in order with some left out, as `HeadersCsv` does; `Named(...)` one whose header names its
+  columns in any order, as `NamedCsv` does, with `Label` alternatives, a `heading` that folds each cell, and fields
+  `required` in every header. Both drop `unread` columns and check that `blank` ones hold nothing, which next lacked.
+  A format whose headers follow a rule of their own implements `HeaderRule`.
+- `flatread.next` cuts a table from an irregular grid, as `CsvText`, `SheetText` and `GridFile`'s pieces do:
+  `Cut(header_row=..., above=..., title=..., filled=..., ends="blank", band=..., full_rows=...)`, one finder for a CSV
+  and a sheet, which keeps a sheet's cell kinds. `Csv(misquoted=True)` reads a stray quote as text, as `CsvText`'s
+  `_misquoted` does, and `Long` reads the record columns of a header over several rows by their last line.
+- `flatread.next`'s `Long` takes `LongFile`'s switches: `key_count` (a header naming several keys, each from its
+  group), `spacers`, `scattered` and `beside` record columns, `repeats` and `needs_rows`. A sheet's key is its header
+  text typed as the key field, as `LongFile` types it; next refused an `int` key on a sheet before.
+- `flatread.next` finds an export's header by its key field's words, as `FoundTable` (`FoundCsv`, `FoundSheet`) does:
+  `Found(key=..., heading=..., open=..., section=..., section_field=..., numbered_rows=...)`. A finder or header rule
+  that reads by name sets `by_name`, and only then may a `Label` name alternatives.
+- `flatread.next` reads a report laid out for a page, as `ReportFile` and `KeyedReport` do: the `Text` format reads a
+  file of lines, the `Report` finder its rows among header and framing lines (a format checks more by subclassing it
+  and overriding `check`), and the `Keyed` shape a report's runs of values long, a row per key.
+- `flatread.next` reads a label two fields share by place, as 7.x does (a header that writes `%` twice); a header
+  read by name refuses one, which it cannot tell apart.
+- `flatread.next` reads HTML pages, as `HtmlFile` and `HtmlRecords` do: the `Html` format reads a page's one table
+  (`table=` its selector), and `HtmlRecords` records that are elements (`record=`, under `heading=` headings matching
+  `heading_pattern`). Each cell is read by its field: a `Link` field's as its link's `href`, a field that is no text's
+  as one text run, and fields sharing a cell each their own way. A format of its own subclasses either, overriding
+  `tables`, `rows` (returning `HtmlRows`), `records`, `is_record` or `value`. A header cell no field reads is text,
+  for a header rule to drop, or, with `unread_cells="value"`, one text run, for `Long` to type.
+
+## 0.5.0
+
+Numbering restarts at 0.5.0. Releases 1.0.0 through 7.2.0 came out within one week while the API was still being
+found, so their numbers record that search, not stability. flatread stays at 0.x until its API holds still, and any
+0.x minor may change it. A version resolver orders 7.2.0 above 0.5.0, so pin a tag (`@v0.5.0`), not a range.
+The tags v1.0.0 through v7.2.0 stay as they are.
+
+The `flatread` readers read every file as 7.2.0 does but two, each below: a sheet's `int` field refuses a number cell
+at or past 2\*\*53, and a workbook whose zip lists a name twice is refused. New:
+
+- `flatread.next`, a preview: a reader is `Reader(Row, format, table=..., shape=..., cells=[...], source=...)`, a
+  pipeline of frozen stage values instead of a class per quirk (README, "flatread.next (preview)"). Its formats are
+  `Csv`, `Sheet`, `Layout` (fixed width), `Pdf` and `Sdmx`, and its stages are `Header`, `Titled`, `Trailer`, `Long`,
+  `Observations`, `Derived`, `Padded` and `Zip`. One engine types every format's cells, and a reader checks msgspec
+  `Meta` constraints itself.
+- `flatread.next` numbers a row as its file does (a text file's line, a sheet's row), not from the first data row.
+- Its fast paths: a CSV whose fields are all plain text, numbers or booleans is typed by polars directly, its rows
+  counted by one regex over the body and checked against what polars read; a sheet of such fields loads once. Either
+  path gives way to the general one on anything it cannot vouch for, so both read every body the general path does.
+- A whole number past 64 bits in an int field is refused as a `ReadError`, where the general path raised polars'
+  `InvalidOperationError`.
+
+Also in 0.5.0:
+
 - **A sheet's number cell in an `int` field must hold a whole number below 2\*\*53**, and one at or past it raises
   `ReadError`. A number cell is a double, so `9007199254740993` written in a workbook loaded as `9007199254740992`
   and read with no error; 7.2.0 read every whole double up to 2\*\*63. Excel holds 15 digits, so no workbook

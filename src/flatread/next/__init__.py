@@ -2,17 +2,20 @@
 
 ``Reader(Row, Csv(separator="|"), table=Trailer(...), shape=Long(...), cells=[Padded()], source=Zip(...))``: each
 stage is one frozen value with one job, configured by keyword, and a stage of a format's own is a class implementing
-its protocol (:class:`Source`, :class:`Format`, :class:`TableFinder`, :class:`Shape`, :class:`Cleaner`,
-:class:`Records`), handed the read's :class:`ReadContext`. One :class:`Engine` types every format's table. Not yet
-stable: this module's names may change in any 0.x release.
+its protocol (:class:`Source`, :class:`Format`, :class:`TableFinder`, :class:`HeaderRule`, :class:`Shape`,
+:class:`Cleaner`, :class:`Records`), handed the read's :class:`ReadContext`. One :class:`Engine` types every format's
+table. A finder's header rule reads a header that is not the struct's labels in order (``Header(header=Named())``).
+Not yet stable: this module's names may change in any 0.x release.
 """
 
 from flatread.next._engine import AsWritten, Engine
+from flatread.next._headers import Headers, Named
 from flatread.next._model import (
     Cells,
     Cleaner,
     Format,
     Grid,
+    HeaderRule,
     Kind,
     Lines,
     ReadContext,
@@ -23,10 +26,14 @@ from flatread.next._model import (
     Table,
     TableFinder,
 )
+from flatread.next._pages import Html, HtmlRecords, HtmlRows
 from flatread.next._reader import Reader
+from flatread.next._reports import Keyed, Report, Text
 from flatread.next._stages import (
     Csv,
+    Cut,
     Derived,
+    Found,
     Header,
     Layout,
     Long,
@@ -48,15 +55,24 @@ __all__ = [
     "Cells",
     "Cleaner",
     "Csv",
+    "Cut",
     "Derived",
     "Engine",
     "Format",
+    "Found",
     "Grid",
     "Header",
+    "HeaderRule",
+    "Headers",
+    "Html",
+    "HtmlRecords",
+    "HtmlRows",
+    "Keyed",
     "Kind",
     "Layout",
     "Lines",
     "Long",
+    "Named",
     "Observations",
     "Padded",
     "Pdf",
@@ -64,6 +80,7 @@ __all__ = [
     "ReadContext",
     "Reader",
     "Records",
+    "Report",
     "Sdmx",
     "Shape",
     "Sheet",
@@ -71,6 +88,7 @@ __all__ = [
     "Stream",
     "Table",
     "TableFinder",
+    "Text",
     "Thousands",
     "Titled",
     "Trailer",
