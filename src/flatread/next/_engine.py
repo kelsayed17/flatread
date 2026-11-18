@@ -56,6 +56,9 @@ class AsWritten:
 
 #: A bare date field's format: ISO 8601's, exactly.
 _ISO_DATE: typing.Final = Format("%Y-%m-%d")
+#: A number written as text, as a sheet of ``text_numbers`` writes one: an int's, and a float's (7.x's patterns).
+_WHOLE_TEXT: typing.Final = r"^-?[0-9]+$"
+_DECIMAL_TEXT: typing.Final = r"^-?(?:[0-9]+\.?[0-9]*|\.[0-9]+)$"
 
 
 class Engine[RowT: msgspec.Struct]:
@@ -78,6 +81,7 @@ class Engine[RowT: msgspec.Struct]:
         rows_required: bool = True,
         exact: bool = False,
         moments: bool = False,
+        text_numbers: bool = False,
     ) -> None:
         if keyword := [p.name for p in inspect.signature(row).parameters.values() if p.kind is p.KEYWORD_ONLY]:
             msg = f"the fields {keyword} of {row.__name__} are keyword-only, and a reader builds its rows by position"
@@ -101,6 +105,7 @@ class Engine[RowT: msgspec.Struct]:
         self._as_written = frozenset(as_written)
         self._rows_required = rows_required
         self._exact = exact
+        self._text_numbers = text_numbers
         self._numbers_as_text = frozenset(
             field.name for field in fields if any(isinstance(meta, AsWritten) for meta in _metadata(field.type))
         )
@@ -271,7 +276,7 @@ class Engine[RowT: msgspec.Struct]:
             _refuse(under, text, column, "number a float holds: it underflows to 0.0", numbers)
         return values
 
-    def _typed(  # noqa: PLR0911 (one answer a scalar)
+    def _typed(
         self, column: Column, table: Table, cleaners: Sequence[Cleaner], numbers: pl.Series
     ) -> pl.Series:
         if table.kinds is None or column.label in table.written:
@@ -288,25 +293,7 @@ class Engine[RowT: msgspec.Struct]:
             _refuse(text.is_not_null() & ~is_text, text, column, "text cell: mark the field AsWritten()", numbers)
             return text.alias(column.field)
         if column.scalar in (int, float):
-            _refuse(
-                text.is_not_null() & (kinds != "number").fill_null(value=False), text, column, "number cell", numbers
-            )
-            # A number cell that is one of the file's words for none (a stored NaN, written ``NaN``) holds none.
-            floats = pl.select(pl.when(text.is_not_null()).then(floats)).to_series().alias(floats.name)
-            if column.scalar is int:
-                _refuse(floats != floats.floor(), text, column, "whole number", numbers)
-                _refuse(
-                    ~floats.is_between(*_INT_RANGE, closed="left"), text, column, "whole number of 64 bits", numbers
-                )
-                _refuse(
-                    floats.abs() >= _EXACT_INT,
-                    text,
-                    column,
-                    "whole number a number cell holds exactly (below 2**53)",
-                    numbers,
-                )
-                return floats.cast(pl.Int64, strict=True).alias(column.field)
-            return floats.alias(column.field)
+            return self._number(column, text, kinds, floats, numbers)
         if column.scalar is bool:
             stored = (kinds == "bool").fill_null(value=False)
             _refuse(text.is_not_null() & ~stored & ~is_text, text, column, "boolean or text cell", numbers)
@@ -339,6 +326,41 @@ class Engine[RowT: msgspec.Struct]:
             else moments
         )
         return parsed.zip_with(~stored, native.cast(dtype)).alias(column.field)
+
+    def _number(
+        self, column: Column, text: pl.Series, kinds: pl.Series, floats: pl.Series, numbers: pl.Series
+    ) -> pl.Series:
+        """Return a number field's values from a sheet's cells: its number cells, and its text ones if it writes them.
+
+        A number cell that is one of the file's words for none (a stored NaN, written ``NaN``) holds none. Where the
+        format reads numbers written as text (``Sheet(text_numbers=True)``), a text cell is its text's number, strictly:
+        an int's is digits after an optional ``-``, of 64 bits, read digit for digit; a float's a decimal (``-1.03``,
+        ``.5``; no exponent, ``nan`` or ``inf``).
+        """
+        stored = (kinds == "number").fill_null(value=False)
+        written = text.is_not_null() & ~stored & (kinds.is_null() | (kinds == "text")) if self._text_numbers else None
+        other = text.is_not_null() & ~stored if written is None else text.is_not_null() & ~stored & ~written
+        _refuse(other, text, column, "number cell", numbers)
+        floats = pl.select(pl.when(text.is_not_null() & stored).then(floats)).to_series().alias(floats.name)
+        whole = column.scalar is int
+        if written is not None:
+            pattern = _WHOLE_TEXT if whole else _DECIMAL_TEXT
+            _refuse(written & ~text.str.contains(pattern), text, column, "whole number" if whole else "number", numbers)
+        if not whole:
+            if written is None:
+                return floats.alias(column.field)
+            return floats.fill_null(text.cast(pl.Float64, strict=False)).alias(column.field)
+        _refuse(floats != floats.floor(), text, column, "whole number", numbers)
+        _refuse(~floats.is_between(*_INT_RANGE, closed="left"), text, column, "whole number of 64 bits", numbers)
+        _refuse(
+            floats.abs() >= _EXACT_INT, text, column, "whole number a number cell holds exactly (below 2**53)", numbers
+        )
+        values = floats.cast(pl.Int64, strict=True)
+        if written is None:
+            return values.alias(column.field)
+        digits = pl.select(pl.when(written).then(text.cast(pl.Int64, strict=False))).to_series()
+        _refuse(written & digits.is_null(), text, column, "whole number of 64 bits", numbers)
+        return values.fill_null(digits).alias(column.field)
 
     # --- checks ---
 

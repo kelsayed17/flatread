@@ -27,6 +27,11 @@ A sheet's number cell is read as 7.x reads it in two more places: under a date f
 digits are text in that format (`198803` for `%Y%m`), and one that is a word for none (a stored `NaN` under
 `null_values=["NaN"]`) holds none, where both were refused.
 
+`Sheet(text_numbers=True)` reads a sheet that writes its numbers as text as well as in number cells, as 7.x's
+`TextNumbersSheet` does: a number field's text cell is its text's number, strictly (an int's digits after an optional
+`-`, of 64 bits, digit for digit; a float's a plain decimal, no exponent, `nan` or `inf`), and any other text refused,
+naming it. With `cells=[Padded()]` it reads what 7.x's `PaddedSheet` and `TextNumbersSheet` read together.
+
 In the `flatread` readers: `TitledCsv` refuses a blank line below its titles, where polars skipped it before the header.
 In both, a body of CRLF lines that ends in a CR alone raises `TruncatedFileError`: it was cut between the CR and the
 LF, and `final_line_ending=True` took the CR for a whole line ending.

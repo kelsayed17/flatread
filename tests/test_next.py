@@ -461,6 +461,46 @@ def test_a_sheet_s_number_cell_that_is_a_word_for_none_holds_none() -> None:
     assert fr.Reader(Surprise, fr.Sheet(), null_values=["NaN"]).rows(xlsx) == [Surprise(0.5), Surprise(None)]
 
 
+class _Charted(msgspec.Struct, frozen=True):
+    month: str
+    rate: float | None
+    count: int | None
+
+
+@pytest.mark.parametrize(
+    ("cell", "words"),
+    [
+        ("1e3", "'rate' cell '1e3' is not a number"),
+        ("nan", "'rate' cell 'nan' is not a number"),
+        ("+5", "'rate' cell '\\+5' is not a number"),
+        (True, "'rate' cell 'true' is not a number cell"),
+    ],
+)
+def test_a_sheet_of_text_numbers_reads_a_text_cell_as_its_number_strictly(cell: Cell, words: str) -> None:
+    reader = fr.Reader(_Charted, fr.Sheet(text_numbers=True), cells=[fr.Padded()], null_values=["NA"])
+    body = workbook(
+        {
+            "S": [
+                ["month", "rate", "count"],
+                [" 1988m1", " 1.03", "9007199254740993"],
+                ["1988m2", 0.6, 7],
+                ["1988m3", "  NA", None],
+            ]
+        }
+    )
+    assert reader.rows(body) == [
+        _Charted("1988m1", 1.03, 9007199254740993),
+        _Charted("1988m2", 0.6, 7),
+        _Charted("1988m3", None, None),
+    ]
+    with pytest.raises(ReadError, match=f"{words}: row 2"):
+        reader.frame(workbook({"S": [["month", "rate", "count"], ["1988m1", cell, 1]]}))
+    with pytest.raises(ReadError, match=r"'count' cell '1\.5' is not a whole number: row 2"):
+        reader.frame(workbook({"S": [["month", "rate", "count"], ["1988m1", 1.0, "1.5"]]}))
+    with pytest.raises(ReadError, match=r"'rate' cell '1\.03' is not a number cell: row 2"):  # not without text_numbers
+        fr.Reader(_Charted, fr.Sheet()).frame(workbook({"S": [["month", "rate", "count"], ["1988m1", "1.03", 1]]}))
+
+
 def test_a_sheet_s_header_runs_to_its_last_filled_cell() -> None:
     with pytest.raises(EmptyBodyError):
         _SECURITIES.frame(workbook({"S": [["cusip", "shares", "held", "since"]]}))

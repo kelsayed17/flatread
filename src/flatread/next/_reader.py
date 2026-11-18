@@ -59,6 +59,7 @@ class Reader[RowT: msgspec.Struct]:
             rows_required=not self.empty,
             exact=getattr(format, "exact", False),
             moments=getattr(format, "moments", False),
+            text_numbers=getattr(format, "text_numbers", False),
         )
         self._null_values = list(null_values)
         header = getattr(

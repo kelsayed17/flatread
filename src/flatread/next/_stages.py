@@ -614,6 +614,9 @@ class Sheet:
     #: A sheet stores date cells, so a date-and-time or time field may name no ``Format``: it reads them alone.
     moments: typing.ClassVar[bool] = True
     sheet: str | None = None
+    #: Whether the sheet writes numbers as text too (``' 1.03'`` beside ``0.60``): a number field's text cell is then
+    #: read as its text's number, strictly (7.x's ``TextNumbersSheet``; with ``cells=[Padded()]``, its ``PaddedSheet``).
+    text_numbers: bool = False
 
     def typed(self, body: bytes, dtypes: Mapping[str, type[pl.DataType]], null_values: Sequence[str]) -> Table | None:  # noqa: PLR0911 (a None for each doubt)
         """Return the table of a sheet that is its header of *dtypes*' labels and full rows, read typed in one load.
