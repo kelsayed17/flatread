@@ -213,6 +213,8 @@ _PDF = pdf(*map(_page, range(5)))
 
 # flatread.next, the 8.0 prototype, reading the same bodies into the same structs: its cost beside 7.x's.
 NEXT_HPI = fr.Reader(Hpi, fr.Csv(), null_values=["."])
+# misquoted reads every body with Csv._whole, the pure-Python csv fallback, which is most of the read's cost.
+NEXT_HPI_MISQUOTED = fr.Reader(Hpi, fr.Csv(misquoted=True), null_values=["."])
 NEXT_TENORS = fr.Reader(Tenor, fr.Csv(), shape=fr.Long(keys=re.compile(r"Y\d{2}")))
 NEXT_RATES = fr.Reader(Rate, fr.Sheet(sheet="S"))
 NEXT_RATES_WITH_TOKENS = fr.Reader(Rate, fr.Sheet(sheet="S"), null_values=["."])
@@ -242,6 +244,14 @@ class _NextTrades:
 
 NEXT_TRADES = fr.Reader(Trade, fr.Pdf(_NextTrades(), layout=fr.Layout(row_gap=14.0)))
 
+_CSV_TEXT = _CSV.decode()
+
+
+def next_whole(body: bytes) -> fr.Lines:
+    """Csv._whole's parse=True fallback alone, on text decoded at import: a private-path micro-benchmark."""
+    return fr.Csv()._whole(_CSV_TEXT, body)  # noqa: SLF001
+
+
 CASES: dict[str, tuple[Callable[[bytes], object], bytes]] = {
     "csv": (HPI.frame, _CSV),
     "csv_quoted": (HPI.frame, _QUOTED),
@@ -262,6 +272,9 @@ CASES: dict[str, tuple[Callable[[bytes], object], bytes]] = {
     "next_zip_csv": (NEXT_ZIPPED_HPI.frame, _ZIPPED),
     "next_sdmx": (NEXT_OBSERVATIONS.frame, _SDMX),
     "next_pdf": (NEXT_TRADES.frame, _PDF),
+    "next_csv_misquoted": (NEXT_HPI_MISQUOTED.frame, _CSV),
+    "next_csv_quoted_misquoted": (NEXT_HPI_MISQUOTED.frame, _QUOTED),
+    "next_csv_whole": (next_whole, _CSV),
 }
 
 
